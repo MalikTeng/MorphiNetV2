@@ -28,8 +28,7 @@ def config():
     # data parameters
     parser.add_argument("--test_on", type=str, default="sct", help="the dataset for validation, can be 'cap' or 'sct'")
     parser.add_argument("--control_mesh_dir", type=str,
-                        default="/home/yd21/Documents/Nasreddin/template/control_mesh-cap_myo.obj",
-                        # default="/home/yd21/Documents/Nasreddin/template/control_mesh-sct_myo.obj",
+                        default="/home/yd21/Documents/Nasreddin/template/control_mesh-lv.obj",
                         help="the path to your initial meshes")
 
     parser.add_argument("--ct_json_dir", type=str,
@@ -56,9 +55,9 @@ def config():
     parser.add_argument("--pre_trained_mr_module_dir", type=str, default=None, help="the path to the pretrained subdiv module")
 
     # training parameters
-    parser.add_argument("--max_epochs", type=int, default=10, help="the maximum number of epochs for training")
-    parser.add_argument("--delay_epochs", type=int, default=5, help="the number of epochs for pre-training")
-    parser.add_argument("--val_interval", type=int, default=1, help="the interval of validation")
+    parser.add_argument("--max_epochs", type=int, default=50, help="the maximum number of epochs for training")
+    parser.add_argument("--delay_epochs", type=int, default=20, help="the number of epochs fine-tuning and validation been on hold")
+    parser.add_argument("--val_interval", type=int, default=5, help="the interval of validation")
 
     parser.add_argument("--batch_size", type=int, default=16, help="the batch size for training")
     parser.add_argument("--lr", type=float, default=1e-3, help="the learning rate for training")
@@ -66,17 +65,16 @@ def config():
     parser.add_argument("--crop_window_size", type=int, nargs='+', default=[128, 128, 128], help="the size of the crop window for training")
     parser.add_argument("--pixdim", type=float, nargs='+', default=[8, 8, 8], help="the pixel dimension of downsampled images")
     parser.add_argument("--point_limit", type=int, default=10_000, help="the number limits of sampling points during deformation")
-    parser.add_argument("--lambda_", type=float, nargs='+', default=[1.0, 0.1, 0.1], help="the coefficients of chamfer distance, normal consistence, and laplacian smooth loss")
+    parser.add_argument("--lambda_", type=float, nargs='+', default=[50.0, 1.0, 1.0], help="the coefficients of chamfer distance, normal consistence, and laplacian smooth loss")
 
     # structure parameters for sdf predict module
     parser.add_argument("--num_classes", type=int, default=4, help="the number of segmentation classes of foreground exclude background")
-    parser.add_argument("--init_filters", type=int, default=8, help="the number of initial filters for the modality handel")
+    parser.add_argument("--init_filters", type=int, default=16, help="the number of initial filters for the modality handel")
     parser.add_argument("--num_init_blocks", type=int, nargs='+', default=(1, 2, 2, 4), help="the number of residual blocks for the modality handel")
-    parser.add_argument("--hidden_features_sdf", type=int, default=256, help="the number of hidden features for the SDFNet decoder")
 
     # structure parameters for subdiv module
-    parser.add_argument("--subdiv_levels", type=int, default=2, help="the number of subdivision levels for the mesh")
-    parser.add_argument("--hidden_features_gsn", type=int, default=256, help="the number of hidden features for the GSNNet decoder")
+    parser.add_argument("--subdiv_levels", type=int, default=3, help="the number of subdivision levels for the mesh")
+    parser.add_argument("--hidden_features_gsn", type=int, default=32, help="the number of hidden features for the GSNNet decoder")
 
     # run_id for wandb, will create automatically if not specified for training
     parser.add_argument("--run_id", type=str, default=None, help="the run name for wandb and local machine")
@@ -91,37 +89,42 @@ def config():
 def train():
     # initialize the training pipeline
     run_id = f"{time.strftime('%Y-%m-%d-%H%M', time.localtime(time.time()))}"
-    super_params.run_id = run_id
-    wandb.init(project="Nasreddin_Stationary", name=run_id, config=super_params, mode="disabled")
+    super_params.run_id = f"{super_params.test_on}--" + \
+        f"{os.path.basename(super_params.control_mesh_dir).split('-')[-1][:-4]}-{run_id}"
+    wandb.init(project="Nasreddin_Stationary", name=super_params.run_id, config=super_params, mode="offline")
     pipeline = TrainPipeline(
         super_params=super_params,
-        seed=2077, num_workers=0,
+        seed=8, num_workers=0,
     )
 
     # train the network
-    for epoch in range(super_params.max_epochs):
-        torch.cuda.empty_cache()
-        # 1. train the SDF Module
-        if (super_params.pre_trained_sdf_module_dir is None and super_params.pre_trained_mr_module_dir is None) \
-        and epoch < super_params.delay_epochs:
+    if super_params.test_on == "cap":
+        for epoch in range(super_params.max_epochs):
+            torch.cuda.empty_cache()
+            if epoch < super_params.delay_epochs:
+                # 1. train the SDF Module
+                pipeline.train_iter(epoch, "sdf_predict")
+                # 2. train the GSN Module
+                pipeline.train_iter(epoch, "subdiv")
+            elif epoch == super_params.delay_epochs:
+                for name, param in pipeline.sdf_module.encoder_.named_parameters():
+                    param.data = pipeline.pretext_mr.state_dict()[name].data
+            else:
+                # 3. fine-tune the GSN Module
+                pipeline.fine_tune(epoch)
+                # 4. validate the pipeline
+                if (epoch - super_params.delay_epochs) % super_params.val_interval == 0:
+                    pipeline.valid(epoch, super_params.test_on)
+    else:
+        for epoch in range(super_params.max_epochs):
+            torch.cuda.empty_cache()
+            # 1. train the SDF Module
             pipeline.train_iter(epoch, "sdf_predict")
-            torch.cuda.empty_cache()
-            continue
-
-        # 2. train the GSN Module
-        # pipeline.lr_scheduler_sdf._reset()
-        pipeline.train_iter(epoch, "subdiv")
-        torch.cuda.empty_cache()
-
-        # 3. fine-tune the GSN Module if validation is on CAP # TODO: add delay_epochs for fine-tuning
-        if super_params.test_on == "cap":
-            # pipeline.lr_scheduler_gsn._reset()
-            pipeline.fine_tune(epoch)
-            torch.cuda.empty_cache()
-
-        # 4. validate the network
-        if (epoch - super_params.delay_epochs) % super_params.val_interval == 0:
-            pipeline.valid(epoch, super_params.test_on)
+            # 2. train the GSN Module
+            pipeline.train_iter(epoch, "subdiv")
+            # 3. validate the network
+            if (epoch - super_params.delay_epochs) % super_params.val_interval == 0:
+                pipeline.valid(epoch, super_params.test_on)
 
     wandb.finish()
 
@@ -158,9 +161,7 @@ if __name__ == '__main__':
     super_params = config()
 
     if super_params.mode == "train":
-        # Start training
         train()
     else:
-        # Start test
         pass
         # test(run_id="2023-08-22-1916", best_epoch=26)  # default control of run_id and best_epoch

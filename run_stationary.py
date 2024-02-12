@@ -14,7 +14,7 @@ from pytorch3d.structures import Meshes
 from pytorch3d.ops.marching_cubes import marching_cubes
 from monai.data import DataLoader, decollate_batch
 from monai.losses import DiceCELoss
-from monai.metrics import compute_hausdorff_distance, DiceMetric, MSEMetric
+from monai.metrics import compute_hausdorff_distance, MeanIoU, DiceMetric, MSEMetric
 from monai.transforms import (
     Compose, 
     SpatialPad,
@@ -27,8 +27,8 @@ from monai.utils import set_determinism
 from midvoxio.voxio import vox_to_arr
 import wandb
 
-from trimesh.base import Trimesh
-from trimesh.smoothing import filter_laplacian
+import plotly.io as pio
+import plotly.graph_objects as go
 
 from data import *
 from utils import *
@@ -162,7 +162,7 @@ class TrainPipeline:
 
     def _prepare_dataset(self, data_json, modal, train_transform, valid_transform):
         # WARNING: must remove the array slice for training !!!
-        train_data = self._remap_abs_path(data_json["train_fold0"], modal)[:1]
+        train_data = self._remap_abs_path(data_json["train_fold0"], modal)[:5]
         valid_data = self._remap_abs_path(data_json["validation_fold0"], modal)[:5]
         test_data = self._remap_abs_path(data_json["test"], modal)[:5]
 
@@ -201,23 +201,24 @@ class TrainPipeline:
 
     def _prepare_modules(self):
         # initialise the sdf module
-        self.pretext_mr = ResNet(
+        self.pretext_mr = ResEncoder(
             in_channels=1, out_channels=self.super_params.num_classes + 1,  # include background
             init_filters=self.super_params.init_filters,
             act='relu', norm='batch',
             num_init_blocks=self.super_params.num_init_blocks
         ).to(DEVICE)
         self.sdf_module = SDFNet(
-            encoder=ResNet(
+            encoder=ResEncoder(
                 in_channels=1, out_channels=self.super_params.num_classes + 1,
                 init_filters=self.super_params.init_filters,
                 act='relu', norm='batch',
                 num_init_blocks=self.super_params.num_init_blocks
             ),
-            num_classes=self.super_params.num_classes,
-            hidden_features=self.super_params.hidden_features_sdf,
-            down_sampled_size=[i // j for i, j in zip(self.super_params.crop_window_size, self.super_params.pixdim)],
-            ).to(DEVICE)
+            decoder=ResDecoder(
+                in_channels=self.super_params.init_filters * 2 ** (len(self.super_params.num_init_blocks) - 1), 
+                out_channels=self.super_params.num_classes-1,
+                act='relu', norm='batch',
+            )).to(DEVICE)
         if self.super_params.pre_trained_mr_module_dir is not None and self.super_params.pre_trained_sdf_module_dir is not None:
             self.pretext_mr.load_state_dict(torch.load(self.super_params.pre_trained_mr_module_dir))
             self.sdf_module.load_state_dict(torch.load(self.super_params.pre_trained_sdf_module_dir))
@@ -234,10 +235,10 @@ class TrainPipeline:
 
     def _prepare_optimiser(self):
         self.loss_fn_seg = DiceCELoss(
-            include_background=False,
+            include_background=True,
             to_onehot_y=True,
             softmax=True,
-            squared_pred=True,
+            # squared_pred=True,
             )
         self.loss_fn_sdf = nn.MSELoss()
         self.loss_fn_silhouette = slice_silhouette_loss
@@ -258,9 +259,9 @@ class TrainPipeline:
             lr=self.super_params.lr
         )
         self.lr_scheduler_gsn = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer_gsn, mode="min", factor=0.1, patience=5, verbose=True,
+            self.optimizer_gsn, mode="min", factor=0.5, patience=10, verbose=True,
             threshold=1e-2, threshold_mode="rel", 
-            cooldown=self.super_params.max_epochs//50, min_lr=1e-6, eps=1e-8
+            cooldown=0, min_lr=1e-6, eps=1e-8
             )
         
         # initialise the optimiser for fine-tune
@@ -289,23 +290,15 @@ class TrainPipeline:
         """
         seg_true = (seg_true == self.seg_indices[0]) | (seg_true == self.seg_indices[1]) if isinstance(self.seg_indices, list) else (seg_true == self.seg_indices)
         seg_true = seg_true.float()
-        # apply downsample to the segmentation to minimize the number of faces
-        seg_true = F.interpolate(seg_true, scale_factor=0.64, mode="nearest")
         verts, faces = marching_cubes(
             seg_true.squeeze(1).permute(0, 3, 1, 2), 
-            isolevel=0.5,
+            isolevel=0.1,
             return_local_coords=True,
         )
+        # convert coordinates from (z, x, y) to (x, y, z)
+        verts = [vert[:, [1, 0, 2]] for vert in verts]
         mesh_true = Meshes(verts, faces)
         mesh_true = taubin_smoothing(mesh_true, 0.77, -0.34, 30)
-        
-        # verts_batch, face_batch = [], []
-        # for b in range(len(verts)):
-        #     mesh_true = Trimesh(vertices=verts[b].cpu().numpy(), faces=faces[b].cpu().numpy())
-        #     filter_laplacian(mesh_true, iterations=30)
-        #     verts_batch.append(torch.tensor(mesh_true.vertices, dtype=torch.float32).to(DEVICE))
-        #     face_batch.append(torch.tensor(mesh_true.faces, dtype=torch.int64).to(DEVICE))
-        # mesh_true = Meshes(verts_batch, face_batch)
 
         return mesh_true
 
@@ -321,29 +314,25 @@ class TrainPipeline:
         sdf_pred = sdf_pred[:, self.sdf_indices].unsqueeze(1)
         control_mesh = self.control_mesh.extend(sdf_pred.shape[0])
         # calculate the gradient of the sdf
-        direction = torch.gradient(sdf_pred, dim=(2, 3, 4))
+        direction = torch.cat(torch.gradient(sdf_pred, dim=(2, 3, 4)), dim=1)
 
-        # get the offset by the magnitude and direction of the sdf (N, D, V) and grid_sample
-        # normalise the direction
-        direction = torch.cat([d for d in direction], dim=1)
-        magnitude = torch.norm(direction, dim=1, keepdim=True)
-        direction = direction / (magnitude + 1e-16)
+        # get the offset by the magnitude and inverse direction of the sdf (N, D, V) and grid_sample
+        direction /= torch.norm(direction, dim=1, keepdim=True) * -1
         offset = direction * sdf_pred
         # get the offset using grid_sample
         offset = F.grid_sample(
             offset, 
-            torch.flip(control_mesh.verts_padded(), dims=(-1,)).unsqueeze(2).unsqueeze(2),
+            torch.flip(control_mesh.verts_padded(), dims=(-1,)).unsqueeze(1).unsqueeze(1),
             # x, y, z -> i, j, k
             align_corners=True
-        ).squeeze(-1).squeeze(-1).transpose(1, 2)
+        ).view(sdf_pred.shape[0], 3, -1).permute(0, 2, 1)
 
         # apply offset to the vertices
-        scale_downsample = self.super_params.crop_window_size[0] // self.super_params.pixdim[0]
-        control_mesh.scale_verts_(scale_downsample // 2)
-        control_mesh.offset_verts_(offset.reshape(-1, 3).contiguous())
+        control_mesh.scale_verts_(sdf_pred.shape[-1] / 2)
+        control_mesh.offset_verts_(offset.reshape(-1, 3))
 
         # rescale back to NDC space
-        control_mesh.scale_verts_(2 / scale_downsample)
+        control_mesh.scale_verts_(2 / sdf_pred.shape[-1])
 
         return control_mesh
 
@@ -412,13 +401,16 @@ class TrainPipeline:
                 mesh_true_ct = self.surface_extractor(seg_true_ct)
 
                 self.optimizer_gsn.zero_grad()
-                # with torch.autocast(device_type=DEVICE):
                 sdf_pred_ct, _ = self.sdf_module(img_ct)
-                control_mesh = self.warp_control_mesh(sdf_pred_ct.detach())
+
+                # TODO: test on warping the control mesh
+                # control_mesh = self.warp_control_mesh(sdf_pred_ct.detach())
+                control_mesh = self.control_mesh.extend(sdf_pred_ct.shape[0])
                 subdiv_mesh = self.gsn_module(control_mesh)
 
                 true_points, true_normals = sample_points_from_meshes(mesh_true_ct, self.super_params.point_limit, return_normals=True)
                 subdiv_points, subdiv_normals = sample_points_from_meshes(subdiv_mesh, self.super_params.point_limit, return_normals=True)
+                # TODO: try BeamGapLoss in gsn.py
                 loss_chmf, loss_norm = chamfer_distance(
                     subdiv_points, true_points,
                     x_normals=subdiv_normals, y_normals=true_normals,
@@ -451,10 +443,7 @@ class TrainPipeline:
 
 
     def fine_tune(self, epoch):
-        self.pretext_mr.eval()
         self.sdf_module.eval()
-        for name, param in self.sdf_module.encoder_.named_parameters():
-            param.data = self.pretext_mr.state_dict()[name].data
         self.gsn_module.train()
 
         fine_tune_loss_epoch = {"hd": 0.0}
@@ -489,27 +478,21 @@ class TrainPipeline:
 
 
     def valid(self, epoch, dataset):
-        # self.pretext_mr.eval()
         self.sdf_module.eval()
         self.gsn_module.eval()
         
         # choose the validation loader
         if dataset.lower() == "sct":
-            valid_loader = self.ct_train_loader
-            # valid_loader = self.ct_valid_loader
+            valid_loader = self.ct_valid_loader
             modal = "ct"
         elif dataset.lower() == "cap":
             valid_loader = self.mr_valid_loader
-            # for name, param in self.sdf_module.encoder_.named_parameters():
-            #     param.data = self.pretext_mr.state_dict()[name].data
             modal = "mr"
         else:
             raise ValueError("Invalid dataset name")
 
         sdf_metric_batch_decoder = MSEMetric(reduction="mean_batch")
-        msh_metric_batch_decoder = DiceMetric(
-            include_background=False, reduction="mean_batch", 
-            num_classes=2)
+        msh_metric_batch_decoder = DiceMetric(reduction="mean_batch")
 
         cached_data = dict()
         choice_case = np.random.choice(len(valid_loader), 1)[0]
@@ -519,28 +502,29 @@ class TrainPipeline:
                     id = os.path.basename(data[f"{modal}_label"].meta["filename_or_obj"]).strip(".nii.gz")
                 except TypeError:
                     id = os.path.basename(data[f"{modal}_label"].meta["filename_or_obj"][0]).strip(".nii.gz")
-                img, sdf_true, seg_true_origin = (
+                img, sdf_true, seg_true = (
                     data[f"{modal}_image"].as_tensor().to(DEVICE),
                     data[f"{modal}_sdf"].as_tensor().to(DEVICE),
                     data[f"{modal}_label_origin"].as_tensor().to(DEVICE),
                 )
 
-                seg_true_origin = (seg_true_origin == self.seg_indices[0]) | (seg_true_origin == self.seg_indices[1]) if isinstance(self.seg_indices, list) else (seg_true_origin == self.seg_indices)
-                seg_true_origin = seg_true_origin.float()
-                # seg_true_origin[~mask] = 0
-                # seg_true_origin[seg_true_origin > 0] = 1
+                seg_true = (seg_true == self.seg_indices[0]) | (seg_true == self.seg_indices[1]) if isinstance(self.seg_indices, list) else (seg_true == self.seg_indices)
+                seg_true = seg_true.float()
 
                 sdf_pred, _ = self.sdf_module(img)
                 sdf_metric_batch_decoder(sdf_pred, sdf_true)
 
-                control_mesh = self.warp_control_mesh(sdf_pred)
+                # TODO: test on warping the control mesh
+                # control_mesh = self.warp_control_mesh(sdf_pred)
+                control_mesh = self.control_mesh.extend(sdf_pred.shape[0])
                 subdiv_mesh = self.gsn_module(control_mesh)
 
-                # translate and rescale the subdiv_mesh from NDC space to voxel space (crop_window_size)
+                # rescale and translate the subdivided mesh to the original space
                 subdiv_mesh.scale_verts_(self.super_params.crop_window_size[0] // 2)
                 subdiv_mesh.offset_verts_(
                     torch.tensor([self.super_params.crop_window_size[0] // 2] * 3, dtype=torch.float32, device=DEVICE)
                 )
+
                 # save subdivided mesh as .obj files for voxelisation
                 save_obj(f"{self.ckpt_dir}/valid_subdiv_meshes/{id}.obj", 
                          subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed())
@@ -552,11 +536,11 @@ class TrainPipeline:
                 voxeld_mesh = self.post_transform(np.round(voxeld_mesh)).unsqueeze(0)
                 
                 # evaluate the error between seudo mesh and predicted mesh
-                msh_metric_batch_decoder(voxeld_mesh, seg_true_origin)
+                msh_metric_batch_decoder(voxeld_mesh, seg_true)
 
                 if step == choice_case:
                     cached_data = {
-                        "seg_true": seg_true_origin.cpu(),
+                        "seg_true": seg_true.cpu(),
                         "subdiv_mesh": subdiv_mesh.cpu(),
                     }
 

@@ -46,7 +46,6 @@ def draw_plotly(
     if labels is not None:
         # Add labels as mesh, first convert each label into a mesh using marching cubes, then add to the figure.
         assert labels.shape[0] == 1, "Only support one label at a time."
-
         num_classes = torch.unique(labels).shape[0]
         if num_classes == 2:
             mesh = matrix_to_marching_cubes(labels.squeeze().cpu().numpy())
@@ -59,23 +58,8 @@ def draw_plotly(
                 opacity=0.25,
                 name="seg_label"
             ))
-            
         else:
-            labels = one_hot(
-                labels.long().squeeze(1), num_classes=5
-            ).permute(0, 4, 1, 2, 3).squeeze().cpu().numpy()
-            label_names = ["lv", "lv_myo", "rv", "rv_myo"]
-            for i, label in enumerate(labels[1:]):
-                mesh = matrix_to_marching_cubes(label)
-                x, y, z = mesh.vertices.T
-                I, J, K = mesh.faces.T
-                fig.add_trace(go.Mesh3d(
-                    x=x, y=y, z=z,
-                    i=I, j=J, k=K,
-                    color="pink",
-                    opacity=0.25,
-                    name=f"{label_names[i]}_seg_label"
-                ))
+            raise ValueError("Only support binary segmentation for now.")
     
     if pred_seg is not None:
         # Add pred_seg as mesh, first convert each label into a mesh using marching cubes, then add to the figure.
@@ -134,9 +118,6 @@ def draw_plotly(
     if pred_meshes is not None:
         # Add pred_meshes as mesh, which is pytorch3d.Meshes object. first rescale to the same size as the label mesh, and shift to the center of labels, then add to the figure.
         for pred_mesh in pred_meshes:
-            # pred_mesh = pred_mesh.update_padded(
-            #     64 * (pred_mesh.verts_padded() + 1)
-            # )
             x, y, z = pred_mesh.verts_packed().T
             I, J, K = pred_mesh.faces_packed().T
             fig.add_trace(go.Mesh3d(
@@ -162,30 +143,32 @@ def draw_plotly(
     return fig
 
 def draw_train_loss(train_loss: dict, super_params: Namespace, task_code: str, phase: str):
-    df = pd.DataFrame(train_loss)
-    if phase == "sdf_predict":
-        df.set_index(df.index + 1, inplace=True)
-    else:
-        df.set_index(super_params.delay_epochs + df.index + 1, inplace=True)
     sns.set_theme(style="whitegrid")
-    fig, ax = plt.subplots(figsize=(10, 8))
+    _, ax = plt.subplots(figsize=(10, 8))
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    colors = sns.color_palette("hls", len(df.columns.values))
+
+    df = pd.DataFrame(train_loss)
+    df.set_index(df.index + 1, inplace=True)
     if phase == "subdiv":
         for i, coeff in enumerate(super_params.lambda_, start=1):
             df.iloc[:, i] = df.iloc[:, i - 1] - coeff * df.iloc[:, i]
-    for i in range(len(df.columns.values) - 1):
-        ax = sns.lineplot(
-            x=df.index.values, y=df.iloc[:, i], 
-            ax=ax, color=colors[i], label=df.columns[i+1]
-        )
-        curve = ax.lines[i]
-        x_i = curve.get_xydata()[:, 0]
-        y_i = curve.get_xydata()[:, 1]
-        ax.fill_between(x_i, y_i, color=colors[i], alpha=0.6)
-    plt.legend()
+
+    if len(df) > 0:
+        colors = sns.color_palette("hls", len(df.columns.values))
+        for i in range(len(df.columns.values) - 1):
+            ax = sns.lineplot(
+                x=df.index.values, y=df.iloc[:, i], 
+                ax=ax, color=colors[i], label=df.columns[i+1]
+            )
+            curve = ax.lines[i]
+            x_i = curve.get_xydata()[:, 0]
+            y_i = curve.get_xydata()[:, 1]
+            ax.fill_between(x_i, y_i, color=colors[i], alpha=0.6)
+        plt.legend()
+
     plt.savefig(f"{super_params.ckpt_dir}/{task_code}/{super_params.run_id}/{phase}_loss.png")
+
 
 def draw_eval_score(eval_score: dict, super_params: Namespace, task_code: str, module: str):
     df = pd.DataFrame(eval_score)

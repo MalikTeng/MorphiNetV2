@@ -50,7 +50,9 @@ class SDFConvertd(MapTransform):
                 sdf = []
                 unq_class = np.unique(label)[1:]    # exclude background
                 for c in unq_class:
-                    sdf_class = edt.sdf(label == c, 
+                    sdf_class = edt.edt(label == c, 
+                                anisotropy=(1, 1, 1), black_border=False, order='C', parallel=1) + \
+                                edt.edt(1 - (label == c),
                                 anisotropy=(1, 1, 1), black_border=False, order='C', parallel=1)
                     sdf.append(sdf_class.astype(np.float32))
 

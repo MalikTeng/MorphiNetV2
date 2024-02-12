@@ -21,30 +21,17 @@ from einops import rearrange
 
 from .parts import ConvLayer, ResBlock
 
-__all__ = ["ResNet", "SDFNet", "GSN"]
+__all__ = ["ResEncoder", "ResDecoder", "SDFNet", "GSN"]
 
 
 class SDFNet(nn.Module):
     def __init__(self, 
-                 encoder: nn.Module,
-                 num_classes: int=4, hidden_features: int=32,
-                 down_sampled_size: tuple=(16, 16, 16),
+                 encoder: nn.Module, decoder: nn.Module,
                  ) -> None:
         super().__init__()
 
         self.encoder_ = encoder
-
-        in_channels = np.prod(down_sampled_size)
-        in_features = self.encoder_.init_filters * 2 ** (len(self.encoder_.seg_blocks) - 2)
-        self.deoder_ = nn.Sequential(
-            nn.BatchNorm1d(in_channels),
-            nn.Linear(in_features, hidden_features),
-            nn.LeakyReLU(1e-2, inplace=True),
-            nn.Linear(hidden_features, hidden_features // 2),
-            nn.BatchNorm1d(in_channels),
-            nn.LeakyReLU(1e-2, inplace=True),
-            nn.Linear(hidden_features // 2, num_classes - 1),   # combine left and reight myocardium
-        )
+        self.decoder_ = decoder
 
         self._init_weights()
 
@@ -59,17 +46,13 @@ class SDFNet(nn.Module):
                 nn.init.zeros_(m.bias)
 
     def forward(self, x):
-        _, _, h, w, d = x.shape
         x, seg = self.encoder_(x)
-        
-        x = rearrange(x, 'b c h w d -> b (h w d) c')
-        sdf = self.deoder_(x)
-        sdf = rearrange(sdf, 'b (h w d) c -> b c h w d', h=h, w=w, d=d)
+        _, sdf = self.decoder_(x)
 
         return sdf, seg
 
 
-class ResNet(nn.Module):
+class ResEncoder(nn.Module):
     def __init__(
         self,
         init_filters: int,
@@ -85,9 +68,9 @@ class ResNet(nn.Module):
         self.out_channels = out_channels
         self.act = act
         self.norm = norm
-        self.seg_blocks = self._make_seg_blocks(num_init_blocks)
+        self.seg_blocks = self._make_blocks(num_init_blocks)
         
-    def _make_seg_blocks(self, num_init_blocks: tuple) -> nn.ModuleList:
+    def _make_blocks(self, num_init_blocks: tuple) -> nn.ModuleList:
         down_blocks  = nn.ModuleList()
         out_channels = 0
         for i in range(len(num_init_blocks)):
@@ -115,7 +98,7 @@ class ResNet(nn.Module):
             down_blocks.append(nn.Sequential(conv_layer, res_block))
         down_blocks.append(ConvLayer(
             out_channels, self.out_channels, 1, 1, 0,
-            self.norm, None
+            None, None
         ))
             
         return down_blocks
@@ -124,6 +107,54 @@ class ResNet(nn.Module):
         for block in self.seg_blocks[:-1]:
             x, _ = block(x)
         x_seg = self.seg_blocks[-1](x)
+
+        return x, x_seg
+
+
+class ResDecoder(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        act: str = 'prelu',
+        norm: str = 'batchnorm',
+        num_init_blocks: tuple = (4, 2, 2, 1),
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.act = act
+        self.norm = norm
+        self.sdf_blocks = self._make_blocks(num_init_blocks)
+        
+    def _make_blocks(self, num_init_blocks: tuple) -> nn.ModuleList:
+        down_blocks  = nn.ModuleList()
+        out_channels = None
+        in_channels = self.in_channels
+        for i in range(len(num_init_blocks)):
+            out_channels = in_channels // 2
+            conv_layer = ConvLayer(
+                in_channels, out_channels, 1, 1, 0,
+                self.norm, self.act,
+            )
+            res_block = ResBlock(
+                out_channels, out_channels,
+                self.norm, self.act,
+                num_layers=num_init_blocks[i]
+                )
+            down_blocks.append(nn.Sequential(conv_layer, res_block))
+            in_channels = out_channels
+        down_blocks.append(ConvLayer(
+            out_channels, self.out_channels, 1, 1, 0,
+            None, None
+        ))
+            
+        return down_blocks
+
+    def forward(self, x):
+        for block in self.sdf_blocks[:-1]:
+            x, _ = block(x)
+        x_seg = self.sdf_blocks[-1](x)
 
         return x, x_seg
 
@@ -193,10 +224,10 @@ class PositionNet(MessagePassing):
         self.fc_ = Sequential(
             Linear(3, hidden_features, bias=False),
             LayerNorm(hidden_features),
-            LeakyReLU(1e-2, inplace=True),
+            LeakyReLU(0.002, inplace=True),
             Linear(hidden_features, hidden_features // 2, bias=False),
             LayerNorm(hidden_features // 2),
-            LeakyReLU(1e-2, inplace=True),
+            LeakyReLU(0.002, inplace=True),
         )
 
         self.out_ = Linear(hidden_features // 2, 3, bias=True)
@@ -206,21 +237,20 @@ class PositionNet(MessagePassing):
     def reset_parameters(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 1e-3)
-                # nn.init.kaiming_normal_(m.weight, 1e-2, mode='fan_in', nonlinearity='leaky_relu')
+                nn.init.kaiming_normal_(m.weight, 0.002, mode='fan_in', nonlinearity='leaky_relu')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
     def forward(self, x, edge_index):
         # add self loops to the graph.
-        edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(1))
+        edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
 
         # apply linear transformation to the input features.
         x = self.fc_(x)
 
         # calculate the norm
         row, col = edge_index
-        deg = degree(col, x.size(1), dtype=x.dtype)
+        deg = degree(col, x.size(0), dtype=x.dtype)
         deg_inv_sqrt = deg.pow(-0.5)
         deg_inv_sqrt[deg_inv_sqrt == float("inf")] = 0
         norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
@@ -234,52 +264,55 @@ class PositionNet(MessagePassing):
         return x
     
     def message(self, x_j: Tensor, norm: Tensor):
-        return norm.view(1, -1, 1) * x_j
+        return norm.view(-1, 1) * x_j
 
 
 class SubdivideMeshes(nn.Module):
-    def __init__(self, meshes=None, subdivided_faces=None, hidden_features=16) -> None:
+    def __init__(self, subdivided_faces=None, hidden_features=16) -> None:
         super().__init__()
 
-        self.gcn_layer_ = SeqGCN("x, edge_index", [
-            (GCNConv(3, hidden_features), "x, edge_index -> x"),
-            LeakyReLU(1e-2, inplace=True),
-            (GCNConv(hidden_features, hidden_features // 2), "x, edge_index -> x"),
-            LeakyReLU(1e-2, inplace=True),
-            (GCNConv(hidden_features // 2, 3), "x, edge_index -> x")
-            ])
-        # self.gcn_layer_ = PositionNet(hidden_features=hidden_features)
-
         self._N = -1
-        if meshes is not None:
-            mesh = meshes[0]
-            with torch.no_grad():
-                subdivided_faces = subdivide_faces_fn(mesh)
-                if subdivided_faces.shape[1] != 3:
-                    raise ValueError("subdivided faces must be triangle")
-                self.register_buffer("_subdivided_faces", subdivided_faces)
-        elif subdivided_faces is not None:
+        if subdivided_faces is not None:
             self.register_buffer("_subdivided_faces", subdivided_faces)
         else:
             raise ValueError("either meshes or subdivided_faces must be provided")
 
-    def forward(self, meshes):
-        verts = meshes.verts_packed()
-        edges = meshes[0].edges_packed()
+        # TODO: develop own GCN layer with learable weights.
+        # self.gcn_layer_ = PositionNet(hidden_features=hidden_features)
+        self.gcn_layer_ = SeqGCN(
+            "x, edge_index",[
+                (GCNConv(3, hidden_features, add_self_loops=False), "x, edge_index -> x"),
+                LeakyReLU(0.002, inplace=True),
+                (GCNConv(hidden_features, hidden_features // 2, add_self_loops=False), "x, edge_index -> x"),
+                LeakyReLU(0.002, inplace=True),
+                (GCNConv(hidden_features // 2, 3, add_self_loops=False), "x, edge_index -> x")
+                ])
 
-        # update the original vertices with the offsets.
-        offsets = self.gcn_layer_(
-            verts,                      # (V, 3)
-            edges.t().contiguous())     # (2, E)
-        verts = verts + offsets
-        verts = rearrange(verts, '(b n) c -> b n c', b=meshes._N)
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, 0.002, mode='fan_in', nonlinearity='leaky_relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, meshes):
+        verts = meshes.verts_padded()
 
         # create new vertices at the middle of the edges.
+        edges = meshes[0].edges_packed()
         new_verts = verts[:, edges].mean(dim=2)
         new_verts = torch.cat([verts, new_verts], dim=1)
 
         # create new meshes with the same topology as the original mesh.
         new_faces = self._subdivided_faces.expand(meshes._N, -1, -1)
+
+        # update the all vertices with the offsets.
+        new_edges = torch.cat([new_faces[..., :2], new_faces[..., 1:], new_faces[..., ::2]], dim=1)
+        offsets = self.gcn_layer_(new_verts.view(-1, 3), new_edges.view(-1, 2).t().contiguous())
+        new_verts = new_verts + offsets.view(meshes._N, -1, 3)
+
         new_meshes = Meshes(verts=new_verts, faces=new_faces)
 
         return new_meshes
@@ -302,7 +335,7 @@ class GSN(nn.Module):
             meshes = Meshes(verts=[new_verts], faces=[new_faces])
 
         self.gcn_layers_ = ModuleList([
-            SubdivideMeshes(None, subdivided_faces=self.faces_layers_[i], 
+            SubdivideMeshes(subdivided_faces=self.faces_layers_[i], 
                             hidden_features=hidden_features) 
             for i in range(num_layers)
             ])

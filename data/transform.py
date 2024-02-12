@@ -49,8 +49,8 @@ def pre_transform(
 
     # downsampling and cropping
     transforms.extend([
-        CopyItemsd(keys, names=[f"{i}_origin" for i in keys]),
-        CropForegroundd([*keys, f"{keys[0]}_origin", f"{keys[1]}_origin"], 
+        CopyItemsd(keys[1], names=f"{keys[1]}_origin"),
+        CropForegroundd([*keys, f"{keys[1]}_origin"], 
                         source_key=keys[1], margin=1),
         
         # downsampling the image and label to the desired spatial resolution
@@ -62,14 +62,13 @@ def pre_transform(
         SDFConvertd(keys[1]),
 
         # process images and labels with original resolution
-        Resized([f"{i}_origin" for i in keys], crop_window_size[0], size_mode="longest",
-                mode=("bilinear", "nearest-exact")),
-        SpatialPadd([f"{i}_origin" for i in keys], crop_window_size[0], method="symmetric", 
+        Resized(f"{keys[1]}_origin", crop_window_size[0], size_mode="longest",
+                mode="nearest-exact"),
+        SpatialPadd(f"{keys[1]}_origin", crop_window_size[0], method="symmetric", 
                     mode="minimum"),
 
         # ensure all images with normalised intensity
-        NormalizeIntensityd([keys[0], f"{keys[0]}_origin"], 
-                            nonzero=False, channel_wise=False),
+        NormalizeIntensityd(keys[0], nonzero=False, channel_wise=False),
     ])
 
     # spatial transforms
@@ -77,30 +76,29 @@ def pre_transform(
         transforms.extend([
             # intensity argmentation (image only)
             RandGaussianNoised(keys[0], std=0.01, prob=0.15),
-            RandGaussianNoised(f"{keys[0]}_origin", std=0.01, prob=0.15),
             RandGaussianSmoothd(
-                [keys[0], f"{keys[0]}_origin"],
+                keys[0],
                 sigma_x=(0.5, 1.15),
                 sigma_y=(0.5, 1.15),
                 sigma_z=(0.5, 1.15),
                 prob=0.15,
             ),
-            RandScaleIntensityd([keys[0], f"{keys[0]}_origin"], factors=0.3, prob=0.15),
+            RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
 
             # # spatial augmentation (image, label and sdf)
-            # RandFlipd([*keys, f"{keys[0]}_origin", f"{keys[1]}_origin"], 
+            # RandFlipd([*keys, f"{keys[1]}_origin"], 
             #           spatial_axis=[0], prob=0.5),
-            # RandFlipd([*keys, f"{keys[0]}_origin", f"{keys[1]}_origin"], 
+            # RandFlipd([*keys, f"{keys[1]}_origin"], 
             #           spatial_axis=[1], prob=0.5),
-            # RandFlipd([*keys, f"{keys[0]}_origin", f"{keys[1]}_origin"], 
+            # RandFlipd([*keys, f"{keys[1]}_origin"], 
             #           spatial_axis=[2], prob=0.5),
             
             # ensure the data type
-            EnsureTyped([*keys, f"{keys[0]}_origin", f"{keys[1]}_origin"], 
+            EnsureTyped([*keys, f"{keys[1]}_origin"], 
                         data_type="tensor", dtype=torch.float),
         ])
     else:
-        transforms.append(EnsureTyped([*keys, f"{keys[0]}_origin", f"{keys[1]}_origin"],
+        transforms.append(EnsureTyped([*keys, f"{keys[1]}_origin"],
                                       data_type="tensor", dtype=torch.float))
 
     return Compose(transforms)

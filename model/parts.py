@@ -62,7 +62,7 @@ class ConvLayer(nn.Module):
         elif norm == 'instance':
             self.norm = nn.InstanceNorm3d(out_channels)
         else:
-            raise NotImplementedError
+            self.norm = None
         
         if act == 'relu':
             self.act = nn.LeakyReLU(1e-2, inplace=True)
@@ -89,7 +89,8 @@ class ConvLayer(nn.Module):
 
     def forward(self, x):
         x = self.conv_layer(x)
-        x = self.norm(x)
+        if self.norm is not None:
+            x = self.norm(x)
         if self.act is not None:
             x = self.act(x)
 
