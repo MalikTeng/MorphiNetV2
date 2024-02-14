@@ -68,8 +68,6 @@ class ConvLayer(nn.Module):
             self.act = nn.LeakyReLU(1e-2, inplace=True)
         elif act == 'tanh':
             self.act = nn.Tanh()
-        elif act == 'prelu':
-            self.act = nn.PReLU()
         elif act == 'sigmoid':
             self.act = nn.Sigmoid()
         else:

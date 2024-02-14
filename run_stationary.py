@@ -9,8 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from pytorch3d.io import save_obj, IO
 from pytorch3d.ops import sample_points_from_meshes, taubin_smoothing
-from pytorch3d.loss import chamfer_distance, mesh_laplacian_smoothing
-from pytorch3d.structures import Meshes
+from pytorch3d.loss import chamfer_distance, mesh_laplacian_smoothing, point_mesh_face_distance, point_mesh_edge_distance
+from pytorch3d.structures import Meshes, Pointclouds
 from pytorch3d.ops.marching_cubes import marching_cubes
 from monai.data import DataLoader, decollate_batch
 from monai.losses import DiceCELoss
@@ -20,6 +20,7 @@ from monai.transforms import (
     SpatialPad,
     EnsureType, 
     Rotate90,
+    AsDiscrete,
     KeepLargestConnectedComponent,
     Invertd,
 )
@@ -29,10 +30,13 @@ import wandb
 
 import plotly.io as pio
 import plotly.graph_objects as go
+import plotly.figure_factory as ff
 
 from data import *
 from utils import *
 from model.networks import *
+
+from utils.rasterize.rasterize import Rasterize
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -85,6 +89,12 @@ class TrainPipeline:
             Rotate90(spatial_axes=(1, 2), k=-1),
             EnsureType(data_type="tensor", dtype=torch.float, device=DEVICE),
             ])
+        
+        self.seg_post_transform = Compose([
+            AsDiscrete(argmax=True),
+            KeepLargestConnectedComponent(is_onehot=False),
+            EnsureType(data_type="tensor", dtype=torch.float32, device=DEVICE)
+            ])
 
         with open(super_params.mr_json_dir, "r") as f:
             mr_train_transform, mr_valid_transform = self._prepare_transform(["mr_image", "mr_label"], "mr")
@@ -113,7 +123,7 @@ class TrainPipeline:
         control_mesh = load_mesh(super_params.control_mesh_dir)
         self.control_mesh = Meshes(
             verts=[torch.tensor(control_mesh.vertices, dtype=torch.float32)], 
-            faces=[torch.tensor(control_mesh.faces, dtype=torch.int64)]).to(DEVICE)
+            faces=[torch.tensor(control_mesh.faces, dtype=torch.int64)])
         # define the indices of sdf and segmentation so that loss is calculated based on matching label class
         if "lv" in super_params.control_mesh_dir.lower():
             self.sdf_indices = 0
@@ -129,6 +139,8 @@ class TrainPipeline:
 
         self._prepare_modules()
         self._prepare_optimiser()
+
+        self.rasterizer = Rasterize(self.super_params.crop_window_size) # tool for rasterizing mesh
 
 
     def _prepare_transform(self, keys, modal):
@@ -161,10 +173,9 @@ class TrainPipeline:
         
 
     def _prepare_dataset(self, data_json, modal, train_transform, valid_transform):
-        # WARNING: must remove the array slice for training !!!
-        train_data = self._remap_abs_path(data_json["train_fold0"], modal)[:5]
-        valid_data = self._remap_abs_path(data_json["validation_fold0"], modal)[:5]
-        test_data = self._remap_abs_path(data_json["test"], modal)[:5]
+        train_data = self._remap_abs_path(data_json["train_fold0"], modal)
+        valid_data = self._remap_abs_path(data_json["validation_fold0"], modal)
+        test_data = self._remap_abs_path(data_json["test"], modal)
 
         train_ds = Dataset(
             train_data, train_transform, self.seed, sys.maxsize,
@@ -201,23 +212,25 @@ class TrainPipeline:
 
     def _prepare_modules(self):
         # initialise the sdf module
-        self.pretext_mr = ResEncoder(
+        self.pretext_mr = ResNet(
             in_channels=1, out_channels=self.super_params.num_classes + 1,  # include background
             init_filters=self.super_params.init_filters,
             act='relu', norm='batch',
             num_init_blocks=self.super_params.num_init_blocks
         ).to(DEVICE)
         self.sdf_module = SDFNet(
-            encoder=ResEncoder(
+            encoder=ResNet(
                 in_channels=1, out_channels=self.super_params.num_classes + 1,
                 init_filters=self.super_params.init_filters,
                 act='relu', norm='batch',
                 num_init_blocks=self.super_params.num_init_blocks
             ),
-            decoder=ResDecoder(
-                in_channels=self.super_params.init_filters * 2 ** (len(self.super_params.num_init_blocks) - 1), 
-                out_channels=self.super_params.num_classes-1,
+            decoder=ResNet(
+                in_channels=self.super_params.num_classes + 1, 
+                out_channels=self.super_params.num_classes - 1,
+                init_filters=self.super_params.init_filters,
                 act='relu', norm='batch',
+                num_init_blocks=self.super_params.num_init_blocks
             )).to(DEVICE)
         if self.super_params.pre_trained_mr_module_dir is not None and self.super_params.pre_trained_sdf_module_dir is not None:
             self.pretext_mr.load_state_dict(torch.load(self.super_params.pre_trained_mr_module_dir))
@@ -231,7 +244,7 @@ class TrainPipeline:
             hidden_features=self.super_params.hidden_features_gsn, 
             num_layers=self.super_params.subdiv_levels,
         ).to(DEVICE)
-        
+
 
     def _prepare_optimiser(self):
         self.loss_fn_seg = DiceCELoss(
@@ -264,16 +277,16 @@ class TrainPipeline:
             cooldown=0, min_lr=1e-6, eps=1e-8
             )
         
-        # initialise the optimiser for fine-tune
-        self.optimizer_fine_tune = torch.optim.Adam(
-            self.gsn_module.parameters(), 
-            lr=self.super_params.lr
-        )
-        self.lr_scheduler_fine_tune = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer_fine_tune, mode="min", factor=0.1, patience=5, verbose=True,
-            threshold=1e-2, threshold_mode="rel", 
-            cooldown=self.super_params.max_epochs//50, min_lr=1e-6, eps=1e-8
-            )
+        # # initialise the optimiser for fine-tune
+        # self.optimizer_fine_tune = torch.optim.Adam(
+        #     self.gsn_module.parameters(), 
+        #     lr=self.super_params.lr
+        # )
+        # self.lr_scheduler_fine_tune = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        #     self.optimizer_fine_tune, mode="min", factor=0.1, patience=5, verbose=True,
+        #     threshold=1e-2, threshold_mode="rel", 
+        #     cooldown=self.super_params.max_epochs//50, min_lr=1e-6, eps=1e-8
+        #     )
         
         self.scaler = torch.cuda.amp.GradScaler()
         torch.backends.cudnn.enabled = torch.backends.cudnn.is_available()
@@ -302,7 +315,7 @@ class TrainPipeline:
 
         return mesh_true
 
-
+    @torch.no_grad()
     def warp_control_mesh(self, sdf_pred):
         """
             input:
@@ -312,27 +325,32 @@ class TrainPipeline:
                 warped control mesh with vertices and faces in NDC space.
         """
         sdf_pred = sdf_pred[:, self.sdf_indices].unsqueeze(1)
-        control_mesh = self.control_mesh.extend(sdf_pred.shape[0])
+        control_mesh = self.control_mesh.extend(sdf_pred.shape[0]).to(DEVICE)
+
         # calculate the gradient of the sdf
         direction = torch.cat(torch.gradient(sdf_pred, dim=(2, 3, 4)), dim=1)
+        direction /= (torch.norm(direction, dim=1, keepdim=True) + 1e-16) * -1
 
-        # get the offset by the magnitude and inverse direction of the sdf (N, D, V) and grid_sample
-        direction /= torch.norm(direction, dim=1, keepdim=True) * -1
-        offset = direction * sdf_pred
-        # get the offset using grid_sample
-        offset = F.grid_sample(
-            offset, 
-            torch.flip(control_mesh.verts_padded(), dims=(-1,)).unsqueeze(1).unsqueeze(1),
-            # x, y, z -> i, j, k
-            align_corners=True
-        ).view(sdf_pred.shape[0], 3, -1).permute(0, 2, 1)
-
-        # apply offset to the vertices
-        control_mesh.scale_verts_(sdf_pred.shape[-1] / 2)
-        control_mesh.offset_verts_(offset.reshape(-1, 3))
-
-        # rescale back to NDC space
-        control_mesh.scale_verts_(2 / sdf_pred.shape[-1])
+        # sample and apply offset in two-step manner: smooth global -> sharp local
+        for step in range(2):
+            coords = control_mesh.verts_padded()
+            offset = direction * sdf_pred
+            offset = F.grid_sample(
+                offset, 
+                torch.flip(coords, dims=(-1,)).unsqueeze(1).unsqueeze(1),
+                align_corners=True
+            ).view(sdf_pred.shape[0], 3, -1).permute(0, 2, 1)
+            if step == 0:
+                # sampled offset is very fuzzy and apply it directly to the control mesh will break its manifold, so try average the offset and apply it
+                offset = offset.mean(dim=1, keepdim=True).expand(-1, control_mesh._V, -1)
+            else:
+                # too large the offset that applies close to valve will break the manifold, so try to reduce the offset
+                offset *= 0.46
+            # apply offset to the vertices
+            control_mesh.scale_verts_(sdf_pred.shape[-1] / 2)
+            control_mesh.offset_verts_(offset.reshape(-1, 3))
+            # rescale back to NDC space
+            control_mesh.scale_verts_(2 / sdf_pred.shape[-1])
 
         return control_mesh
 
@@ -357,20 +375,22 @@ class TrainPipeline:
                     )
 
                 self.optimizer_sdf.zero_grad()
-                with torch.autocast(device_type=DEVICE):
-                    _, seg_pred_mr = self.pretext_mr(img_mr)
-                    sdf_pred_ct, seg_pred_ct = self.sdf_module(img_ct)
+                # with torch.autocast(device_type=DEVICE):
+                _, seg_pred_mr = self.pretext_mr(img_mr)
+                sdf_pred_ct, seg_pred_ct = self.sdf_module(img_ct)
 
-                    loss_seg = self.loss_fn_seg(
-                        torch.cat([seg_pred_mr, seg_pred_ct], dim=0), 
-                        torch.cat([seg_true_mr, seg_true_ct], dim=0))
-                    loss_sdf = self.loss_fn_sdf(sdf_pred_ct, sdf_true_ct)
+                loss_seg = self.loss_fn_seg(
+                    torch.cat([seg_pred_mr, seg_pred_ct], dim=0), 
+                    torch.cat([seg_true_mr, seg_true_ct], dim=0))
+                loss_sdf = self.loss_fn_sdf(sdf_pred_ct, sdf_true_ct)
 
-                    loss = loss_seg + loss_sdf
+                loss = loss_seg + 0.1 * loss_sdf    # TODO: try different weight for loss_sdf
 
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer_sdf)
-                self.scaler.update()
+                loss.backward()
+                self.optimizer_sdf.step()
+                # self.scaler.scale(loss).backward()
+                # self.scaler.step(self.optimizer_sdf)
+                # self.scaler.update()
                 
                 train_loss_epoch["total"] += loss.item()
                 train_loss_epoch["seg"] += loss_seg.item()
@@ -403,27 +423,27 @@ class TrainPipeline:
                 self.optimizer_gsn.zero_grad()
                 sdf_pred_ct, _ = self.sdf_module(img_ct)
 
-                # TODO: test on warping the control mesh
-                # control_mesh = self.warp_control_mesh(sdf_pred_ct.detach())
-                control_mesh = self.control_mesh.extend(sdf_pred_ct.shape[0])
+                # TODO: change training process to train gsn on top of sdf_pred
+                sdf_ct = data_ct["ct_sdf"].as_tensor().to(DEVICE)
+                control_mesh = self.warp_control_mesh(sdf_ct)
                 subdiv_mesh = self.gsn_module(control_mesh)
 
-                true_points, true_normals = sample_points_from_meshes(mesh_true_ct, self.super_params.point_limit, return_normals=True)
-                subdiv_points, subdiv_normals = sample_points_from_meshes(subdiv_mesh, self.super_params.point_limit, return_normals=True)
-                # TODO: try BeamGapLoss in gsn.py
-                loss_chmf, loss_norm = chamfer_distance(
-                    subdiv_points, true_points,
-                    x_normals=subdiv_normals, y_normals=true_normals,
-                    point_reduction="mean", batch_reduction="sum"
-                    )
+                loss_chmf, _ = chamfer_distance(
+                    mesh_true_ct.verts_padded(), subdiv_mesh.verts_padded(),
+                    point_reduction="mean", batch_reduction="mean")
+                true_points = sample_points_from_meshes(mesh_true_ct, 2 * subdiv_mesh._F)
+                pointcloud_true_ct = Pointclouds(points=true_points)
+                loss_norm = point_mesh_face_distance(subdiv_mesh, pointcloud_true_ct, min_triangle_area=1e-3)
                 loss_smooth = mesh_laplacian_smoothing(subdiv_mesh, method="cotcurv")
                 loss = self.super_params.lambda_[0] * loss_chmf + \
                     self.super_params.lambda_[1] * loss_norm + \
                         self.super_params.lambda_[2] * loss_smooth
 
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer_gsn)
-                self.scaler.update()
+                loss.backward()
+                self.optimizer_gsn.step()
+                # self.scaler.scale(loss).backward()
+                # self.scaler.step(self.optimizer_gsn)
+                # self.scaler.update()
                 
                 train_loss_epoch["total"] += loss.item()
                 train_loss_epoch["chmf"] += loss_chmf.item()
@@ -461,9 +481,11 @@ class TrainPipeline:
             loss = self.loss_fn_silhouette(
                 subdiv_mesh, seg_true_origin_mr, self.super_params.crop_window_size[0] // self.super_params.pixdim[0], slice_info_mr, self.seg_indices, DEVICE)
 
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer_fine_tune)
-            self.scaler.update()
+            loss.backward()
+            self.optimizer_fine_tune.step()
+            # self.scaler.scale(loss).backward()
+            # self.scaler.step(self.optimizer_fine_tune)
+            # self.scaler.update()
 
             fine_tune_loss_epoch["hd"] += loss.item()
 
@@ -502,46 +524,49 @@ class TrainPipeline:
                     id = os.path.basename(data[f"{modal}_label"].meta["filename_or_obj"]).strip(".nii.gz")
                 except TypeError:
                     id = os.path.basename(data[f"{modal}_label"].meta["filename_or_obj"][0]).strip(".nii.gz")
-                img, sdf_true, seg_true = (
+                img, sdf_true, seg_true, seg_true_original = (
                     data[f"{modal}_image"].as_tensor().to(DEVICE),
                     data[f"{modal}_sdf"].as_tensor().to(DEVICE),
+                    data[f"{modal}_label"].as_tensor().to(DEVICE),
                     data[f"{modal}_label_origin"].as_tensor().to(DEVICE),
                 )
 
                 seg_true = (seg_true == self.seg_indices[0]) | (seg_true == self.seg_indices[1]) if isinstance(self.seg_indices, list) else (seg_true == self.seg_indices)
                 seg_true = seg_true.float()
+                seg_true_original = (seg_true_original == self.seg_indices[0]) | (seg_true_original == self.seg_indices[1]) if isinstance(self.seg_indices, list) else (seg_true_original == self.seg_indices)
+                seg_true_original = seg_true_original.float()
 
-                sdf_pred, _ = self.sdf_module(img)
+                sdf_pred, seg_pred = self.sdf_module(img)
                 sdf_metric_batch_decoder(sdf_pred, sdf_true)
 
-                # TODO: test on warping the control mesh
-                # control_mesh = self.warp_control_mesh(sdf_pred)
-                control_mesh = self.control_mesh.extend(sdf_pred.shape[0])
+                seg_pred = torch.stack([self.seg_post_transform(pred) for pred in seg_pred], dim=0)
+                seg_pred = (seg_pred == self.seg_indices[0]) | (seg_pred == self.seg_indices[1]) if isinstance(self.seg_indices, list) else (seg_pred == self.seg_indices)
+                seg_pred = seg_pred.float()
+
+                # TODO: change training process to train gsn on top of sdf_pred
+                sdf = data[f"{modal}_sdf"].as_tensor().to(DEVICE)
+                control_mesh = self.warp_control_mesh(sdf)
                 subdiv_mesh = self.gsn_module(control_mesh)
-
-                # rescale and translate the subdivided mesh to the original space
-                subdiv_mesh.scale_verts_(self.super_params.crop_window_size[0] // 2)
-                subdiv_mesh.offset_verts_(
-                    torch.tensor([self.super_params.crop_window_size[0] // 2] * 3, dtype=torch.float32, device=DEVICE)
-                )
-
-                # save subdivided mesh as .obj files for voxelisation
-                save_obj(f"{self.ckpt_dir}/valid_subdiv_meshes/{id}.obj", 
-                         subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed())
-                # voxelize and fill the surface mesh
-                os.system(f"utils/cuda_voxelizer/build/cuda_voxelizer -f {self.ckpt_dir}/valid_subdiv_meshes/{id}.obj -s {self.super_params.crop_window_size[0]} -o vox -solid")
-                # load the voxelised meshes
-                voxeld_mesh = vox_to_arr(
-                    f"{self.ckpt_dir}/valid_subdiv_meshes/{id}.obj_128.vox").mean(-1)[None]
-                voxeld_mesh = self.post_transform(np.round(voxeld_mesh)).unsqueeze(0)
                 
+                voxeld_mesh = []
+                for pred_mesh in subdiv_mesh:
+                    pred_voxel = self.rasterizer(
+                        pred_mesh.verts_padded(), pred_mesh.faces_padded()
+                    )
+                    voxeld_mesh.append(pred_voxel)
+                voxeld_mesh = torch.cat(voxeld_mesh, dim=0)
+
                 # evaluate the error between seudo mesh and predicted mesh
-                msh_metric_batch_decoder(voxeld_mesh, seg_true)
+                msh_metric_batch_decoder(voxeld_mesh, seg_true_original)
 
                 if step == choice_case:
                     cached_data = {
-                        "seg_true": seg_true.cpu(),
-                        "subdiv_mesh": subdiv_mesh.cpu(),
+                        "sdf_true": sdf_true[0].cpu(),
+                        "sdf_pred": sdf_pred[0].cpu(),
+                        "seg_true": seg_true[0].cpu(),
+                        "seg_pred": seg_pred[0].cpu(),
+                        "seg_true_original": seg_true_original[0].cpu(),
+                        "subdiv_mesh": subdiv_mesh[0].cpu(),
                     }
 
         # log dice score
@@ -577,13 +602,37 @@ class TrainPipeline:
         # save visualization when the eval score is the best
         if eval_score_epoch > self.best_eval_score:
             self.best_eval_score = eval_score_epoch
-            # WARNING: this part is very time-consuming, please comment it if you don"t need it
             wandb.log(
                 {
                     "seg_label vs mesh_pred": wandb.Plotly(draw_plotly(
-                        labels=cached_data["seg_true"], 
-                        pred_meshes=cached_data["subdiv_mesh"]
-                        ))
+                        seg_true=cached_data["seg_true_original"], 
+                        mesh_pred=cached_data["subdiv_mesh"]
+                        )),
+                    "seg_label vs seg_pred": wandb.Plotly(draw_plotly(
+                        seg_true=cached_data["seg_true"], 
+                        seg_pred=cached_data["seg_pred"]
+                        )),
+                    "sdf_pred vs sdf_true -- dx": wandb.Plotly(
+                        ff.create_distplot(
+                            [cached_data["sdf_pred"][0].flatten().cpu().numpy(), cached_data["sdf_true"][0].flatten().cpu().numpy()],
+                            group_labels=["sdf_pred", "sdf_true"],
+                            bin_size=0.1
+                        )
+                    ),
+                    "sdf_pred vs sdf_true -- dy": wandb.Plotly(
+                        ff.create_distplot(
+                            [cached_data["sdf_pred"][1].flatten().cpu().numpy(), cached_data["sdf_true"][1].flatten().cpu().numpy()],
+                            group_labels=["sdf_pred", "sdf_true"],
+                            bin_size=0.1
+                        )
+                    ),
+                    "sdf_pred vs sdf_true -- dz": wandb.Plotly(
+                        ff.create_distplot(
+                            [cached_data["sdf_pred"][2].flatten().cpu().numpy(), cached_data["sdf_true"][2].flatten().cpu().numpy()],
+                            group_labels=["sdf_pred", "sdf_true"],
+                            bin_size=0.1
+                        )
+                    ),
                 },
                 step=epoch + 1
             )

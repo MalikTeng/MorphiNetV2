@@ -24,13 +24,25 @@ def config():
     parser = argparse.ArgumentParser()
     # mode parameters
     parser.add_argument("--mode", type=str, default="train", help="the mode of the script, can be 'train' or 'test'")
-
-    # data parameters
     parser.add_argument("--test_on", type=str, default="sct", help="the dataset for validation, can be 'cap' or 'sct'")
     parser.add_argument("--control_mesh_dir", type=str,
                         default="/home/yd21/Documents/Nasreddin/template/control_mesh-lv.obj",
                         help="the path to your initial meshes")
 
+    # training parameters
+    parser.add_argument("--max_epochs", type=int, default=500, help="the maximum number of epochs for training")
+    parser.add_argument("--delay_epochs", type=int, default=300, help="the number of epochs fine-tuning and validation been on hold")
+    parser.add_argument("--val_interval", type=int, default=50, help="the interval of validation")
+
+    parser.add_argument("--lr", type=float, default=1e-2, help="the learning rate for training")
+    parser.add_argument("--batch_size", type=int, default=16, help="the batch size for training")
+    parser.add_argument("--cache_rate", type=float, default=1.0, help="the cache rate for training, see MONAI document for more details")
+    parser.add_argument("--crop_window_size", type=int, nargs='+', default=[128, 128, 128], help="the size of the crop window for training")
+    parser.add_argument("--pixdim", type=float, nargs='+', default=[8, 8, 8], help="the pixel dimension of downsampled images")
+    parser.add_argument("--point_limit", type=int, default=10_000, help="the number limits of sampling points during deformation")
+    parser.add_argument("--lambda_", type=float, nargs='+', default=[1.0, 1.0, 0.01], help="the coefficients of chamfer distance, normal consistence, and laplacian smooth loss")
+
+    # data parameters
     parser.add_argument("--ct_json_dir", type=str,
                         default="/home/yd21/Documents/Nasreddin/dataset/dataset_task20_f0.json", 
                         help="the path to the json file with named list of CTA train/valid/test sets")
@@ -54,26 +66,13 @@ def config():
     parser.add_argument("--pre_trained_sdf_module_dir", type=str, default=None, help="the path to the pretrained sdf-predict module")
     parser.add_argument("--pre_trained_mr_module_dir", type=str, default=None, help="the path to the pretrained subdiv module")
 
-    # training parameters
-    parser.add_argument("--max_epochs", type=int, default=50, help="the maximum number of epochs for training")
-    parser.add_argument("--delay_epochs", type=int, default=20, help="the number of epochs fine-tuning and validation been on hold")
-    parser.add_argument("--val_interval", type=int, default=5, help="the interval of validation")
-
-    parser.add_argument("--batch_size", type=int, default=16, help="the batch size for training")
-    parser.add_argument("--lr", type=float, default=1e-3, help="the learning rate for training")
-    parser.add_argument("--cache_rate", type=float, default=1.0, help="the cache rate for training, see MONAI document for more details")
-    parser.add_argument("--crop_window_size", type=int, nargs='+', default=[128, 128, 128], help="the size of the crop window for training")
-    parser.add_argument("--pixdim", type=float, nargs='+', default=[8, 8, 8], help="the pixel dimension of downsampled images")
-    parser.add_argument("--point_limit", type=int, default=10_000, help="the number limits of sampling points during deformation")
-    parser.add_argument("--lambda_", type=float, nargs='+', default=[50.0, 1.0, 1.0], help="the coefficients of chamfer distance, normal consistence, and laplacian smooth loss")
-
     # structure parameters for sdf predict module
     parser.add_argument("--num_classes", type=int, default=4, help="the number of segmentation classes of foreground exclude background")
-    parser.add_argument("--init_filters", type=int, default=16, help="the number of initial filters for the modality handel")
+    parser.add_argument("--init_filters", type=int, default=8, help="the number of initial filters for the modality handel")
     parser.add_argument("--num_init_blocks", type=int, nargs='+', default=(1, 2, 2, 4), help="the number of residual blocks for the modality handel")
 
     # structure parameters for subdiv module
-    parser.add_argument("--subdiv_levels", type=int, default=3, help="the number of subdivision levels for the mesh")
+    parser.add_argument("--subdiv_levels", type=int, default=2, help="the number of subdivision levels for the mesh")
     parser.add_argument("--hidden_features_gsn", type=int, default=32, help="the number of hidden features for the GSNNet decoder")
 
     # run_id for wandb, will create automatically if not specified for training
@@ -113,7 +112,7 @@ def train():
                 # 3. fine-tune the GSN Module
                 pipeline.fine_tune(epoch)
                 # 4. validate the pipeline
-                if (epoch - super_params.delay_epochs) % super_params.val_interval == 0:
+                if epoch % super_params.val_interval == 0:
                     pipeline.valid(epoch, super_params.test_on)
     else:
         for epoch in range(super_params.max_epochs):
@@ -123,7 +122,7 @@ def train():
             # 2. train the GSN Module
             pipeline.train_iter(epoch, "subdiv")
             # 3. validate the network
-            if (epoch - super_params.delay_epochs) % super_params.val_interval == 0:
+            if epoch > super_params.delay_epochs and epoch % super_params.val_interval == 0:
                 pipeline.valid(epoch, super_params.test_on)
 
     wandb.finish()
