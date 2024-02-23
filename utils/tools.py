@@ -78,7 +78,7 @@ def draw_plotly(
     if mesh_pred is not None:
         assert mesh_pred._N == 1, "Only support one mesh at a time."
         # rescale the pred mesh to fit the seg_true
-        mesh_pred.scale_verts_(seg_true.shape[-1])
+        mesh_pred.scale_verts_(seg_true.shape[-1] / 2)
         mesh_pred.offset_verts_(torch.tensor([seg_true.shape[-1] / 2] * 3))
         for mesh in mesh_pred:
             x, y, z = mesh.verts_packed().T
@@ -101,11 +101,14 @@ def draw_train_loss(train_loss: dict, super_params: Namespace, task_code: str, p
 
     df = pd.DataFrame(train_loss)
     df.set_index(df.index + 1, inplace=True)
-    if phase == "subdiv":
-        for i, coeff in enumerate(super_params.lambda_, start=1):
-            df.iloc[:, i] = df.iloc[:, i - 1] - coeff * df.iloc[:, i]
+    if phase == "train":
+        lambda_ = super_params.lambda_
+    else:
+        lambda_ = [1]
 
     if len(df) > 0:
+        for i, coeff in enumerate(lambda_, start=1):
+            df.iloc[:, i] = df.iloc[:, i - 1] - coeff * df.iloc[:, i]
         colors = sns.color_palette("hls", len(df.columns.values))
         for i in range(len(df.columns.values) - 1):
             ax = sns.lineplot(

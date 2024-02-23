@@ -15,98 +15,212 @@
 """
 import torch
 import torch.nn as nn
-import numpy as np
 
-from einops import rearrange
+from collections.abc import Callable
+from functools import partial
+from typing import Any, Union
 
-from .parts import ConvLayer, ResBlock
+from monai.networks.layers.factories import Conv, Norm, Pool
+from monai.networks.layers.utils import get_pool_layer
+from monai.utils import ensure_tuple_rep
+from monai.utils.module import look_up_option
 
-__all__ = ["ResNet", "SDFNet", "GSN"]
+from .parts import ResNetBlock, ResNetBottleneck
+
+__all__ = ["ResNet", "AutoEncoder", "GSN", "Subdivision"]
 
 
-class SDFNet(nn.Module):
-    def __init__(self, 
-                 encoder: nn.Module, decoder: nn.Module,
-                 ) -> None:
+class AutoEncoder(nn.Module):
+    """
+        concate the encoder and decoder to predict the distance field. down-sample should be applied to scale the output segmentation into sizes matching the target distance field.
+    """
+    def __init__(self, encoder, decoder, downsample_scale, spatial_dims=3) -> None:
         super().__init__()
 
-        self.encoder_ = encoder
-        self.decoder_ = decoder
+        conv_type: Union[nn.Conv1d, nn.Conv2d, nn.Conv3d] = Conv[Conv.CONV, spatial_dims]
+        norm_type: Union[nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d] = Norm[Norm.BATCH, spatial_dims]
 
-        self._init_weights()
+        self.encoder = encoder
+        self.decoder = decoder
 
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, 1e-2, mode="fan_out", nonlinearity='leaky_relu')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.BatchNorm1d) or isinstance(m, nn.LayerNorm):
-                nn.init.constant_(m.weight, 1)
-                nn.init.zeros_(m.bias)
+        num_layers = torch.log2(torch.tensor(downsample_scale)).int().item()
+        ds_layer = []
+        for _ in range(num_layers):
+            ds_layer.extend([
+                conv_type(
+                    encoder.out_channels, encoder.out_channels, 
+                    kernel_size=3, stride=2, padding=1, bias=True
+                    ),
+                norm_type(encoder.out_channels),
+                ])
+        self.ds_block = nn.Sequential(*ds_layer)
+
+        self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        _, seg = self.encoder_(x)
-        _, sdf = self.decoder_(seg)
+        x_seg = self.encoder(x)
+        x_df = self.ds_block(x_seg)
+        x_df = self.decoder(x_df)
 
-        return sdf, seg
+        return x_df, x_seg
 
 
 class ResNet(nn.Module):
+    """
+    ResNet based on: `Deep Residual Learning for Image Recognition <https://arxiv.org/pdf/1512.03385.pdf>`_
+    and `Can Spatiotemporal 3D CNNs Retrace the History of 2D CNNs and ImageNet? <https://arxiv.org/pdf/1711.09577.pdf>`_.
+    Adapted from `<https://github.com/kenshohara/3D-ResNets-PyTorch/tree/master/models>`_.
+
+    Args:
+        block: which ResNet block to use, either Basic or Bottleneck.
+            ResNet block class or str.
+            for Basic: ResNetBlock or 'basic'
+            for Bottleneck: ResNetBottleneck or 'bottleneck'
+        layers: how many layers to use.
+        block_inplanes: determine the size of planes at each step. Also tunable with widen_factor.
+        spatial_dims: number of spatial dimensions of the input image.
+        n_input_channels: number of input channels for first convolutional layer.
+        conv1_t_size: size of first convolution layer, determines kernel and padding.
+        conv1_t_stride: stride of first convolution layer.
+        no_max_pool: bool argument to determine if to use maxpool layer.
+        shortcut_type: which downsample block to use. Options are 'A', 'B', default to 'B'.
+            - 'A': using `self._downsample_basic_block`.
+            - 'B': kernel_size 1 conv + norm.
+        widen_factor: widen output for each layer.
+        num_classes: number of output (classifications).
+        feed_forward: whether to add the FC layer for the output, default to `True`.
+        bias_downsample: whether to use bias term in the downsampling block when `shortcut_type` is 'B', default to `True`.
+
+    """
+
     def __init__(
         self,
-        init_filters: int,
-        in_channels: int,
-        out_channels: int,
-        act: str = 'relu',
-        norm: str = 'batch',
-        num_init_blocks: tuple = (1, 2, 2, 4),
-    ):
+        block: Union[ResNetBlock, ResNetBottleneck, str],
+        layers: list[int],
+        block_inplanes: list[int],
+        spatial_dims: int = 3,
+        n_input_channels: int = 3,
+        conv1_t_size: Union[tuple[int], int] = 7,
+        conv1_t_stride: Union[tuple[int], int] = 1,
+        no_max_pool: bool = False,
+        shortcut_type: str = "B",
+        widen_factor: float = 1.0,
+        num_classes: int = 400,
+        feed_forward: bool = True,
+        bias_downsample: bool = True,  # for backwards compatibility (also see PR #5477)
+    ) -> None:
         super().__init__()
-        self.init_filters = init_filters
-        self.in_resnet = in_channels
-        self.out_resnet = out_channels
-        self.act = act
-        self.norm = norm
 
-        self.blocks = self._make_blocks(num_init_blocks)
-        
-    def _make_blocks(self, num_init_blocks: tuple) -> nn.ModuleList:
-        down_blocks  = nn.ModuleList()
-        in_channels = self.in_resnet
-        out_channels = None
-        for i in range(len(num_init_blocks)):
-            if i == 0:
-                out_channels = self.init_filters
+        if isinstance(block, str):
+            if block == "basic":
+                block = ResNetBlock
+            elif block == "bottleneck":
+                block = ResNetBottleneck
             else:
-                out_channels = in_channels * 2
-            down_blocks.append(nn.Sequential(
-                ConvLayer(
-                    in_channels, out_channels, 1, 1, 0,
-                    self.norm, self.act,
-                    ), 
-                ResBlock(
-                    out_channels, out_channels,
-                    self.norm, self.act,
-                    num_layers=num_init_blocks[i]
-                    )
-                ))
-            in_channels = out_channels
-        # output layer
-        down_blocks.append(ConvLayer(
-            out_channels, self.out_resnet, 1, 1, 0,
-            None, None
-        ))
-            
-        return down_blocks
+                raise ValueError("Unknown block '%s', use basic or bottleneck" % block)
 
-    def forward(self, x):
-        for block in self.blocks[:-1]:
-            x, _ = block(x)
-        x_seg = self.blocks[-1](x)
+        conv_type: Union[nn.Conv1d, nn.Conv2d, nn.Conv3d] = Conv[Conv.CONV, spatial_dims]
+        norm_type: Union[nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d] = Norm[Norm.BATCH, spatial_dims]
 
-        return x, x_seg
+        block_inplanes = [int(x * widen_factor) for x in block_inplanes]
 
+        self.in_planes = block_inplanes[0]
+        self.no_max_pool = no_max_pool
+        self.bias_downsample = bias_downsample
+
+        conv1_kernel_size = ensure_tuple_rep(conv1_t_size, spatial_dims)
+        conv1_stride = ensure_tuple_rep(conv1_t_stride, spatial_dims)
+
+        self.conv1 = conv_type(
+            n_input_channels,
+            self.in_planes,
+            kernel_size=conv1_kernel_size,  # type: ignore
+            stride=conv1_stride,  # type: ignore
+            padding=tuple(k // 2 for k in conv1_kernel_size),  # type: ignore
+            bias=False,
+        )
+        self.bn1 = norm_type(self.in_planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.layer1 = self._make_layer(block, block_inplanes[0], layers[0], spatial_dims, shortcut_type)
+        self.layer2 = self._make_layer(block, block_inplanes[1], layers[1], spatial_dims, shortcut_type)
+        self.layer3 = self._make_layer(block, block_inplanes[2], layers[2], spatial_dims, shortcut_type)
+        self.layer4 = self._make_layer(block, block_inplanes[3], layers[3], spatial_dims, shortcut_type)
+        self.out = conv_type(block_inplanes[3] * block.expansion, num_classes, kernel_size=1, stride=1, bias=True)
+
+        for m in self.modules():
+            if isinstance(m, conv_type):
+                nn.init.kaiming_normal_(torch.as_tensor(m.weight), mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, norm_type):
+                nn.init.constant_(torch.as_tensor(m.weight), 1)
+                nn.init.constant_(torch.as_tensor(m.bias), 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.constant_(torch.as_tensor(m.bias), 0)
+
+    def _downsample_basic_block(self, x: torch.Tensor, planes: int, stride: int, spatial_dims: int = 3) -> torch.Tensor:
+        out: torch.Tensor = get_pool_layer(("avg", {"kernel_size": 1, "stride": stride}), spatial_dims=spatial_dims)(x)
+        zero_pads = torch.zeros(out.size(0), planes - out.size(1), *out.shape[2:], dtype=out.dtype, device=out.device)
+        out = torch.cat([out.data, zero_pads], dim=1)
+        return out
+
+    def _make_layer(
+        self,
+        block: Union[ResNetBlock, ResNetBottleneck],
+        planes: int,
+        blocks: int,
+        spatial_dims: int,
+        shortcut_type: str,
+        stride: int = 1,
+    ) -> nn.Sequential:
+        conv_type: Callable = Conv[Conv.CONV, spatial_dims]
+        norm_type: Callable = Norm[Norm.BATCH, spatial_dims]
+
+        downsample: Union[nn.Module, partial, None] = None
+        if stride != 1 or self.in_planes != planes * block.expansion:
+            if look_up_option(shortcut_type, {"A", "B"}) == "A":
+                downsample = partial(
+                    self._downsample_basic_block,
+                    planes=planes * block.expansion,
+                    stride=stride,
+                    spatial_dims=spatial_dims,
+                )
+            else:
+                downsample = nn.Sequential(
+                    conv_type(
+                        self.in_planes,
+                        planes * block.expansion,
+                        kernel_size=1,
+                        stride=stride,
+                        bias=self.bias_downsample,
+                    ),
+                    norm_type(planes * block.expansion),
+                )
+
+        layers = [
+            block(
+                in_planes=self.in_planes, planes=planes, spatial_dims=spatial_dims, stride=stride, downsample=downsample
+            )
+        ]
+
+        self.in_planes = planes * block.expansion
+        for _i in range(1, blocks):
+            layers.append(block(self.in_planes, planes, spatial_dims=spatial_dims))
+
+        return nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+
+        x = self.out(x)
+        x = self.relu(x)
+
+        return x
 
 
 """
@@ -120,7 +234,7 @@ class ResNet(nn.Module):
     3. create new vertices using the passage method and concatenate them to the original vertices.
     4. output the new mesh with the same topology as the original mesh.
 """
-from typing import Any
+from typing import List
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -131,40 +245,77 @@ from torch_geometric.nn import Sequential as SeqGCN
 from torch_geometric.utils import add_self_loops, degree
 
 
-def subdivide_faces_fn(mesh):
-    verts_packed = mesh.verts_packed()
-    faces_packed = mesh.faces_packed()
-    faces_packed_to_edges_packed = (
-        mesh.faces_packed_to_edges_packed() + verts_packed.shape[0]
-    )
-    f0 = torch.stack(
-        [
-            faces_packed[:, 0],
-            faces_packed_to_edges_packed[:, 2],
-            faces_packed_to_edges_packed[:, 1],
-        ],
-        dim=1,
-    )
-    f1 = torch.stack(
-        [
-            faces_packed[:, 1],
-            faces_packed_to_edges_packed[:, 0],
-            faces_packed_to_edges_packed[:, 2],
-        ],
-        dim=1,
-    )
-    f2 = torch.stack(
-        [
-            faces_packed[:, 2],
-            faces_packed_to_edges_packed[:, 1],
-            faces_packed_to_edges_packed[:, 0],
-        ],
-        dim=1,
-    )
-    f3 = faces_packed_to_edges_packed
-    subdivided_faces_packed = torch.cat([f0, f1, f2, f3], dim=0)
+# function for pre-computed faces index
+@ torch.no_grad()
+class Subdivision():
+    def __init__(self, 
+                 mesh: Meshes, num_layers: int,
+                 allow_subdiv_faces: List[torch.LongTensor]=[None, None]
+                 ) -> list:
+        
+        self.faces_levels = []
+        for l in range(num_layers):
+            new_faces = self.subdivide_faces_fn(mesh, allow_subdiv_faces[l])
+            self.faces_levels.append(new_faces)
 
-    return subdivided_faces_packed.requires_grad_(False)
+            verts = mesh.verts_packed()
+            edges = mesh.edges_packed()
+            new_verts = verts[edges].mean(dim=1)
+            face_points = verts[mesh.faces_packed()].mean(dim=1)
+            new_verts = torch.cat([verts, new_verts, face_points], dim=0)
+            mesh = Meshes(verts=[new_verts], faces=[new_faces])
+
+    def subdivide_faces_fn(self, mesh: Meshes, allow_subdiv_faces: torch.LongTensor=None):
+        verts_packed = mesh.verts_packed()
+        faces_packed = mesh.faces_packed()
+        faces_packed_to_edges_packed = (
+            verts_packed.shape[0] + mesh.faces_packed_to_edges_packed()
+        )
+        faces_idx = torch.arange(faces_packed_to_edges_packed.max() + 1, faces_packed_to_edges_packed.max() + mesh._F + 1,device=faces_packed.device)
+        if allow_subdiv_faces is not None:
+            faces_packed = faces_packed[allow_subdiv_faces]
+            faces_packed_to_edges_packed = faces_packed_to_edges_packed[allow_subdiv_faces]
+            faces_idx = faces_idx[allow_subdiv_faces]
+
+        f0 = torch.stack([
+            faces_packed[:, 0],                     # 0
+            faces_packed_to_edges_packed[:, 2],     # 3
+            faces_idx,                              # 6
+        ], dim=1)
+        f1 = torch.stack([
+            faces_packed[:, 1],                     # 1
+            faces_idx,                              # 6
+            faces_packed_to_edges_packed[:, 2],     # 3
+        ], dim=1)
+        f2 = torch.stack([
+            faces_packed[:, 1],                     # 1
+            faces_packed_to_edges_packed[:, 0],     # 5
+            faces_idx,                              # 6
+        ], dim=1)
+        f3 = torch.stack([
+            faces_packed[:, 2],                     # 2
+            faces_idx,                              # 6
+            faces_packed_to_edges_packed[:, 0],     # 5
+        ], dim=1)
+        f4 = torch.stack([
+            faces_packed[:, 2],                     # 2
+            faces_packed_to_edges_packed[:, 1],     # 4
+            faces_idx,                              # 6
+        ], dim=1)
+        f5 = torch.stack([
+            faces_packed[:, 0],                     # 0
+            faces_idx,                              # 6
+            faces_packed_to_edges_packed[:, 1],     # 4
+        ], dim=1)
+
+        subdivided_faces_packed = torch.cat([f0, f1, f2, f3, f4, f5], dim=0)
+
+        if allow_subdiv_faces is not None:
+            subdivided_faces_packed = torch.cat(
+                [mesh.faces_packed()[~allow_subdiv_faces], subdivided_faces_packed], dim=0
+            )
+
+        return subdivided_faces_packed
     
 
 class PositionNet(MessagePassing):
@@ -216,103 +367,41 @@ class PositionNet(MessagePassing):
         return norm.view(-1, 1) * x_j
 
 
-class SubdivideMeshes(nn.Module):
-    def __init__(self, subdivided_faces=None, hidden_features=16) -> None:
-        super().__init__()
-
-        self._N = -1
-        if subdivided_faces is not None:
-            self.register_buffer("_subdivided_faces", subdivided_faces)
-        else:
-            raise ValueError("either meshes or subdivided_faces must be provided")
-
-        # TODO: develop own GCN layer with learable weights.
-        # self.gcn_layer_ = PositionNet(hidden_features=hidden_features)
-        self.gcn_layer_ = SeqGCN(
-            "x, edge_index",[
-                (GCNConv(3, hidden_features), "x, edge_index -> x"),
-                LeakyReLU(inplace=True),
-                (GCNConv(hidden_features, hidden_features), "x, edge_index -> x"),
-                LeakyReLU(inplace=True),
-                Dropout(0.5),
-                (GCNConv(hidden_features, 3), "x, edge_index -> x")
-                ])
-
-        self.reset_parameters()
-    
-    def reset_parameters(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight, 1e-2)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.BatchNorm1d) or isinstance(m, nn.LayerNorm):
-                nn.init.constant_(m.weight, 1)
-                nn.init.zeros_(m.bias)
-
-    def forward(self, meshes):
-        # 1. update the vertices with learnt offsets.
-        offsets = self.gcn_layer_(meshes.verts_packed(), 
-                                  meshes.edges_packed().t().contiguous())
-        meshes = meshes.offset_verts(offsets)
-
-        # 2. create new vertices at the middle of the edges.
-        verts = meshes.verts_padded()
-        edges = meshes[0].edges_packed()
-        new_verts = verts[:, edges].mean(dim=2)
-        new_verts = torch.cat([verts, new_verts], dim=1)
-
-        # 3. create new meshes with the same topology as the original mesh.
-        new_faces = self._subdivided_faces.expand(meshes._N, -1, -1)
-        new_meshes = Meshes(verts=new_verts, faces=new_faces)
-
-        return new_meshes
-
-        # verts = meshes.verts_padded()
-
-        # # create new vertices at the middle of the edges.
-        # edges = meshes[0].edges_packed()
-        # new_verts = verts[:, edges].mean(dim=2)
-        # new_verts = torch.cat([verts, new_verts], dim=1)
-
-        # # create new meshes with the same topology as the original mesh.
-        # new_faces = self._subdivided_faces.expand(meshes._N, -1, -1)
-        # new_meshes = Meshes(verts=new_verts, faces=new_faces)
-
-        # # update the all vertices with the offsets.
-        # new_edges = new_meshes.edges_packed()
-        # new_verts = new_meshes.verts_packed()
-        # offsets = self.gcn_layer_(new_verts, new_edges.t().contiguous())
-
-        # new_meshes = new_meshes.offset_verts(offsets)
-
-        # return new_meshes
-    
-
 class GSN(nn.Module):
-    def __init__(self, meshes: Meshes, hidden_features: int, num_layers: int = 2):
+    def __init__(self, hidden_features: int, num_layers: int = 2):
         super().__init__()
-        assert len(meshes) == 1, "requires only one initial mesh"
 
-        # pre-computed faces index
-        self.faces_layers_ = []
-        for _ in range(num_layers):
-            verts = meshes.verts_packed()
-            edges = meshes.edges_packed()
-            new_faces = subdivide_faces_fn(meshes)
-            self.faces_layers_.append(new_faces)
-            new_verts = verts[edges].mean(dim=1)
-            new_verts = torch.cat([verts, new_verts], dim=0)
-            meshes = Meshes(verts=[new_verts], faces=[new_faces])
-
-        self.gcn_layers_ = ModuleList([
-            SubdivideMeshes(subdivided_faces=self.faces_layers_[i], 
-                            hidden_features=hidden_features) 
-            for i in range(num_layers)
+        self.gcn_layers = ModuleList([
+                SeqGCN(
+                "x, edge_index",[
+                    (GCNConv(3, hidden_features), "x, edge_index -> x"),
+                    LeakyReLU(inplace=True),
+                    (GCNConv(hidden_features, hidden_features), "x, edge_index -> x"),
+                    LeakyReLU(inplace=True),
+                    Dropout(0.5),
+                    (GCNConv(hidden_features, 3), "x, edge_index -> x")
+                    ])
+                for _ in range(num_layers)
             ])
 
-    def forward(self, meshes: Meshes):
-        for gsn_ in self.gcn_layers_:
-            meshes = gsn_(meshes)
+    def forward(self, meshes: Meshes, subdivided_faces: list[torch.LongTensor]):
+        
+        for l, gcn_layer in enumerate(self.gcn_layers):
+            # 1. update the vertices with learnt offsets.
+            offsets = gcn_layer(
+                meshes.verts_packed(), meshes.edges_packed().t().contiguous()
+                )
+            meshes = meshes.offset_verts(offsets)
 
+            # 2. create new vertices at the middle of the edges.
+            verts = meshes.verts_padded()
+            edges = meshes[0].edges_packed()
+            new_verts = verts[:, edges].mean(dim=2)
+            face_points = verts[:, meshes[0].faces_packed()].mean(dim=2)
+            new_verts = torch.cat([verts, new_verts, face_points], dim=1)
+
+            # 3. create new meshes with the same topology as the original mesh.
+            new_faces = subdivided_faces[l].expand(meshes._N, -1, -1).to(meshes.device)
+            meshes = Meshes(verts=new_verts, faces=new_faces)
+        
         return meshes
