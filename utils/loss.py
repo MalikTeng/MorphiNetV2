@@ -6,9 +6,12 @@ from torch.autograd import Function
 from torch.autograd.function import once_differentiable
 from monai.data import MetaTensor
 
+from trimesh.convex import convex_hull
+
 from pytorch3d import _C
 from pytorch3d.structures import Meshes, Pointclouds
-from pytorch3d.ops import cot_laplacian, packed_to_padded
+from pytorch3d.loss import chamfer_distance, point_mesh_face_distance
+from pytorch3d.ops import cot_laplacian, packed_to_padded, sample_points_from_meshes
 from pytorch3d.ops.knn import knn_points
 
 
@@ -129,7 +132,8 @@ def face_score(
     face_dist = face_to_point.view(meshes._N, -1).mean(0)
 
     # group subdivied faces in set of four as result of subdivide original faces, and calculate a possibility to get rid of subdvided faces in that set
-    face_dist = torch.softmax(face_dist.view(-1, 6).mean(1), dim=0)
+    # face_dist = torch.softmax(face_dist.view(-1, 6).mean(1), dim=0)
+    face_dist = torch.softmax(face_dist.view(-1, 4).mean(1), dim=0)
 
     return face_dist
 
@@ -261,73 +265,72 @@ def mesh_laplacian_smoothing(meshes, method: str = "uniform"):
     return loss.sum() / N
 
 
-def skeleton_loss_fn(subdiv_mesh: Meshes, seg_true: List[MetaTensor], slice_info: str, seg_indices: Union[int, str], device: torch.device, t: float=2.73, reduction: str="mean") -> Tensor:
+@torch.no_grad()
+def create_convex_hull(seg_true: Tensor, seg_bbox: Tensor, slice_info: str, seg_indices: Union[int, str], device: torch.device) -> List[torch.Tensor]:
+    with torch.no_grad():
+        point_label = []
+        for b, vol in enumerate(seg_true):
+            # load segmentation parameters
+            label = vol > 0 if isinstance(seg_indices, str) else vol == seg_indices
+            bbox = seg_bbox[b]
+            margin = torch.div(128 - bbox.diff(1).squeeze(), 2, rounding_mode="floor").int()
+
+            coord = torch.meshgrid(*[torch.arange(s) for s in vol.shape])
+            coord = torch.stack(coord, axis=0).view(3, -1).float().to(device)
+
+            # load view parameters
+            view_param = json.load(open(slice_info[b], "r"))
+            point_view = []
+            for view in view_param.values():
+                normal_start = torch.tensor(view["normal_vector"][0], device=device)
+                normal_end = torch.tensor(view["normal_vector"][1], device=device)
+                normal = normal_end - normal_start
+                normal_start = normal_start - bbox[:, 0] + margin
+                d_view = torch.dot(normal, normal_start)
+                coord_idx_view = abs(torch.matmul(normal, coord) - d_view) < 1
+                coord_view = coord[:, coord_idx_view & label.flatten()]
+                point_view.append(coord_view.T)
+            point_view = torch.cat(point_view, axis=0)
+            point_label.append(point_view)
+        # create a convex hull from the segmentation point_label
+        convex_mesh = [convex_hull(b.cpu().numpy()) for b in point_label]
+        # transform the convex_label from voxel space to the NDC space and return it as a list of torch.tensor
+        return Meshes(
+            verts=[torch.tensor(2 * (m.vertices - m.centroid) / m.extents.max(), dtype=torch.float32, device=device) 
+                   for m in convex_mesh],
+            faces=[torch.tensor(m.faces, dtype=torch.long, device=device) for m in convex_mesh]
+        )
+        
+
+def skeleton_loss_fn(subdiv_mesh: Meshes, seg_true: Tensor, seg_bbox: Tensor, slice_info: List[str], seg_indices: Union[int, str], lambda_: List[float], device: torch.device) -> Tensor:
     """
         collect ground-truth segmentation labels from all image-views as label skeleton and calculate the attenuated k-nn distance error between the surface centroid of subdivided mesh and the skeleton.
 
         input:
             subdiv_mesh: subdivided meshes in voxel space
             seg_true: list of input segmentation labels
+            seg_bbox: bounding box of the segmentation label
             slice_info: slice_info json file includes the data shape and affine matrix for every CMR slices
             seg_indices: index to select the class label in segmentation matching with the mesh
             device: choose either 'cuda' or 'cpu'
-            t: temperature parameter in the exponential function
-            reduction: choose whether to return the average or sum the distance error of points on batch
         output:
             loss: torch.tensor
     """
-    point_label, bbox_centre, bbox_extent = [], [], []
-    with torch.no_grad():
-        for b, vol in enumerate(seg_true):
-            # load segmentation parameters
-            label = vol.as_tensor() > 0 if isinstance(seg_indices, str) else vol.as_tensor() == seg_indices
-            bbox = torch.nonzero(label, as_tuple=False)
-            bbox = torch.stack([bbox.min(axis=0).values, bbox.max(axis=0).values]).T.to(device)
-            bbox_centre.append(bbox.float().mean(1))
-            bbox_extent.append(bbox.float().diff(1).max())
+    convex_label = create_convex_hull(seg_true, seg_bbox, slice_info, seg_indices, device)
 
-            coord = torch.meshgrid(*[torch.arange(s) for s in vol.shape])
-            coord = torch.stack(coord, axis=0).view(3, -1).float()
+    loss_chmf, _ = chamfer_distance(
+        convex_label.verts_padded(), subdiv_mesh.verts_padded(),
+        point_reduction="mean", batch_reduction="mean")
+    true_points = sample_points_from_meshes(convex_label, 2 * subdiv_mesh._F)
+    pointcloud_true_ct = Pointclouds(points=true_points)
+    loss_norm = point_mesh_face_distance(subdiv_mesh, pointcloud_true_ct, min_triangle_area=1e-3)
+    loss_smooth = mesh_laplacian_smoothing(subdiv_mesh, method="cotcurv")
 
-            # load view parameters
-            view_param = json.load(open(slice_info[b], "r"))
-            point_view = []
-            for view in view_param.values():
-                normal_start, normal_end = view["normal_vector"]
-                normal = torch.tensor(normal_end) - torch.tensor(normal_start)
-                d_view = torch.dot(normal, torch.tensor(normal_start))
-                coord_idx_view = torch.matmul(normal, coord) - d_view < 1e-6
-                coord_view = coord[:, coord_idx_view[0] & label.flatten()]
-                point_view.append(coord_view.T)
-            point_view = torch.cat(point_view, axis=0)
-            point_label.append(point_view)
-        length_label = torch.LongTensor([i.shape[0] for i in point_label]).to(device)
-        point_label = packed_to_padded(
-            torch.cat(point_label, dim=0), 
-            first_idxs=torch.LongTensor([0] + [i.shape[0] for i in point_label[:-1]]).cumsum(0),
-            max_size=max([i.shape[0] for i in point_label])
-            ).to(device)
-        bbox_extent = torch.stack(bbox_extent, axis=0)
-        bbox_centre = torch.stack(bbox_centre, axis=0)
-
-    subdiv_mesh.scale_verts_(bbox_extent / 2)
-    subdiv_mesh.offset_verts_(bbox_centre.unsqueeze(1).expand(subdiv_mesh._N, subdiv_mesh._V, -1).reshape(-1, 3))
-    verts, faces = subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
-    point_subdiv = 1/3 * verts[faces].sum(dim=1)
-
-    # knn distance error
-    point_subdiv = point_subdiv.view(subdiv_mesh._N, -1, 3)
-    nn = knn_points(point_subdiv, point_label, lengths1=None, lengths2=length_label, norm=2, K=1)
-    error = nn.dists[..., 0]
-    error = error * torch.exp(-error / t)
-
-    if reduction == "mean":
-        loss = error.mean()
-    elif reduction == "sum":
-        loss = error.mean(1).sum()
+    loss = lambda_[1] * loss_chmf + \
+        lambda_[2] * loss_norm + \
+            lambda_[3] * loss_smooth
 
     return loss
-
 
 
 # @torch.no_grad()

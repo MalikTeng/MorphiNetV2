@@ -18,7 +18,7 @@ import torch.nn as nn
 
 from collections.abc import Callable
 from functools import partial
-from typing import Any, Union
+from typing import Any, Dict, Union
 
 from monai.networks.layers.factories import Conv, Norm, Pool
 from monai.networks.layers.utils import get_pool_layer
@@ -237,12 +237,18 @@ class ResNet(nn.Module):
 from typing import List
 import torch
 from torch import Tensor
+from torch_geometric.typing import (
+    Adj,
+    OptPairTensor,
+    OptTensor,
+)
 import torch.nn as nn
-from torch.nn import Sequential, ModuleList, ReLU, LeakyReLU, Dropout, Linear, BatchNorm1d, LayerNorm
+from torch.nn import Sequential, ModuleList, LeakyReLU
 from pytorch3d.structures import Meshes
-from torch_geometric.nn import MessagePassing, GCNConv, ChebConv
-from torch_geometric.nn import Sequential as SeqGCN
-from torch_geometric.utils import add_self_loops, degree
+from torch_geometric.nn import MessagePassing
+from torch_geometric.nn.dense.linear import Linear
+from torch_geometric.utils import scatter, to_undirected
+from torch_geometric.utils.num_nodes import maybe_num_nodes
 
 
 # function for pre-computed faces index
@@ -257,12 +263,10 @@ class Subdivision():
         for l in range(num_layers):
             new_faces = self.subdivide_faces_fn(mesh, allow_subdiv_faces[l])
             self.faces_levels.append(new_faces)
-
             verts = mesh.verts_packed()
             edges = mesh.edges_packed()
             new_verts = verts[edges].mean(dim=1)
-            face_points = verts[mesh.faces_packed()].mean(dim=1)
-            new_verts = torch.cat([verts, new_verts, face_points], dim=0)
+            new_verts = torch.cat([verts, new_verts], dim=0)
             mesh = Meshes(verts=[new_verts], faces=[new_faces])
 
     def subdivide_faces_fn(self, mesh: Meshes, allow_subdiv_faces: torch.LongTensor=None):
@@ -271,44 +275,28 @@ class Subdivision():
         faces_packed_to_edges_packed = (
             verts_packed.shape[0] + mesh.faces_packed_to_edges_packed()
         )
-        faces_idx = torch.arange(faces_packed_to_edges_packed.max() + 1, faces_packed_to_edges_packed.max() + mesh._F + 1,device=faces_packed.device)
         if allow_subdiv_faces is not None:
             faces_packed = faces_packed[allow_subdiv_faces]
             faces_packed_to_edges_packed = faces_packed_to_edges_packed[allow_subdiv_faces]
-            faces_idx = faces_idx[allow_subdiv_faces]
 
         f0 = torch.stack([
             faces_packed[:, 0],                     # 0
             faces_packed_to_edges_packed[:, 2],     # 3
-            faces_idx,                              # 6
+            faces_packed_to_edges_packed[:, 1],     # 4
         ], dim=1)
         f1 = torch.stack([
             faces_packed[:, 1],                     # 1
-            faces_idx,                              # 6
+            faces_packed_to_edges_packed[:, 0],     # 5
             faces_packed_to_edges_packed[:, 2],     # 3
         ], dim=1)
         f2 = torch.stack([
-            faces_packed[:, 1],                     # 1
-            faces_packed_to_edges_packed[:, 0],     # 5
-            faces_idx,                              # 6
-        ], dim=1)
-        f3 = torch.stack([
-            faces_packed[:, 2],                     # 2
-            faces_idx,                              # 6
-            faces_packed_to_edges_packed[:, 0],     # 5
-        ], dim=1)
-        f4 = torch.stack([
             faces_packed[:, 2],                     # 2
             faces_packed_to_edges_packed[:, 1],     # 4
-            faces_idx,                              # 6
+            faces_packed_to_edges_packed[:, 0],     # 5
         ], dim=1)
-        f5 = torch.stack([
-            faces_packed[:, 0],                     # 0
-            faces_idx,                              # 6
-            faces_packed_to_edges_packed[:, 1],     # 4
-        ], dim=1)
+        f3 = faces_packed_to_edges_packed           # 5, 4, 3
 
-        subdivided_faces_packed = torch.cat([f0, f1, f2, f3, f4, f5], dim=0)
+        subdivided_faces_packed = torch.cat([f0, f1, f2, f3], dim=0)
 
         if allow_subdiv_faces is not None:
             subdivided_faces_packed = torch.cat(
@@ -317,54 +305,163 @@ class Subdivision():
 
         return subdivided_faces_packed
     
+# # function for pre-computed faces index
+# @ torch.no_grad()
+# class Subdivision():
+#     def __init__(self, 
+#                  mesh: Meshes, num_layers: int,
+#                  allow_subdiv_faces: List[torch.LongTensor]=[None, None]
+#                  ) -> list:
+        
+#         self.faces_levels = []
+#         for l in range(num_layers):
+#             new_faces = self.subdivide_faces_fn(mesh, allow_subdiv_faces[l])
+#             self.faces_levels.append(new_faces)
 
-class PositionNet(MessagePassing):
-    def __init__(self, hidden_features: int, aggr: str = "mean"):
-        super().__init__(aggr=aggr)
-        self.fc_ = Sequential(
-            Linear(3, hidden_features, bias=False),
-            LayerNorm(hidden_features),
-            LeakyReLU(inplace=True),
-            Linear(hidden_features, hidden_features // 2, bias=False),
-            LayerNorm(hidden_features // 2),
-            LeakyReLU(inplace=True),
+#             verts = mesh.verts_packed()
+#             edges = mesh.edges_packed()
+#             new_verts = verts[edges].mean(dim=1)
+#             face_points = verts[mesh.faces_packed()].mean(dim=1)
+#             new_verts = torch.cat([verts, new_verts, face_points], dim=0)
+#             mesh = Meshes(verts=[new_verts], faces=[new_faces])
+
+#     def subdivide_faces_fn(self, mesh: Meshes, allow_subdiv_faces: torch.LongTensor=None):
+#         verts_packed = mesh.verts_packed()
+#         faces_packed = mesh.faces_packed()
+#         faces_packed_to_edges_packed = (
+#             verts_packed.shape[0] + mesh.faces_packed_to_edges_packed()
+#         )
+#         faces_idx = torch.arange(faces_packed_to_edges_packed.max() + 1, faces_packed_to_edges_packed.max() + mesh._F + 1,device=faces_packed.device)
+#         if allow_subdiv_faces is not None:
+#             faces_packed = faces_packed[allow_subdiv_faces]
+#             faces_packed_to_edges_packed = faces_packed_to_edges_packed[allow_subdiv_faces]
+#             faces_idx = faces_idx[allow_subdiv_faces]
+
+#         f0 = torch.stack([
+#             faces_packed[:, 0],                     # 0
+#             faces_packed_to_edges_packed[:, 2],     # 3
+#             faces_idx,                              # 6
+#         ], dim=1)
+#         f1 = torch.stack([
+#             faces_packed[:, 1],                     # 1
+#             faces_idx,                              # 6
+#             faces_packed_to_edges_packed[:, 2],     # 3
+#         ], dim=1)
+#         f2 = torch.stack([
+#             faces_packed[:, 1],                     # 1
+#             faces_packed_to_edges_packed[:, 0],     # 5
+#             faces_idx,                              # 6
+#         ], dim=1)
+#         f3 = torch.stack([
+#             faces_packed[:, 2],                     # 2
+#             faces_idx,                              # 6
+#             faces_packed_to_edges_packed[:, 0],     # 5
+#         ], dim=1)
+#         f4 = torch.stack([
+#             faces_packed[:, 2],                     # 2
+#             faces_packed_to_edges_packed[:, 1],     # 4
+#             faces_idx,                              # 6
+#         ], dim=1)
+#         f5 = torch.stack([
+#             faces_packed[:, 0],                     # 0
+#             faces_idx,                              # 6
+#             faces_packed_to_edges_packed[:, 1],     # 4
+#         ], dim=1)
+
+#         subdivided_faces_packed = torch.cat([f0, f1, f2, f3, f4, f5], dim=0)
+
+#         if allow_subdiv_faces is not None:
+#             subdivided_faces_packed = torch.cat(
+#                 [mesh.faces_packed()[~allow_subdiv_faces], subdivided_faces_packed], dim=0
+#             )
+
+#         return subdivided_faces_packed
+    
+def gcn_norm(edge_index, edge_weight=None, num_nodes=None, flow="source_to_target", dtype=None):
+
+    assert flow in ['source_to_target', 'target_to_source']
+    num_nodes = maybe_num_nodes(edge_index, num_nodes)
+
+    if edge_weight is None:
+        edge_weight = torch.ones((edge_index.size(1), ), dtype=dtype,
+                                 device=edge_index.device)
+
+    row, col = edge_index[0], edge_index[1]
+    idx = col if flow == 'source_to_target' else row
+    deg = scatter(edge_weight, idx, dim=0, dim_size=num_nodes, reduce='sum')
+    deg_inv_sqrt = deg.pow_(-0.5)
+    deg_inv_sqrt.masked_fill_(deg_inv_sqrt == float('inf'), 0)
+    edge_weight = deg_inv_sqrt[row] * edge_weight * deg_inv_sqrt[col]
+
+    return edge_index, edge_weight
+
+
+class GSNLayer(MessagePassing):
+    def __init__(self, in_channels: int, out_channels: int, **kwargs):
+
+        kwargs.setdefault('aggr', 'add')
+        super().__init__(**kwargs)
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.hidden_features = kwargs.get('hidden_features', 16)
+
+        self.lin = Sequential(
+            Linear(in_channels, self.hidden_features, bias=False,
+                   weight_initializer='glorot'),
+                   LeakyReLU(inplace=True),
+            Linear(self.hidden_features, self.hidden_features, bias=False,
+                     weight_initializer='glorot'),
+                     LeakyReLU(inplace=True),
+            Linear(self.hidden_features, out_channels, bias=False,
+                        weight_initializer='glorot')
         )
 
-        self.out_ = Linear(hidden_features // 2, 3, bias=True)
-
         self.reset_parameters()
-    
+
     def reset_parameters(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+        super().reset_parameters()
+        for m in self.lin:
+            if isinstance(m, Linear):
+                m.reset_parameters()
 
-    def forward(self, x, edge_index):
-        # add self loops to the graph.
-        edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+    def forward(self, x: Tensor, edge_index: Adj,
+                edge_weight: OptTensor = None) -> Tensor:
 
-        # apply linear transformation to the input features.
-        x = self.fc_(x)
+        edge_index, edge_weight = gcn_norm(  # yapf: disable
+            edge_index, edge_weight, x.size(self.node_dim),
+            self.flow, x.dtype)
 
-        # calculate the norm
-        row, col = edge_index
-        deg = degree(col, x.size(0), dtype=x.dtype)
-        deg_inv_sqrt = deg.pow(-0.5)
-        deg_inv_sqrt[deg_inv_sqrt == float("inf")] = 0
-        norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
+        x = self.lin(x)
 
-        # propagate the messages.
-        x = self.propagate(edge_index, x=x, norm=norm)
+        out = self.propagate(edge_index, x=x, edge_weight=edge_weight,
+                             size=None)
 
-        # apply linear transformation to the output features.
-        x = self.out_(x)
+        return out
 
-        return x
+    def message(self, x_j: Tensor, edge_weight: OptTensor) -> Tensor:
+        return x_j if edge_weight is None else edge_weight.view(-1, 1) * x_j
+
+
+class UpdateLayer(MessagePassing):
+    def __init__(self, **kwargs):
+
+        kwargs.setdefault('aggr', 'mean')
+        super().__init__(**kwargs)
+
+    def forward(self, x: Tensor, edge_index: Adj, edge_weight: OptTensor=None):
+        
+        # edge_index, edge_weight = gcn_norm(  # yapf: disable
+        #     edge_index, edge_weight, x.size(self.node_dim),
+        #     self.flow, x.dtype)
+        
+        out = self.propagate(edge_index, x=x, edge_weight=edge_weight,
+                           size=None)
+        
+        return out
     
-    def message(self, x_j: Tensor, norm: Tensor):
-        return norm.view(-1, 1) * x_j
+    def message(self, x_j: Tensor, edge_weight: OptTensor) -> Tensor:
+        return x_j if edge_weight is None else edge_weight.view(-1, 1) * x_j
 
 
 class GSN(nn.Module):
@@ -372,17 +469,17 @@ class GSN(nn.Module):
         super().__init__()
 
         self.gcn_layers = ModuleList([
-                SeqGCN(
-                "x, edge_index",[
-                    (GCNConv(3, hidden_features), "x, edge_index -> x"),
-                    LeakyReLU(inplace=True),
-                    (GCNConv(hidden_features, hidden_features), "x, edge_index -> x"),
-                    LeakyReLU(inplace=True),
-                    Dropout(0.5),
-                    (GCNConv(hidden_features, 3), "x, edge_index -> x")
-                    ])
-                for _ in range(num_layers)
-            ])
+            GSNLayer(3, 3, bias=False, hidden_features=hidden_features)
+            for _ in range(num_layers)
+        ])
+
+        self.update_layer = UpdateLayer()
+
+    def face_to_edge(self, faces: torch.LongTensor, num_nodes: int):
+        edge_index = torch.cat([faces[:2], faces[1:], faces[::2]], dim=1)
+        edge_index = to_undirected(edge_index, num_nodes=num_nodes)
+
+        return edge_index
 
     def forward(self, meshes: Meshes, subdivided_faces: list[torch.LongTensor]):
         
@@ -394,14 +491,16 @@ class GSN(nn.Module):
             meshes = meshes.offset_verts(offsets)
 
             # 2. create new vertices at the middle of the edges.
+            new_faces = subdivided_faces[l].expand(meshes._N, -1, -1).to(meshes.device)
+            centre_faces = new_faces[:, 3*meshes._F:, :] - meshes._V
+            centre_edges = self.face_to_edge(centre_faces.view(-1, 3).t().contiguous(), meshes._V)
             verts = meshes.verts_padded()
             edges = meshes[0].edges_packed()
             new_verts = verts[:, edges].mean(dim=2)
-            face_points = verts[:, meshes[0].faces_packed()].mean(dim=2)
-            new_verts = torch.cat([verts, new_verts, face_points], dim=1)
+            new_verts = self.update_layer(new_verts, centre_edges)
+            new_verts = torch.cat([verts, new_verts], dim=1)
 
             # 3. create new meshes with the same topology as the original mesh.
-            new_faces = subdivided_faces[l].expand(meshes._N, -1, -1).to(meshes.device)
             meshes = Meshes(verts=new_verts, faces=new_faces)
         
         return meshes

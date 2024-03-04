@@ -17,7 +17,7 @@ Registration part:
     Target files: OBJ file is a 3D atlas model of myocardium.
     working directory:
         source files: '/mnt/data/Experiment/Data/original_data/ScotHeart/subdivided_mesh/patient_id.obj'
-        reference file: '/home/yd21/Documents/Nasreddin/template/cap/init_mesh_v2-cap_myo.obj'
+        reference file: '/home/yd21/Documents/MorphiNet/template/cap/init_mesh_v2-cap_myo.obj'
         target files: '/mnt/data/Experiment/Data/original_data/ScotHeart/registered_mesh/patient_id.obj'
     Working flow:
         1. load source and reference files.
@@ -294,7 +294,7 @@ if __name__ == '__main__':
     # source directory
     source_dir = '/mnt/data/Experiment/Data/original_data/ScotHeart/subdivided_mesh'
     # reference
-    reference_dir = '/home/yd21/Documents/Nasreddin/template/cap/init_mesh_v2-cap_myo.obj'
+    reference_dir = '/home/yd21/Documents/MorphiNet/template/cap/init_mesh_v2-cap_myo.obj'
     # target directory
     target_dir = '/mnt/data/Experiment/Data/original_data/ScotHeart/registered_mesh'
     # get patient ids

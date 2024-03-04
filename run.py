@@ -1,32 +1,29 @@
 import os, sys, json
 from collections import OrderedDict
 from itertools import chain
+from trimesh import Trimesh
 from trimesh import load_mesh
+from trimesh.convex import convex_hull
 import numpy as np
-import nibabel as nib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pytorch3d.io import save_obj, IO
+from pytorch3d.io import save_obj
 from pytorch3d.ops import sample_points_from_meshes, taubin_smoothing
-from pytorch3d.loss import chamfer_distance, point_mesh_face_distance, point_mesh_edge_distance
+from pytorch3d.loss import chamfer_distance, point_mesh_face_distance
 from pytorch3d.structures import Meshes, Pointclouds
 from pytorch3d.ops.marching_cubes import marching_cubes
 from monai.data import DataLoader, decollate_batch
 from monai.losses import DiceCELoss
-from monai.metrics import compute_hausdorff_distance, MeanIoU, DiceMetric, MSEMetric
+from monai.metrics import DiceMetric, MSEMetric
 from monai.networks.nets import UNet
 from monai.transforms import (
     Compose, 
-    SpatialPad,
     EnsureType, 
-    Rotate90,
     AsDiscrete,
     KeepLargestConnectedComponent,
-    Invertd,
 )
 from monai.utils import set_determinism
-from midvoxio.voxio import vox_to_arr
 import wandb
 
 import plotly.io as pio
@@ -63,11 +60,9 @@ class TrainPipeline:
         self.is_training = is_training
         set_determinism(seed=self.seed)
 
-        self.ckpt_dir = os.path.join(super_params.ckpt_dir, "stationary", super_params.run_id)
-        os.makedirs(self.ckpt_dir, exist_ok=True)
-        os.makedirs(os.path.join(self.ckpt_dir, "trained_weights"), exist_ok=True)
-        os.makedirs(os.path.join(self.ckpt_dir, "valid_subdiv_meshes"), exist_ok=True)
         if is_training:
+            self.ckpt_dir = os.path.join(super_params.ckpt_dir, "stationary", super_params.run_id)
+            os.makedirs(self.ckpt_dir, exist_ok=True)
             self.pretrain_loss = OrderedDict(
                 {k: np.asarray([]) for k in ["total", "seg"]}
             )
@@ -81,7 +76,8 @@ class TrainPipeline:
             self.eval_msh_score = self.eval_df_score.copy()
             self.best_eval_score = 0
         else:
-            self.out_dir = os.path.join(super_params.out_dir, "stationary", super_params.run_id)
+            self.ckpt_dir = super_params.ckpt_dir
+            self.out_dir = super_params.out_dir
             os.makedirs(self.out_dir, exist_ok=True)
 
         self.post_transform = Compose([
@@ -90,28 +86,29 @@ class TrainPipeline:
             EnsureType(data_type="tensor", dtype=torch.float32, device=DEVICE)
             ])
 
-        with open(super_params.mr_json_dir, "r") as f:
-            mr_train_transform, mr_valid_transform = self._prepare_transform(["mr_image", "mr_label"], "mr")
-            mr_train_ds, mr_valid_ds, mr_test_ds = self._prepare_dataset(
-                json.load(f), "mr", mr_train_transform, mr_valid_transform
-            )
-            self.mr_train_loader, self.mr_valid_loader, self.mr_test_loader = self._prepare_dataloader(
-                mr_train_ds, mr_valid_ds, mr_test_ds
-            )
-
-        self.inverse_transform = Invertd(
-                keys="mr_label", transform=mr_train_transform, 
-                nearest_interp=False, to_tensor=True
-            )
+        if not is_training and super_params.save_on != "cap":
+            pass
+        else:
+            with open(super_params.mr_json_dir, "r") as f:
+                mr_train_transform, mr_valid_transform = self._prepare_transform(["mr_image", "mr_label"], "mr")
+                mr_train_ds, mr_valid_ds, mr_test_ds = self._prepare_dataset(
+                    json.load(f), "mr", mr_train_transform, mr_valid_transform
+                )
+                self.mr_train_loader, self.mr_valid_loader, self.mr_test_loader = self._prepare_dataloader(
+                    mr_train_ds, mr_valid_ds, mr_test_ds
+                )
         
-        with open(super_params.ct_json_dir, "r") as f:
-            ct_train_transform, ct_valid_transform = self._prepare_transform(["ct_image", "ct_label"], "ct")
-            ct_train_ds, ct_valid_ds, ct_test_ds = self._prepare_dataset(
-                json.load(f), "ct", ct_train_transform, ct_valid_transform
-            )
-            self.ct_train_loader, self.ct_valid_loader, self.ct_test_loader = self._prepare_dataloader(
-                ct_train_ds, ct_valid_ds, ct_test_ds
-            )
+        if not is_training and super_params.save_on != "sct":
+            pass
+        else:
+            with open(super_params.ct_json_dir, "r") as f:
+                ct_train_transform, ct_valid_transform = self._prepare_transform(["ct_image", "ct_label"], "ct")
+                ct_train_ds, ct_valid_ds, ct_test_ds = self._prepare_dataset(
+                    json.load(f), "ct", ct_train_transform, ct_valid_transform
+                )
+                self.ct_train_loader, self.ct_valid_loader, self.ct_test_loader = self._prepare_dataloader(
+                    ct_train_ds, ct_valid_ds, ct_test_ds
+                )
 
         # import control mesh (NDC space, [-1, 1]) to compute the subdivision matrix
         control_mesh = load_mesh(super_params.control_mesh_dir)
@@ -158,7 +155,7 @@ class TrainPipeline:
             return [{
                 "mr_image": os.path.join(self.super_params.mr_data_dir, "imagesTr", os.path.basename(d["image"])),
                 "mr_label": os.path.join(self.super_params.mr_data_dir, "labelsTr", os.path.basename(d["label"])),
-                "mr_slice_info": os.path.join(self.super_params.mr_data_dir, "slice_info", os.path.basename(d["label"])).replace(".nii.gz", "-info.json"),
+                "mr_slice_info": os.path.join(self.super_params.mr_data_dir, "slice_info", os.path.basename(d["label"])).replace(".nii.gz", "-info.npy"),
             } for d in data_list]
         elif modal == "ct":
             return [{
@@ -168,9 +165,9 @@ class TrainPipeline:
         
 
     def _prepare_dataset(self, data_json, modal, train_transform, valid_transform):
-        train_data = self._remap_abs_path(data_json["train_fold0"], modal)[:5]
-        valid_data = self._remap_abs_path(data_json["validation_fold0"], modal)[:5]
-        test_data = self._remap_abs_path(data_json["test"], modal)[:5]
+        train_data = self._remap_abs_path(data_json["train_fold0"], modal)
+        valid_data = self._remap_abs_path(data_json["validation_fold0"], modal)
+        test_data = self._remap_abs_path(data_json["test"], modal)
 
         train_ds = Dataset(
             train_data, train_transform, self.seed, sys.maxsize,
@@ -189,14 +186,20 @@ class TrainPipeline:
 
 
     def _prepare_dataloader(self, train_ds, valid_ds, test_ds):
-        train_loader = DataLoader(
-            train_ds, batch_size=self.super_params.batch_size,
-            shuffle=True, num_workers=self.num_workers,
-            )
-        val_loader = DataLoader(
-            valid_ds, batch_size=1,
-            shuffle=False, num_workers=self.num_workers,
-            )
+        if train_ds.__len__() > 0:
+            train_loader = DataLoader(
+                train_ds, batch_size=self.super_params.batch_size,
+                shuffle=True, num_workers=self.num_workers,
+                )
+        else:
+            train_loader = None
+        if valid_ds.__len__() > 0:
+            val_loader = DataLoader(
+                valid_ds, batch_size=1,
+                shuffle=False, num_workers=self.num_workers,
+                )
+        else:
+            val_loader = None
         test_loader = DataLoader(
             test_ds, batch_size=1,
             shuffle=False, num_workers=self.num_workers,
@@ -261,7 +264,7 @@ class TrainPipeline:
         # initialise the optimiser for ptretrain
         self.optimizer_pretrain = torch.optim.Adam(
             chain(self.encoder_mr.parameters(), self.encoder_ct.parameters()),
-            lr=self.super_params.lr
+            lr=10 * self.super_params.lr
             )
         self.lr_scheduler_pretrain = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer_pretrain, mode="min", factor=0.1, patience=5, verbose=False,
@@ -296,7 +299,7 @@ class TrainPipeline:
         torch.backends.cudnn.benchmark = torch.backends.cudnn.is_available()
 
 
-    def surface_extractor(self, seg_true):
+    def surface_extractor(self, seg_true, use_skeleton: bool=False):
         """
             WARNING: this operation is non-differentiable.
             input:
@@ -304,23 +307,33 @@ class TrainPipeline:
             return:
                 surface mesh with vertices and faces in NDC space [-1, 1].
         """
-        seg_true = (seg_true > 0) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
-        seg_true = seg_true.float()
-        verts, faces = marching_cubes(
-            seg_true.squeeze(1).permute(0, 3, 1, 2), 
-            isolevel=0.1,
-            return_local_coords=True,
-        )
-        # convert coordinates from (z, x, y) to (x, y, z)
-        verts = [vert[:, [1, 0, 2]] for vert in verts]
-        mesh_true = Meshes(verts, faces)
-        mesh_true = taubin_smoothing(mesh_true, 0.77, -0.34, 30)
+        if not use_skeleton:
+            seg_true = (seg_true > 0) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
+            seg_true = seg_true.float()
+            verts, faces = marching_cubes(
+                seg_true.squeeze(1).permute(0, 3, 1, 2), 
+                isolevel=0.1,
+                return_local_coords=True,
+            )
+            # convert coordinates from (z, x, y) to (x, y, z)
+            verts = [vert[:, [1, 0, 2]] for vert in verts]
+            mesh_true = Meshes(verts, faces)
+            mesh_true = taubin_smoothing(mesh_true, 0.77, -0.34, 30)
+        else:
+            seg_true = (seg_true > 0) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
+            seg_true = seg_true.float().squeeze(1).cpu().numpy()
+            skeletons = [convex_hull(np.indices(seg.shape)[:, seg > 0].reshape(3, -1).T) for seg in seg_true]
+            # transform from world space to NDC space and convert to torch tensor
+            mesh_true = Meshes(
+                verts=[torch.tensor(2 * (skeleton.vertices - skeleton.centroid) / skeleton.extents.max(), dtype=torch.float32) for skeleton in skeletons],
+                faces=[torch.tensor(skeleton.faces, dtype=torch.int64) for skeleton in skeletons]
+            ).to(DEVICE)
 
         return mesh_true
 
 
     @torch.no_grad()
-    def warp_control_mesh(self, df_pred, t=2.73):
+    def warp_control_mesh(self, df_pred, t=2.73, one_step=False):
         """
             input:
                 control_mesh: the control mesh in NDC space [-1, 1].
@@ -336,7 +349,7 @@ class TrainPipeline:
         direction /= (torch.norm(direction, dim=1, keepdim=True) + 1e-16) * -1
 
         # sample and apply offset in two-step manner: smooth global -> sharp local
-        for step in range(2):
+        for step in range(2) if not one_step else [0]:
             coords = control_mesh.verts_padded()
             offset = direction * df_pred
             offset = F.grid_sample(
@@ -484,16 +497,22 @@ class TrainPipeline:
 
 
     def fine_tune(self, epoch):
+        self.AE.encoder.load_state_dict(self.encoder_mr.state_dict())
         self.AE.eval()
         self.GSN.train()
 
         fine_tune_loss_epoch = 0.0
         for step, data_mr in enumerate(self.mr_train_loader):
-            img_mr, _, slice_info_mr = (
+            img_mr, seg_mr, df_mr, slice_info_mr = (
                 data_mr["mr_image"].as_tensor().to(DEVICE),
                 data_mr["mr_label"].as_tensor().to(DEVICE),
+                data_mr["mr_df"].as_tensor().to(DEVICE),
                 data_mr["mr_slice_info"])
-            seg_origin_mr = [self.inverse_transform(i)["mr_label"].squeeze(0) for i in decollate_batch(data_mr)]
+            # seg_bbox = torch.cat([
+            #     data_mr["foreground_start_coord"].unsqueeze(1), data_mr["foreground_end_coord"].unsqueeze(1)
+            #     ], dim=1).to(DEVICE).transpose(1, 2).float()
+            # seg_mr = seg_mr.squeeze(1)
+            skeleton = self.surface_extractor(seg_mr, use_skeleton=True)
 
             self.optimizer_fine_tune.zero_grad()
             with torch.autocast(device_type=DEVICE):
@@ -501,7 +520,18 @@ class TrainPipeline:
                 control_mesh = self.warp_control_mesh(df_pred_mr.detach())
                 subdiv_mesh = self.GSN(control_mesh, self.subdivided_faces.faces_levels)
 
-                loss = self.skeleton_loss_fn(subdiv_mesh, seg_origin_mr, slice_info_mr, self.seg_indices, DEVICE)
+                loss_chmf, _ = chamfer_distance(
+                    skeleton.verts_padded(), subdiv_mesh.verts_padded(),
+                    point_reduction="mean", batch_reduction="mean")
+                true_points = sample_points_from_meshes(skeleton, 2 * subdiv_mesh._F)
+                pointcloud_true_ct = Pointclouds(points=true_points)
+                loss_norm = point_mesh_face_distance(subdiv_mesh, pointcloud_true_ct, min_triangle_area=1e-3)
+                loss_smooth = mesh_laplacian_smoothing(subdiv_mesh, method="cotcurv")
+
+                loss = self.super_params.lambda_[1] * loss_chmf + \
+                    self.super_params.lambda_[2] * loss_norm + \
+                        self.super_params.lambda_[3] * loss_smooth
+                # loss = self.skeleton_loss_fn(subdiv_mesh, seg_mr, seg_bbox, slice_info_mr, self.seg_indices, self.super_params.lambda_, DEVICE)
 
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer_fine_tune)
@@ -519,19 +549,22 @@ class TrainPipeline:
         self.lr_scheduler_fine_tune.step(fine_tune_loss_epoch)
 
 
-    def valid(self, epoch, dataset):
+    def valid(self, epoch, save_on):
+        self.encoder_ct.eval(); self.encoder_mr.eval()
         self.AE.eval()
         self.GSN.eval()
         
         # choose the validation loader
-        if dataset.lower() == "sct":
+        if save_on == "sct":
             modal = "ct"
             self.AE.encoder.load_state_dict(self.encoder_ct.state_dict())
-            valid_loader = self.ct_valid_loader
-        elif dataset.lower() == "cap":
+            # valid_loader = self.ct_valid_loader
+            valid_loader = self.ct_test_loader
+        elif save_on == "cap":
             modal = "mr"
             self.AE.encoder.load_state_dict(self.encoder_mr.state_dict())
-            valid_loader = self.mr_valid_loader
+            # valid_loader = self.mr_valid_loader
+            valid_loader = self.mr_test_loader
         else:
             raise ValueError("Invalid dataset name")
 
@@ -602,9 +635,13 @@ class TrainPipeline:
         # save model
         ckpt_weight_path = os.path.join(self.ckpt_dir, "trained_weights")
         os.makedirs(ckpt_weight_path, exist_ok=True)
+        torch.save(self.encoder_ct.state_dict(), f"{ckpt_weight_path}/{epoch + 1}_UNet_CT.pth")
         torch.save(self.encoder_mr.state_dict(), f"{ckpt_weight_path}/{epoch + 1}_UNet_MR.pth")
         torch.save(self.AE.state_dict(), f"{ckpt_weight_path}/{epoch + 1}_AutoEncoder.pth")
         torch.save(self.GSN.state_dict(), f"{ckpt_weight_path}/{epoch + 1}_GSN.pth")
+        # save the subdivided_faces.faces_levels as pth file
+        for level, faces in enumerate(self.subdivided_faces.faces_levels):
+            torch.save(faces, f"{ckpt_weight_path}/{epoch+1}_subdivided_faces_l{level}.pth")
 
         # save visualization when the eval score is the best
         if eval_score_epoch > self.best_eval_score:
@@ -645,46 +682,139 @@ class TrainPipeline:
             )
          
 
-    def test(self, dataset):
+    @torch.no_grad()
+    def test(self, save_on):
         # load networks
-        self.pretext_mr.load_state_dict(
-            torch.load(os.path.join(f"{self.ckpt_dir}/trained_weights", f"{self.super_params.best_epoch}_ResNet.pth"))
-        )
+        self.encoder_ct.load_state_dict(
+            torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_UNet_CT.pth")))
+        self.encoder_mr.load_state_dict(
+            torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_UNet_MR.pth")))
         self.AE.load_state_dict(
-            torch.load(os.path.join(f"{self.ckpt_dir}/trained_weights", f"{self.super_params.best_epoch}_AE.pth"))
-        )
+            torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_AutoEncoder.pth")))
         self.GSN.load_state_dict(
-            torch.load(os.path.join(f"{self.ckpt_dir}/trained_weights", f"{self.super_params.best_epoch}_GSN.pth"))
-        )
-        self.pretext_mr.eval()
+            torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_GSN.pth")))
+        # load the subdivided_faces.faces_levels
+        self.subdivided_faces.faces_levels = [torch.load(
+            f"{self.ckpt_dir}/{self.super_params.best_epoch}_subdivided_faces_l{level}.pth"
+            ) for level in range(self.super_params.subdiv_levels)]
+        self.encoder_mr.eval()
         self.AE.eval()
         self.GSN.eval()
 
-        if dataset.lower() == "scotheart":
-            val_loader = self.val_loader_ct
+        if save_on in "sct":
             modal = "ct"
-        elif dataset.lower() == "cap":
-            val_loader = self.val_loader_mr
-            self.AE.encoder_ = self.pretext_mr
+            self.AE.encoder.load_state_dict(self.encoder_ct.state_dict())
+            valid_loader = self.ct_test_loader
+        elif save_on == "cap":
             modal = "mr"
+            self.AE.encoder.load_state_dict(self.encoder_mr.state_dict())
+            valid_loader = self.mr_test_loader
         else:
             raise ValueError("Invalid dataset name")
 
-        # testing
-        with torch.no_grad():
-            for val_data in val_loader:
-                img = val_data[f"{modal}_image"].as_tensor().to(DEVICE)
+        for data in valid_loader:
+            try:
+                id = os.path.basename(data[f"{modal}_label"].meta["filename_or_obj"]).replace(".nii.gz", "")
+            except:
+                id = os.path.basename(data[f"{modal}_label"].meta["filename_or_obj"][0]).replace(".nii.gz", "")
+            img = data[f"{modal}_image"].as_tensor().to(DEVICE)
 
-                df_pred, _ = self.AE(img)
-                control_mesh = self.warp_control_mesh(df_pred)
-                save_obj(
-                    f"{self.out_dir}/{modal}_pred-df_module.obj", 
-                    control_mesh.verts_packed(), control_mesh.faces_packed()
-                )
+            df_pred, _ = self.AE(img)
+            control_mesh = self.warp_control_mesh(df_pred)  
+            subdiv_mesh = self.GSN(control_mesh, self.subdivided_faces.faces_levels)
+            
+            save_obj(
+               f"{self.out_dir}/{id}.obj", 
+                subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
+            )
 
-                subdiv_mesh = self.GSN(control_mesh)
-                save_obj(
-                    f"{self.out_dir}/{modal}_pred-gsn_module.obj", 
-                    subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
+
+    @torch.no_grad()
+    def ablation_study(self, save_on):
+        # load networks
+        self.encoder_ct.load_state_dict(
+            torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_UNet_CT.pth")))
+        self.encoder_mr.load_state_dict(
+            torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_UNet_MR.pth")))
+        self.AE.load_state_dict(
+            torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_AutoEncoder.pth")))
+        self.GSN.load_state_dict(
+            torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_GSN.pth")))
+        # load the subdivided_faces.faces_levels
+        self.subdivided_faces.faces_levels = [torch.load(
+            f"{self.ckpt_dir}/{self.super_params.best_epoch}_subdivided_faces_l{level}.pth"
+            ) for level in range(self.super_params.subdiv_levels)]
+        self.encoder_mr.eval()
+        self.AE.eval()
+        self.GSN.eval()
+
+        assert save_on == "sct", "Ablation study is only available for sct dataset"
+        modal = "ct"
+        self.AE.encoder.load_state_dict(self.encoder_ct.state_dict())
+        valid_loader = self.ct_test_loader
+
+        for data in valid_loader:
+            try:
+                id = os.path.basename(data[f"{modal}_label"].meta["filename_or_obj"]).replace(".nii.gz", "")
+            except:
+                id = os.path.basename(data[f"{modal}_label"].meta["filename_or_obj"][0]).replace(".nii.gz", "")
+            img = data[f"{modal}_image"].as_tensor().to(DEVICE)
+            df_true = data[f"{modal}_df"].as_tensor().to(DEVICE)
+
+            df_pred, _ = self.AE(img)
+
+            os.makedirs(os.path.join(self.out_dir, id), exist_ok=True)
+            # predicted distance field
+            for axis, i in zip(['X', 'Y', 'Z'], range(3)):
+                fig = ff.create_distplot(
+                    [df_true[0][i].flatten().cpu().numpy(), df_pred[0][i].flatten().cpu().numpy()],
+                    group_labels=["df_true", "df_pred"],
+                    colors=["#EF553B", "#3366CC"],
+                    show_rug=False, show_hist=False,
+                    bin_size=0.1)
+                fig.update_layout(
+                    title=f"{axis}-axis",
+                    xaxis_title="Distance Field Value",
+                    yaxis_title="Frequency",
+                    showlegend=False,
+                    template="plotly_white",
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    font=dict(size=12),
+                    width=640, height=360
                 )
+                fig.write_image(f"{self.out_dir}/{id}/df_{axis}.png")
+
+            # warped + adaptive
+            control_mesh = self.warp_control_mesh(df_pred)  
+            subdiv_mesh = self.GSN(control_mesh, self.subdivided_faces.faces_levels)
+            save_obj(
+               f"{self.out_dir}/{id}/adaptive.obj", 
+                subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
+            )
+
+            # unwarped + adaptive
+            control_mesh = self.warp_control_mesh(df_true, one_step=True)
+            subdiv_mesh = self.GSN(control_mesh, self.subdivided_faces.faces_levels)
+            save_obj(
+               f"{self.out_dir}/{id}/unwarped.obj", 
+                subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
+            )
+
+            # warped + Loop subdivided
+            control_mesh = self.warp_control_mesh(df_pred)
+            control_mesh = Trimesh(control_mesh.verts_packed().cpu().numpy(), control_mesh.faces_packed().cpu().numpy())
+            for _ in range(2): control_mesh = control_mesh.subdivide_loop()
+            save_obj(
+               f"{self.out_dir}/{id}/loop_subdivided.obj", 
+                torch.tensor(control_mesh.vertices), torch.tensor(control_mesh.faces)
+            )
+
+            # unwarped + Loop subdivided
+            control_mesh = self.control_mesh.extend(df_true.shape[0]).to(DEVICE)
+            control_mesh = Trimesh(control_mesh.verts_packed().cpu().numpy(), control_mesh.faces_packed().cpu().numpy())
+            for _ in range(2): control_mesh = control_mesh.subdivide_loop()
+            save_obj(
+               f"{self.out_dir}/{id}/unwarped_loop_subdivided.obj", 
+                torch.tensor(control_mesh.vertices), torch.tensor(control_mesh.faces)
+            )
 
