@@ -23,7 +23,6 @@ def config():
     """
     parser = argparse.ArgumentParser()
     # mode parameters
-    parser.add_argument("--mode", type=str, default="train", help="the mode of the script, can be 'train' or 'test'")
     parser.add_argument("--save_on", type=str, default="sct", help="the dataset for validation, can be 'cap' or 'sct'")
     parser.add_argument("--control_mesh_dir", type=str,
                         default="/home/yd21/Documents/MorphiNet/template/control_mesh-lv.obj",
@@ -75,7 +74,8 @@ def config():
     parser.add_argument("--block_inplanes", type=int, default=(4, 8, 16, 32), nargs='+', help="the number of intermedium channels in each residual block")
 
     # structure parameters for subdiv module
-    parser.add_argument("--subdiv_levels", type=int, default=2, help="the number of subdivision levels for the mesh")
+    parser.add_argument("--subdiv_levels", type=int, default=0, help="the number of subdivision levels for the mesh")
+    # parser.add_argument("--subdiv_levels", type=int, default=2, help="the number of subdivision levels for the mesh (should be an integer larger than 0, where 0 means no subdivision)")
     parser.add_argument("--hidden_features_gsn", type=int, default=16, help="the number of hidden features for the graph subdivide network")
 
     # run_id for wandb, will create automatically if not specified for training
@@ -92,7 +92,7 @@ def test(super_params):
     wandb.init(mode="disabled")
     pipeline = TrainPipeline(
         super_params=super_params,
-        seed=2048, num_workers=19,
+        seed=42, num_workers=0,
         is_training=False
     )
     pipeline.test(super_params.save_on)
@@ -101,7 +101,7 @@ def ablation(super_params):
     wandb.init(mode="disabled")
     pipeline = TrainPipeline(
         super_params=super_params,
-        seed=2048, num_workers=19,
+        seed=42, num_workers=19,
         is_training=False
     )
     pipeline.ablation_study(super_params.save_on)
@@ -110,18 +110,19 @@ def ablation(super_params):
 if __name__ == '__main__':
     super_params = config()
 
-    fold = 0
-    super_params.save_on = "sct"
-    part = "rv"
-    test_on = "sct"
+    fold = 'x'
+    super_params.save_on = "cap"
+    part = "myo"
+    test_on = "cap"
     super_params.ct_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task20_f{fold}.json"
     super_params.ct_data_dir = f"/mnt/data/Experiment/nnUNet/nnUNet_raw/Dataset020_SCOTHEART"
-    super_params.mr_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task17_f{fold}.json"
-    super_params.mr_data_dir = f"/mnt/data/Experiment/nnUNet/nnUNet_raw/Dataset017_CAP_COMBINED"
-    super_params.best_epoch = 181
-    super_params.control_mesh_dir = f"/home/yd21/Documents/MorphiNet/template/control_mesh-{part}.obj"
+    super_params.mr_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task10_f{fold}.json"
+    super_params.mr_data_dir = f"/mnt/data/Experiment/nnUNet/nnUNet_raw/Dataset010_Abdul_SAX"
+    super_params.best_epoch = 201
+    super_params.control_mesh_dir = f"/home/yd21/Documents/MorphiNet/template/initial_mesh-{part}.obj"
     super_params.run_id = f"{super_params.save_on}-{part}-f{fold}"
-    super_params.ckpt_dir = f"/mnt/data/Experiment/MICCAI_24/Baselines/MorphiNet/{super_params.save_on}-{part}-f{fold}/trained_weights"
-    super_params.out_dir = f"/mnt/data/Experiment/MICCAI_24/Ablation/{test_on}/{part}/"
+    super_params.ckpt_dir = f"/mnt/data/Experiment/MorphiNet/Result/{super_params.save_on}-{part}-f{fold}/trained_weights"
+    super_params.out_dir = f"/mnt/data/Experiment/MorphiNet/Output/{test_on}/{part}/"
+    # ablation(super_params)
 
-    ablation(super_params)
+    test(super_params)

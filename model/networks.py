@@ -490,17 +490,18 @@ class GSN(nn.Module):
                 )
             meshes = meshes.offset_verts(offsets)
 
-            # 2. create new vertices at the middle of the edges.
-            new_faces = subdivided_faces[l].expand(meshes._N, -1, -1).to(meshes.device)
-            centre_faces = new_faces[:, 3*meshes._F:, :] - meshes._V
-            centre_edges = self.face_to_edge(centre_faces.view(-1, 3).t().contiguous(), meshes._V)
-            verts = meshes.verts_padded()
-            edges = meshes[0].edges_packed()
-            new_verts = verts[:, edges].mean(dim=2)
-            new_verts = self.update_layer(new_verts, centre_edges)
-            new_verts = torch.cat([verts, new_verts], dim=1)
+            if len(subdivided_faces) > 0:
+                # 2. create new vertices at the middle of the edges.
+                new_faces = subdivided_faces[l].expand(meshes._N, -1, -1).to(meshes.device)
+                centre_faces = new_faces[:, 3*meshes._F:, :] - meshes._V
+                centre_edges = self.face_to_edge(centre_faces.view(-1, 3).t().contiguous(), meshes._V)
+                verts = meshes.verts_padded()
+                edges = meshes[0].edges_packed()
+                new_verts = verts[:, edges].mean(dim=2)
+                new_verts = self.update_layer(new_verts, centre_edges)
+                new_verts = torch.cat([verts, new_verts], dim=1)
 
-            # 3. create new meshes with the same topology as the original mesh.
-            meshes = Meshes(verts=new_verts, faces=new_faces)
+                # 3. create new meshes with the same topology as the original mesh.
+                meshes = Meshes(verts=new_verts, faces=new_faces)
         
         return meshes

@@ -47,7 +47,8 @@ class DFConvertd(MapTransform):
         # combine left and right myocardium (index 2 and 4) to have four classes (background: 0, left ventricle: 1, right ventricle: 2, myocardium: 3)
         label[label == 4] = 2
         lv = label == 1
-        myo = label > 0
+        myo = label == 2
+        # myo = label > 0
         rv = label == 3
 
         df = []

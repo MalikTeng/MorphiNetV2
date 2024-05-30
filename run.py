@@ -122,7 +122,7 @@ class TrainPipeline:
             self.seg_indices = 1
         elif "myo" in super_params.control_mesh_dir.lower():
             self.df_indices = 1        # index of channel
-            self.seg_indices = "all"   # index of class
+            self.seg_indices = "myo"   # index of class
         elif "rv" in super_params.control_mesh_dir.lower():
             self.df_indices = 2
             self.seg_indices = 3
@@ -248,7 +248,7 @@ class TrainPipeline:
         # initialise the subdiv module
         self.GSN = GSN(
             hidden_features=self.super_params.hidden_features_gsn, 
-            num_layers=self.super_params.subdiv_levels,
+            num_layers=self.super_params.subdiv_levels if self.super_params.subdiv_levels > 0 else 2,
         ).to(DEVICE)
 
 
@@ -285,7 +285,7 @@ class TrainPipeline:
         
         # initialise the optimiser for fine-tune
         self.optimizer_fine_tune = torch.optim.Adam(
-            self.GSN.parameters(), 
+            chain(self.AE.parameters(), self.GSN.parameters()), 
             lr=self.super_params.lr
         )
         self.lr_scheduler_fine_tune = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -307,8 +307,9 @@ class TrainPipeline:
             return:
                 surface mesh with vertices and faces in NDC space [-1, 1].
         """
+        seg_true = torch.logical_or(seg_true == 2, seg_true == 4) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
+        # seg_true = (seg_true > 0) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
         if not use_skeleton:
-            seg_true = (seg_true > 0) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
             seg_true = seg_true.float()
             verts, faces = marching_cubes(
                 seg_true.squeeze(1).permute(0, 3, 1, 2), 
@@ -320,7 +321,6 @@ class TrainPipeline:
             mesh_true = Meshes(verts, faces)
             mesh_true = taubin_smoothing(mesh_true, 0.77, -0.34, 30)
         else:
-            seg_true = (seg_true > 0) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
             seg_true = seg_true.float().squeeze(1).cpu().numpy()
             skeletons = [convex_hull(np.indices(seg.shape)[:, seg > 0].reshape(3, -1).T) for seg in seg_true]
             # transform from world space to NDC space and convert to torch tensor
@@ -474,7 +474,7 @@ class TrainPipeline:
                             self.super_params.lambda_[2] * loss_norm +\
                                 self.super_params.lambda_[3] * loss_smooth
 
-                self.scaler.scale(loss).backward()
+                self.scaler.scale(loss).backward(retain_graph=True)
                 self.scaler.step(self.optimizer_train)
                 self.scaler.update()
                 
@@ -498,26 +498,25 @@ class TrainPipeline:
 
     def fine_tune(self, epoch):
         self.AE.encoder.load_state_dict(self.encoder_mr.state_dict())
-        self.AE.eval()
+        self.AE.train()
         self.GSN.train()
 
         fine_tune_loss_epoch = 0.0
         for step, data_mr in enumerate(self.mr_train_loader):
-            img_mr, seg_mr, df_mr, slice_info_mr = (
+            img_mr, seg_mr, df_mr = (
                 data_mr["mr_image"].as_tensor().to(DEVICE),
                 data_mr["mr_label"].as_tensor().to(DEVICE),
-                data_mr["mr_df"].as_tensor().to(DEVICE),
-                data_mr["mr_slice_info"])
-            # seg_bbox = torch.cat([
-            #     data_mr["foreground_start_coord"].unsqueeze(1), data_mr["foreground_end_coord"].unsqueeze(1)
-            #     ], dim=1).to(DEVICE).transpose(1, 2).float()
-            # seg_mr = seg_mr.squeeze(1)
+                data_mr["mr_df"].as_tensor().to(DEVICE)
+            )
             skeleton = self.surface_extractor(seg_mr, use_skeleton=True)
 
             self.optimizer_fine_tune.zero_grad()
             with torch.autocast(device_type=DEVICE):
                 df_pred_mr, _ = self.AE(img_mr)
-                control_mesh = self.warp_control_mesh(df_pred_mr.detach())
+
+                loss_df = self.mse_loss_fn(df_pred_mr, df_mr)
+
+                control_mesh = self.warp_control_mesh(df_pred_mr)
                 subdiv_mesh = self.GSN(control_mesh, self.subdivided_faces.faces_levels)
 
                 loss_chmf, _ = chamfer_distance(
@@ -528,12 +527,12 @@ class TrainPipeline:
                 loss_norm = point_mesh_face_distance(subdiv_mesh, pointcloud_true_ct, min_triangle_area=1e-3)
                 loss_smooth = mesh_laplacian_smoothing(subdiv_mesh, method="cotcurv")
 
-                loss = self.super_params.lambda_[1] * loss_chmf + \
-                    self.super_params.lambda_[2] * loss_norm + \
-                        self.super_params.lambda_[3] * loss_smooth
-                # loss = self.skeleton_loss_fn(subdiv_mesh, seg_mr, seg_bbox, slice_info_mr, self.seg_indices, self.super_params.lambda_, DEVICE)
+                loss = self.super_params.lambda_[0] * loss_df + \
+                    self.super_params.lambda_[1] * loss_chmf + \
+                        self.super_params.lambda_[2] * loss_norm + \
+                            self.super_params.lambda_[3] * loss_smooth
 
-            self.scaler.scale(loss).backward()
+            self.scaler.scale(loss).backward(retain_graph=True)
             self.scaler.step(self.optimizer_fine_tune)
             self.scaler.update()
 
@@ -580,13 +579,15 @@ class TrainPipeline:
                     data[f"{modal}_label"].as_tensor().to(DEVICE),
                     data[f"{modal}_df"].as_tensor().to(DEVICE),
                 )
-                seg_true = (seg_true > 0) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
+                seg_true = torch.logical_or(seg_true == 2, seg_true == 4) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
+                # seg_true = (seg_true > 0) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
                 seg_true = seg_true.float()
 
                 # evaluate the error between predicted df and the true df
                 df_pred, seg_pred = self.AE(img)
                 seg_pred = torch.stack([self.post_transform(i).as_tensor() for i in decollate_batch(seg_pred)], dim=0)
-                seg_pred = (seg_pred > 0) if isinstance(self.seg_indices, str) else (seg_pred == self.seg_indices)
+                seg_pred = torch.logical_or(seg_pred == 2, seg_pred == 4) if isinstance(self.seg_indices, str) else (seg_pred == self.seg_indices)
+                # seg_pred = (seg_pred > 0) if isinstance(self.seg_indices, str) else (seg_pred == self.seg_indices)
                 seg_pred = seg_pred.float()
                 df_metric_batch_decoder(df_pred, df_true)
 
@@ -693,6 +694,7 @@ class TrainPipeline:
             torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_AutoEncoder.pth")))
         self.GSN.load_state_dict(
             torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_GSN.pth")))
+        # if self.super_params.subdiv_levels > 0:
         # load the subdivided_faces.faces_levels
         self.subdivided_faces.faces_levels = [torch.load(
             f"{self.ckpt_dir}/{self.super_params.best_epoch}_subdivided_faces_l{level}.pth"
@@ -748,41 +750,65 @@ class TrainPipeline:
         self.AE.eval()
         self.GSN.eval()
 
-        assert save_on == "sct", "Ablation study is only available for sct dataset"
-        modal = "ct"
+        assert save_on == "cap", "Ablation study is only available for cap dataset"
         self.AE.encoder.load_state_dict(self.encoder_ct.state_dict())
-        valid_loader = self.ct_test_loader
 
-        for data in valid_loader:
+        for data in self.mr_test_loader:
             try:
-                id = os.path.basename(data[f"{modal}_label"].meta["filename_or_obj"]).replace(".nii.gz", "")
+                id = os.path.basename(data[f"mr_label"].meta["filename_or_obj"]).replace(".nii.gz", "")
             except:
-                id = os.path.basename(data[f"{modal}_label"].meta["filename_or_obj"][0]).replace(".nii.gz", "")
-            img = data[f"{modal}_image"].as_tensor().to(DEVICE)
-            df_true = data[f"{modal}_df"].as_tensor().to(DEVICE)
+                id = os.path.basename(data[f"mr_label"].meta["filename_or_obj"][0]).replace(".nii.gz", "")
+            img = data[f"mr_image"].as_tensor().to(DEVICE)
+            # seg = data[f"mr_label"].as_tensor().to(DEVICE)
+            # seg = (seg > 0) if isinstance(self.seg_indices, str) else (seg == self.seg_indices)
+            df_true = data[f"mr_df"].as_tensor().to(DEVICE)
 
-            df_pred, _ = self.AE(img)
+            df_pred, _ = self.AE(img)   # (lv, myo, rv)
+
+            # df_surface = torch.where(df_pred[0][2] - 1 < 1e-3, 1, 0)
+            # verts, faces = marching_cubes(df_surface.unsqueeze(0).permute(0, 3, 1, 2).float(), 
+            #                               isolevel=0.1, return_local_coords=False)
+            # # convert coordinates from (z, x, y) to (x, y, z)
+            # verts = [vert[:, [1, 0, 2]] for vert in verts]
+            # verts = verts[0].cpu().numpy()
+            # faces = faces[0].cpu().numpy()
+            # seg_coord = np.indices(seg.shape[2:])[:, seg.squeeze().cpu().numpy() > 0].reshape(3, -1).T
+            # fig = go.Figure(data=[
+            #     go.Scatter3d(
+            #         x=seg_coord[:, 0], y=seg_coord[:, 1], z=seg_coord[:, 2],
+            #         mode="markers", marker=dict(size=1, color="red")
+            #     ),
+            #     go.Mesh3d(
+            #         x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
+            #         i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+            #         color="lightblue", opacity=0.5
+            #     )
+            # ])
+            # fig.write_html("surface_from_dist_field.html")
 
             os.makedirs(os.path.join(self.out_dir, id), exist_ok=True)
-            # predicted distance field
-            for axis, i in zip(['X', 'Y', 'Z'], range(3)):
-                fig = ff.create_distplot(
-                    [df_true[0][i].flatten().cpu().numpy(), df_pred[0][i].flatten().cpu().numpy()],
-                    group_labels=["df_true", "df_pred"],
-                    colors=["#EF553B", "#3366CC"],
-                    show_rug=False, show_hist=False,
-                    bin_size=0.1)
-                fig.update_layout(
-                    title=f"{axis}-axis",
-                    xaxis_title="Distance Field Value",
-                    yaxis_title="Frequency",
-                    showlegend=False,
-                    template="plotly_white",
-                    margin=dict(l=0, r=0, t=0, b=0),
-                    font=dict(size=12),
-                    width=640, height=360
-                )
-                fig.write_image(f"{self.out_dir}/{id}/df_{axis}.png")
+            # save the prediction and true distance field as npy files
+            np.save(f"{self.out_dir}/{id}/df_true.npy", df_true[0].cpu().numpy())
+            np.save(f"{self.out_dir}/{id}/df_pred.npy", df_pred[0].cpu().numpy())
+            # # predicted distance field
+            # for axis, i in zip(['X', 'Y', 'Z'], range(3)):
+            #     fig = ff.create_distplot(
+            #         [df_true[0][i].flatten().cpu().numpy(), df_pred[0][i].flatten().cpu().numpy()],
+            #         group_labels=["df_true", "df_pred"],
+            #         colors=["#EF553B", "#3366CC"],
+            #         show_rug=False, show_hist=False,
+            #         bin_size=0.1)
+            #     fig.update_layout(
+            #         title=f"{axis}-axis",
+            #         xaxis_title="Distance Field Value",
+            #         yaxis_title="Frequency",
+            #         showlegend=False,
+            #         template="plotly_white",
+            #         margin=dict(l=0, r=0, t=0, b=0),
+            #         font=dict(size=12),
+            #         width=640, height=360
+            #     )
+            #     fig.write_image(f"{self.out_dir}/{id}/df_{axis}.png", scale=3)
 
             # warped + adaptive
             control_mesh = self.warp_control_mesh(df_pred)  

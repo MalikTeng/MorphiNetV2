@@ -23,17 +23,18 @@ def config():
     """
     parser = argparse.ArgumentParser()
     # mode parameters
-    parser.add_argument("--mode", type=str, default="train", help="the mode of the script, can be 'train' or 'test'")
+    parser.add_argument("--mode", type=str, default="offline", help="choose the mode for wandb, can be 'disabled', 'offline', 'online'")
     parser.add_argument("--save_on", type=str, default="cap", help="the dataset for validation, can be 'cap' or 'sct'")
     parser.add_argument("--control_mesh_dir", type=str,
-                        default="/home/yd21/Documents/MorphiNet/template/control_mesh-lv.obj",
+                        default="/home/yd21/Documents/MorphiNet/template/initial_mesh-myo.obj",
+                        # default="/home/yd21/Documents/MorphiNet/template/control_mesh-lv.obj",
                         help="the path to your initial meshes")
 
     # training parameters
     parser.add_argument("--max_epochs", type=int, default=6, help="the maximum number of epochs for training")
     parser.add_argument("--pretrain_epochs", type=int, default=3, help="the number of epochs to train the segmentation encoder")
-    parser.add_argument("--reduce_count_down", type=int, default=-1, help="the count down for reduce the mesh face numbers.")
     parser.add_argument("--delay_epochs", type=int, default=4, help="the number of epochs to delay the fine-tuning and validation from start of pretrain")
+    parser.add_argument("--reduce_count_down", type=int, default=-1, help="the count down for reduce the mesh face numbers.")
     parser.add_argument("--val_interval", type=int, default=1, help="the interval of validation")
 
     parser.add_argument("--lr", type=float, default=1e-3, help="the learning rate for training")
@@ -42,7 +43,7 @@ def config():
     parser.add_argument("--crop_window_size", type=int, nargs='+', default=[128, 128, 128], help="the size of the crop window for training")
     parser.add_argument("--pixdim", type=float, nargs='+', default=[8, 8, 8], help="the pixel dimension of downsampled images")
     # parser.add_argument("--lambda_", type=float, nargs='+', default=[0.1, 3.6, 6.3, 0.1], help="the loss coefficients for DF MSE, Chamfer verts distance, face squared distance, and laplacian smooth term")
-    parser.add_argument("--lambda_", type=float, nargs='+', default=[0.06, 5.0, 7.0, 0.5], help="the loss coefficients for DF MSE, Chamfer verts distance, face squared distance, and laplacian smooth term")
+    parser.add_argument("--lambda_", type=float, nargs='+', default=[0.06, 10.0, 20.0, 0.5], help="the loss coefficients for DF MSE, Chamfer verts distance, face squared distance, and laplacian smooth term")
 
     # data parameters
     parser.add_argument("--ct_json_dir", type=str,
@@ -76,7 +77,8 @@ def config():
     parser.add_argument("--block_inplanes", type=int, default=(4, 8, 16, 32), nargs='+', help="the number of intermedium channels in each residual block")
 
     # structure parameters for subdiv module
-    parser.add_argument("--subdiv_levels", type=int, default=2, help="the number of subdivision levels for the mesh")
+    parser.add_argument("--subdiv_levels", type=int, default=0, help="the number of subdivision levels for the mesh")
+    # parser.add_argument("--subdiv_levels", type=int, default=2, help="the number of subdivision levels for the mesh (should be an integer larger than 0, where 0 means no subdivision)")
     parser.add_argument("--hidden_features_gsn", type=int, default=16, help="the number of hidden features for the graph subdivide network")
 
     # run_id for wandb, will create automatically if not specified for training
@@ -96,10 +98,10 @@ def train(super_params):
         f"{os.path.basename(super_params.control_mesh_dir).split('-')[-1][:-4]}--" + \
             f"{os.path.basename(super_params.ct_json_dir).split('_')[-1][:-5]}--{run_id}"
 
-    with wandb.init(config=config, mode="online", project="MorphiNet", name=super_params.run_id):
+    with wandb.init(config=config, mode=super_params.mode, project="MorphiNet", name=super_params.run_id):
         pipeline = TrainPipeline(
             super_params=super_params,
-            seed=8, num_workers=19,
+            seed=8, num_workers=0,
             )
 
         # train the network
@@ -114,9 +116,9 @@ def train(super_params):
                     # 2.1 reduce the mesh face numbers
                     if epoch - super_params.pretrain_epochs == super_params.reduce_count_down:
                         pipeline.update_precomputed_faces()
+                    # 3. fine-tune the Subdiv Module
+                    pipeline.fine_tune(epoch)
                     if epoch % super_params.val_interval == 0:
-                        # 3. fine-tune the Subdiv Module
-                        pipeline.fine_tune(epoch)
                         # 4. validate the pipeline
                         pipeline.valid(epoch, super_params.save_on)
         else:
