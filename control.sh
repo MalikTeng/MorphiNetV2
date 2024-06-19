@@ -1,27 +1,29 @@
 #!/bin/bash
 
 # ---- Run the training script ----
-surfaces=("myo")
-datasets=("cap")
+surfaces=("lv" "myo" "rv")
+datasets=("sct" "cap")
 
-for surface in "${surfaces[@]}"; do
+for ((i=0; i<${#surfaces[@]}; i++)); do
+    surface=${surfaces[$i]}
     for data in "${datasets[@]}"; do
         python main.py \
         --mode online \
-        --max_epochs 300 \
+        --max_epochs 200 \
         --pretrain_epochs 100 \
         --delay_epochs 100 \
         --reduce_count_down -1 \
         --val_interval 20 \
-        --batch_size 16 \
+        --batch_size 8 \
         --lr 0.001 \
         --pixdim 8 8 8 \
-        --lambda_ 0.1 2.5 7.3 0.1 \
+        --lambda_ 0.02 10.0 10.0 0.25 \
         --save_on "$data" \
-        --subdiv_levels 0 \
-        --control_mesh_dir /home/yd21/Documents/MorphiNet/template/initial_mesh-"$surface".obj
+        --subdiv_levels 2 \
+        --control_mesh_dir /home/yd21/Documents/MorphiNet/template/control_mesh-"$surface".obj
     done
 done
+
 
 # ---- Run the testing script ----
 # fold=0

@@ -105,6 +105,7 @@ def draw_train_loss(train_loss: dict, super_params: Namespace, task_code: str, p
         lambda_ = super_params.lambda_
     else:
         lambda_ = [1]
+    df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=0, how="any")
 
     if len(df) > 0:
         for i, coeff in enumerate(lambda_, start=1):
@@ -112,7 +113,7 @@ def draw_train_loss(train_loss: dict, super_params: Namespace, task_code: str, p
         colors = sns.color_palette("hls", len(df.columns.values))
         for i in range(len(df.columns.values) - 1):
             ax = sns.lineplot(
-                x=df.index.values, y=df.iloc[:, i], 
+                x=df.index.values, y=df.iloc[:, i].values, 
                 ax=ax, color=colors[i], label=df.columns[i+1]
             )
             curve = ax.lines[i]

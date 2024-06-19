@@ -24,76 +24,23 @@ from pytorch3d.structures import Meshes, Pointclouds
 
 import torch
 
-__all__ = ["Dataset", "collate_batched_labels", "collate_batched_meshes"]
+__all__ = ["Dataset", "collate_4D_batch"]
 
 
-def collate_batched_labels(batch: list) -> dict:
+def collate_4D_batch(data: List[Dict[str, Union[torch.Tensor, np.ndarray]]]) -> Dict[str, torch.Tensor]:
     """
-        retrieve the original CMR labels from inversed transformation results
+    Collate function for 4D data.
     """
-    if batch is None or len(batch) == 0:
-        return None
-    collated_list = [i["mr_label_origin"] for i in batch]
-    
-    return collated_list
-    
-
-def collate_batched_meshes(batch: list) -> dict:
-    """
-    Merge a mini-batch of meshes following PyG's procedure and save it
-    as a single dictionary. This function can be used with a Dataset
-    object to create a torch.utils.data.Dataloader which directly
-    returns a mini-batch of torch_geometric.data.Data.
-
-    :param batch: List of dictionaries containing information about objects in the dataset.
-    :return collated_dict: Dictionary of collated lists. If batch contains torch_geometric.data.Data, a collated mini-batch is returned.
-    """
-    if batch is None or len(batch) == 0:
-        return None
-    collated_dict = {}
-    for k in batch[0].keys():
-        collated_dict[k] = [d[k] for d in batch]
-
-    for k in collated_dict.keys():
-        if "template" in k:
-            if "ct" in k:
-                # pack all parts (six for ct data) per sample as a Meshes object
-                collated_dict[k] = {
-                    "meshes": Meshes(
-                        verts=[mesh_dict["meshes"].verts_packed() for mesh_dict in collated_dict[k]],
-                        faces=[mesh_dict["meshes"].faces_packed() for mesh_dict in collated_dict[k]]
-                        ),
-                    "faces_labels": torch.concat([
-                        mesh_dict["faces_labels"] for mesh_dict in collated_dict[k]
-                        ]),
-                    }
-            elif "mr" in k:
-                assert len(collated_dict[k]) == 1, "WARNING: works only for batch size of 1 and dynamic meshing task"
-                collated_dict[k] = collated_dict[k][0]
-
-        elif "point_clouds" in k:
-            if "ct" in k:
-                collated_dict[k] = {
-                    "point_clouds": Pointclouds(
-                        points=[pc_dict["point_clouds"].points_packed() for pc_dict in collated_dict[k]],
-                        normals=[pc_dict["point_clouds"].normals_packed() for pc_dict in collated_dict[k]]
-                        ),
-                    "points_labels": torch.concat([
-                        pc_dict["points_labels"] for pc_dict in collated_dict[k]
-                        ]),
-                }
-            elif "mr" in k:
-                assert len(collated_dict[k]) == 1, "WARNING: works only for batch size of 1 and dynamic meshing task"
-                collated_dict[k] = collated_dict[k][0]
-
+    batch = {}
+    for key in data[0].keys():
+        if isinstance(data[0][key], torch.Tensor):
+            batch[key] = torch.concat([d[key] for d in data], dim=0)
+            if batch[key].dim() == 4:
+                batch[key] = batch[key].unsqueeze(1)
         else:
-            collated_dict[k] = list_data_collate(collated_dict[k])
-            if "mr" in k:
-                assert len(collated_dict[k]) == 1, "WARNING: works only for batch size of 1"
-                collated_dict[k] = collated_dict[k].permute(1, 0, 2, 3, 4)
-    
-    return collated_dict
- 
+            batch[key] = np.stack([d[key] for d in data], axis=0)
+    return batch
+
 
 def load_multimodal_datalist(
         image_paths: list,

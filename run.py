@@ -61,7 +61,7 @@ class TrainPipeline:
         set_determinism(seed=self.seed)
 
         if is_training:
-            self.ckpt_dir = os.path.join(super_params.ckpt_dir, "stationary", super_params.run_id)
+            self.ckpt_dir = os.path.join(super_params.ckpt_dir, "dynamic", super_params.run_id)
             os.makedirs(self.ckpt_dir, exist_ok=True)
             self.pretrain_loss = OrderedDict(
                 {k: np.asarray([]) for k in ["total", "seg"]}
@@ -139,71 +139,81 @@ class TrainPipeline:
         train_transform = pre_transform(
             keys, modal, "train",
             self.super_params.crop_window_size,
-            self.super_params.pixdim, 
+            self.super_params.pixdim, self.super_params.spacing
             )
         valid_transform = pre_transform(
             keys, modal, "valid",
             self.super_params.crop_window_size,
-            self.super_params.pixdim, 
+            self.super_params.pixdim, self.super_params.spacing
             )
         
         return train_transform, valid_transform
 
 
-    def _remap_abs_path(self, data_list, modal):
+    def _remap_abs_path(self, data_list, modal, phase):
         if modal == "mr":
             return [{
-                "mr_image": os.path.join(self.super_params.mr_data_dir, "imagesTr", os.path.basename(d["image"])),
-                "mr_label": os.path.join(self.super_params.mr_data_dir, "labelsTr", os.path.basename(d["label"])),
-                "mr_slice_info": os.path.join(self.super_params.mr_data_dir, "slice_info", os.path.basename(d["label"])).replace(".nii.gz", "-info.npy"),
+                "mr_image": os.path.join(self.super_params.mr_data_dir, f"images{phase}", os.path.basename(d["image"])),
+                "mr_label": os.path.join(self.super_params.mr_data_dir, f"labels{phase}", os.path.basename(d["label"])),
             } for d in data_list]
         elif modal == "ct":
             return [{
-                "ct_image": os.path.join(self.super_params.ct_data_dir, "imagesTr", os.path.split(d["image"])[-1]),
-                "ct_label": os.path.join(self.super_params.ct_data_dir, "labelsTr", os.path.split(d["label"])[-1]),
+                "ct_image": os.path.join(self.super_params.ct_data_dir, f"imagesTr", os.path.split(d["image"])[-1]),
+                "ct_label": os.path.join(self.super_params.ct_data_dir, f"labelsTr", os.path.split(d["label"])[-1]),
             } for d in data_list]
         
 
     def _prepare_dataset(self, data_json, modal, train_transform, valid_transform):
-        train_data = self._remap_abs_path(data_json["train_fold0"], modal)
-        valid_data = self._remap_abs_path(data_json["validation_fold0"], modal)
-        test_data = self._remap_abs_path(data_json["test"], modal)
+        train_data = self._remap_abs_path(data_json["train_fold0"], modal, "Tr")
+        valid_data = self._remap_abs_path(data_json["validation_fold0"], modal, "Tr")
+        test_data = self._remap_abs_path(data_json["test"], modal, "Ts")
 
-        train_ds = Dataset(
-            train_data, train_transform, self.seed, sys.maxsize,
-            self.super_params.cache_rate, self.num_workers
-            )
-        valid_ds = Dataset(
-            valid_data, valid_transform, self.seed, sys.maxsize,
-            self.super_params.cache_rate, self.num_workers
-            )
-        test_ds = Dataset(
-            test_data, valid_transform, self.seed, sys.maxsize,
-            self.super_params.cache_rate, self.num_workers
-            )
+        if not self.is_training:
+            train_ds = None
+            valid_ds = None
+            test_ds = Dataset(
+                test_data, valid_transform, self.seed, sys.maxsize,
+                self.super_params.cache_rate, self.num_workers
+                )
+        else:
+            train_ds = Dataset(
+                train_data, train_transform, self.seed, sys.maxsize,
+                self.super_params.cache_rate, self.num_workers
+                )
+            valid_ds = Dataset(
+                valid_data, valid_transform, self.seed, sys.maxsize,
+                self.super_params.cache_rate, self.num_workers
+                )
+            test_ds = None
         
         return train_ds, valid_ds, test_ds
 
 
     def _prepare_dataloader(self, train_ds, valid_ds, test_ds):
-        if train_ds.__len__() > 0:
+        if not train_ds is None and train_ds.__len__() > 0:
             train_loader = DataLoader(
                 train_ds, batch_size=self.super_params.batch_size,
                 shuffle=True, num_workers=self.num_workers,
+                collate_fn=collate_4D_batch,
                 )
         else:
             train_loader = None
-        if valid_ds.__len__() > 0:
+        if not valid_ds is None and valid_ds.__len__() > 0:
             val_loader = DataLoader(
                 valid_ds, batch_size=1,
                 shuffle=False, num_workers=self.num_workers,
+                collate_fn=collate_4D_batch,
                 )
         else:
             val_loader = None
-        test_loader = DataLoader(
-            test_ds, batch_size=1,
-            shuffle=False, num_workers=self.num_workers,
-            )
+        if not test_ds is None and test_ds.__len__() > 0:
+            test_loader = DataLoader(
+                test_ds, batch_size=1,
+                shuffle=False, num_workers=self.num_workers,
+                collate_fn=collate_4D_batch,
+                )
+        else:
+            test_loader = None
         
         return train_loader, val_loader, test_loader
 
@@ -307,8 +317,8 @@ class TrainPipeline:
             return:
                 surface mesh with vertices and faces in NDC space [-1, 1].
         """
-        seg_true = torch.logical_or(seg_true == 2, seg_true == 4) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
-        # seg_true = (seg_true > 0) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
+        # seg_true = torch.logical_or(seg_true == 2, seg_true == 4) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
+        seg_true = (seg_true > 0) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
         if not use_skeleton:
             seg_true = seg_true.float()
             verts, faces = marching_cubes(
@@ -325,7 +335,8 @@ class TrainPipeline:
             skeletons = [convex_hull(np.indices(seg.shape)[:, seg > 0].reshape(3, -1).T) for seg in seg_true]
             # transform from world space to NDC space and convert to torch tensor
             mesh_true = Meshes(
-                verts=[torch.tensor(2 * (skeleton.vertices - skeleton.centroid) / skeleton.extents.max(), dtype=torch.float32) for skeleton in skeletons],
+                verts=[torch.tensor(2 * (skeleton.vertices - seg_true.shape[-1] // 2) / seg_true.shape[-1], dtype=torch.float32) 
+                       for skeleton in skeletons],
                 faces=[torch.tensor(skeleton.faces, dtype=torch.int64) for skeleton in skeletons]
             ).to(DEVICE)
 
@@ -345,24 +356,23 @@ class TrainPipeline:
         control_mesh = self.control_mesh.extend(df_pred.shape[0]).to(DEVICE)
 
         # calculate the gradient of the df
-        direction = torch.cat(torch.gradient(df_pred, dim=(2, 3, 4)), dim=1)
-        direction /= (torch.norm(direction, dim=1, keepdim=True) + 1e-16) * -1
+        direction = torch.cat(torch.gradient(-df_pred, dim=(2, 3, 4)), dim=1)
+        direction /= (torch.norm(direction, dim=1, keepdim=True) + 1e-16)
 
         # sample and apply offset in two-step manner: smooth global -> sharp local
         for step in range(2) if not one_step else [0]:
-            coords = control_mesh.verts_padded()
             offset = direction * df_pred
             offset = F.grid_sample(
-                offset, 
-                torch.flip(coords, dims=(-1,)).unsqueeze(1).unsqueeze(1),
+                offset.permute(0, 1, 4, 2, 3), 
+                control_mesh.verts_padded().unsqueeze(1).unsqueeze(1),
                 align_corners=True
-            ).view(df_pred.shape[0], 3, -1).permute(0, 2, 1)
+            ).view(df_pred.shape[0], 3, -1).transpose(-1, -2)[..., [1, 0, 2]]
             if step == 0:
                 # sampled offset is very fuzzy and apply it directly to the control mesh will break its manifold, so try average the offset and apply it
                 offset = offset.mean(dim=1, keepdim=True).expand(-1, control_mesh._V, -1)
             else:
                 # too large the offset that applies close to valve will break the manifold, so try to reduce the offset with equation y = x * e^(-x/t) where t is temperature term
-                offset *= torch.exp(-torch.sign(offset) * offset / t)
+                offset *= torch.exp(-1 * abs(offset) / t)
             # apply offset to the vertices
             control_mesh.scale_verts_(df_pred.shape[-1] / 2)
             control_mesh.offset_verts_(offset.reshape(-1, 3))
@@ -557,13 +567,11 @@ class TrainPipeline:
         if save_on == "sct":
             modal = "ct"
             self.AE.encoder.load_state_dict(self.encoder_ct.state_dict())
-            # valid_loader = self.ct_valid_loader
-            valid_loader = self.ct_test_loader
+            valid_loader = self.ct_valid_loader
         elif save_on == "cap":
             modal = "mr"
             self.AE.encoder.load_state_dict(self.encoder_mr.state_dict())
-            # valid_loader = self.mr_valid_loader
-            valid_loader = self.mr_test_loader
+            valid_loader = self.mr_valid_loader
         else:
             raise ValueError("Invalid dataset name")
 
@@ -579,15 +587,15 @@ class TrainPipeline:
                     data[f"{modal}_label"].as_tensor().to(DEVICE),
                     data[f"{modal}_df"].as_tensor().to(DEVICE),
                 )
-                seg_true = torch.logical_or(seg_true == 2, seg_true == 4) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
-                # seg_true = (seg_true > 0) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
+                # seg_true = torch.logical_or(seg_true == 2, seg_true == 4) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
+                seg_true = (seg_true > 0) if isinstance(self.seg_indices, str) else (seg_true == self.seg_indices)
                 seg_true = seg_true.float()
 
                 # evaluate the error between predicted df and the true df
                 df_pred, seg_pred = self.AE(img)
                 seg_pred = torch.stack([self.post_transform(i).as_tensor() for i in decollate_batch(seg_pred)], dim=0)
-                seg_pred = torch.logical_or(seg_pred == 2, seg_pred == 4) if isinstance(self.seg_indices, str) else (seg_pred == self.seg_indices)
-                # seg_pred = (seg_pred > 0) if isinstance(self.seg_indices, str) else (seg_pred == self.seg_indices)
+                # seg_pred = torch.logical_or(seg_pred == 2, seg_pred == 4) if isinstance(self.seg_indices, str) else (seg_pred == self.seg_indices)
+                seg_pred = (seg_pred > 0) if isinstance(self.seg_indices, str) else (seg_pred == self.seg_indices)
                 seg_pred = seg_pred.float()
                 df_metric_batch_decoder(df_pred, df_true)
 
@@ -613,19 +621,19 @@ class TrainPipeline:
         # log dice score
         self.eval_df_score["myo"] = np.append(self.eval_df_score["myo"], df_metric_batch_decoder.aggregate().cpu())
         self.eval_msh_score["myo"] = np.append(self.eval_msh_score["myo"], msh_metric_batch_decoder.aggregate().cpu())
-        draw_train_loss(self.pretrain_loss, self.super_params, task_code="stationary", phase="pretrain")
-        draw_train_loss(self.train_loss, self.super_params, task_code="stationary", phase="train")
-        draw_eval_score(self.eval_df_score, self.super_params, task_code="stationary", module="df")
-        draw_eval_score(self.eval_msh_score, self.super_params, task_code="stationary", module="msh")
+        draw_train_loss(self.pretrain_loss, self.super_params, task_code="dynamic", phase="pretrain")
+        draw_train_loss(self.train_loss, self.super_params, task_code="dynamic", phase="train")
+        draw_eval_score(self.eval_df_score, self.super_params, task_code="dynamic", module="df")
+        draw_eval_score(self.eval_msh_score, self.super_params, task_code="dynamic", module="msh")
         wandb.log({
             "train_categorised_loss": wandb.Table(
             columns=[f"pretrain_loss \u2193", f"train_loss \u2193",
                      f"eval_df_error \u2193", f"eval_msh_score \u2191"],
             data=[[
-                wandb.Image(f"{self.super_params.ckpt_dir}/stationary/{self.super_params.run_id}/pretrain_loss.png"),
-                wandb.Image(f"{self.super_params.ckpt_dir}/stationary/{self.super_params.run_id}/train_loss.png"),
-                wandb.Image(f"{self.super_params.ckpt_dir}/stationary/{self.super_params.run_id}/eval_df_score.png"),
-                wandb.Image(f"{self.super_params.ckpt_dir}/stationary/{self.super_params.run_id}/eval_msh_score.png"),
+                wandb.Image(f"{self.super_params.ckpt_dir}/dynamic/{self.super_params.run_id}/pretrain_loss.png"),
+                wandb.Image(f"{self.super_params.ckpt_dir}/dynamic/{self.super_params.run_id}/train_loss.png"),
+                wandb.Image(f"{self.super_params.ckpt_dir}/dynamic/{self.super_params.run_id}/eval_df_score.png"),
+                wandb.Image(f"{self.super_params.ckpt_dir}/dynamic/{self.super_params.run_id}/eval_msh_score.png"),
                 ]]
             )},
             step=epoch + 1
@@ -694,7 +702,6 @@ class TrainPipeline:
             torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_AutoEncoder.pth")))
         self.GSN.load_state_dict(
             torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_GSN.pth")))
-        # if self.super_params.subdiv_levels > 0:
         # load the subdivided_faces.faces_levels
         self.subdivided_faces.faces_levels = [torch.load(
             f"{self.ckpt_dir}/{self.super_params.best_epoch}_subdivided_faces_l{level}.pth"
@@ -714,21 +721,34 @@ class TrainPipeline:
         else:
             raise ValueError("Invalid dataset name")
 
-        for data in valid_loader:
-            try:
-                id = os.path.basename(data[f"{modal}_label"].meta["filename_or_obj"]).replace(".nii.gz", "")
-            except:
-                id = os.path.basename(data[f"{modal}_label"].meta["filename_or_obj"][0]).replace(".nii.gz", "")
+        for i, data in enumerate(valid_loader):
+            id = os.path.basename(valid_loader.dataset.data[i][f"{modal}_label"]).replace(".nii.gz", '').replace(".seg.nrrd", '')
+            id = id.split('-')[0]
             img = data[f"{modal}_image"].as_tensor().to(DEVICE)
 
             df_pred, _ = self.AE(img)
             control_mesh = self.warp_control_mesh(df_pred)  
             subdiv_mesh = self.GSN(control_mesh, self.subdivided_faces.faces_levels)
+
+            # smoothing the generated mesh
+            subdiv_mesh = taubin_smoothing(subdiv_mesh, 0.77, -0.34, 30)
             
-            save_obj(
-               f"{self.out_dir}/{id}.obj", 
-                subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
-            )
+            if subdiv_mesh._N > 2:
+                for i in range(subdiv_mesh._N):
+                    # save each mesh as a time instance
+                    save_obj(f"{self.out_dir}/{id} - {i:02d}.obj", 
+                             subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
+            elif subdiv_mesh._N == 2:
+                phases = ['ED', 'ES']
+                for i in range(subdiv_mesh._N):
+                    # save each mesh as a time instance
+                    save_obj(f"{self.out_dir}/{id}-{phases[i]}.obj", 
+                             subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
+            else:
+                save_obj(
+                f"{self.out_dir}/{id}.obj", 
+                    subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
+                )
 
 
     @torch.no_grad()
@@ -753,47 +773,46 @@ class TrainPipeline:
         assert save_on == "cap", "Ablation study is only available for cap dataset"
         self.AE.encoder.load_state_dict(self.encoder_ct.state_dict())
 
-        for data in self.mr_test_loader:
-            try:
-                id = os.path.basename(data[f"mr_label"].meta["filename_or_obj"]).replace(".nii.gz", "")
-            except:
-                id = os.path.basename(data[f"mr_label"].meta["filename_or_obj"][0]).replace(".nii.gz", "")
-            img = data[f"mr_image"].as_tensor().to(DEVICE)
-            # seg = data[f"mr_label"].as_tensor().to(DEVICE)
+        for i, data in enumerate(self.mr_test_loader):
+            id = os.path.basename(self.mr_test_loader.dataset.data[i]["mr_label"]).replace(".nii.gz", '').replace(".seg.nrrd", '')
+            id = id.split('-')[0] + '-ED'
+            img = data[f"mr_image"][:1].as_tensor().to(DEVICE)
+            # seg = data[f"mr_label"][:1].as_tensor().to(DEVICE)
             # seg = (seg > 0) if isinstance(self.seg_indices, str) else (seg == self.seg_indices)
             df_true = data[f"mr_df"].as_tensor().to(DEVICE)
 
             df_pred, _ = self.AE(img)   # (lv, myo, rv)
 
-            # df_surface = torch.where(df_pred[0][2] - 1 < 1e-3, 1, 0)
-            # verts, faces = marching_cubes(df_surface.unsqueeze(0).permute(0, 3, 1, 2).float(), 
-            #                               isolevel=0.1, return_local_coords=False)
-            # # convert coordinates from (z, x, y) to (x, y, z)
-            # verts = [vert[:, [1, 0, 2]] for vert in verts]
-            # verts = verts[0].cpu().numpy()
-            # faces = faces[0].cpu().numpy()
-            # seg_coord = np.indices(seg.shape[2:])[:, seg.squeeze().cpu().numpy() > 0].reshape(3, -1).T
-            # fig = go.Figure(data=[
-            #     go.Scatter3d(
-            #         x=seg_coord[:, 0], y=seg_coord[:, 1], z=seg_coord[:, 2],
-            #         mode="markers", marker=dict(size=1, color="red")
-            #     ),
-            #     go.Mesh3d(
-            #         x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
-            #         i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
-            #         color="lightblue", opacity=0.5
-            #     )
-            # ])
-            # fig.write_html("surface_from_dist_field.html")
+            # for j, part in enumerate(['lv', 'myo', 'rv']):
+            #     df_surface = torch.where(df_pred[0][j] - 1 < 1e-3, 1, 0)
+            #     verts, faces = marching_cubes(df_surface.unsqueeze(0).permute(0, 3, 1, 2).float(), 
+            #                                 isolevel=0.1, return_local_coords=False)
+            #     # convert coordinates from (z, x, y) to (x, y, z)
+            #     verts = [vert[:, [1, 0, 2]] for vert in verts]
+            #     verts = verts[0].cpu().numpy()
+            #     faces = faces[0].cpu().numpy()
+            #     seg_coord = np.indices(seg.shape[2:])[:, seg.squeeze().cpu().numpy() > 0].reshape(3, -1).T
+            #     fig = go.Figure(data=[
+            #         go.Scatter3d(
+            #             x=seg_coord[:, 0], y=seg_coord[:, 1], z=seg_coord[:, 2],
+            #             mode="markers", marker=dict(size=1, color="red")
+            #         ),
+            #         go.Mesh3d(
+            #             x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
+            #             i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+            #             color="lightblue", opacity=0.5
+            #         )
+            #     ])
+            #     fig.write_html(f"surface_from_dist_field-{part}.html")
 
             os.makedirs(os.path.join(self.out_dir, id), exist_ok=True)
             # save the prediction and true distance field as npy files
             np.save(f"{self.out_dir}/{id}/df_true.npy", df_true[0].cpu().numpy())
             np.save(f"{self.out_dir}/{id}/df_pred.npy", df_pred[0].cpu().numpy())
             # # predicted distance field
-            # for axis, i in zip(['X', 'Y', 'Z'], range(3)):
+            # for axis, j in zip(['X', 'Y', 'Z'], range(3)):
             #     fig = ff.create_distplot(
-            #         [df_true[0][i].flatten().cpu().numpy(), df_pred[0][i].flatten().cpu().numpy()],
+            #         [df_true[0][j].flatten().cpu().numpy(), df_pred[0][j].flatten().cpu().numpy()],
             #         group_labels=["df_true", "df_pred"],
             #         colors=["#EF553B", "#3366CC"],
             #         show_rug=False, show_hist=False,
@@ -813,18 +832,20 @@ class TrainPipeline:
             # warped + adaptive
             control_mesh = self.warp_control_mesh(df_pred)  
             subdiv_mesh = self.GSN(control_mesh, self.subdivided_faces.faces_levels)
+            # smoothing the generated mesh
+            subdiv_mesh = taubin_smoothing(subdiv_mesh, 0.77, -0.34, 30)
             save_obj(
                f"{self.out_dir}/{id}/adaptive.obj", 
                 subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
             )
 
-            # unwarped + adaptive
-            control_mesh = self.warp_control_mesh(df_true, one_step=True)
-            subdiv_mesh = self.GSN(control_mesh, self.subdivided_faces.faces_levels)
-            save_obj(
-               f"{self.out_dir}/{id}/unwarped.obj", 
-                subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
-            )
+            # # unwarped + adaptive
+            # control_mesh = self.warp_control_mesh(df_true, one_step=True)
+            # subdiv_mesh = self.GSN(control_mesh, self.subdivided_faces.faces_levels)
+            # save_obj(
+            #    f"{self.out_dir}/{id}/unwarped.obj", 
+            #     subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
+            # )
 
             # warped + Loop subdivided
             control_mesh = self.warp_control_mesh(df_pred)
@@ -836,11 +857,17 @@ class TrainPipeline:
             )
 
             # unwarped + Loop subdivided
-            control_mesh = self.control_mesh.extend(df_true.shape[0]).to(DEVICE)
+            control_mesh = self.control_mesh.to(DEVICE)
             control_mesh = Trimesh(control_mesh.verts_packed().cpu().numpy(), control_mesh.faces_packed().cpu().numpy())
             for _ in range(2): control_mesh = control_mesh.subdivide_loop()
             save_obj(
-               f"{self.out_dir}/{id}/unwarped_loop_subdivided.obj", 
+            f"{self.out_dir}/{id}/unwarped_loop_subdivided.obj", 
                 torch.tensor(control_mesh.vertices), torch.tensor(control_mesh.faces)
+            )
+
+            # control mesh
+            save_obj(
+                f"{self.out_dir}/{id}/control_mesh.obj", 
+                self.control_mesh.verts_packed(), self.control_mesh.faces_packed()
             )
 

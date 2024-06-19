@@ -43,17 +43,22 @@ def config():
     parser.add_argument("--lambda_", type=float, nargs='+', default=[0.1, 3.6, 6.3, 0.1], help="the loss coefficients for DF MSE, Chamfer verts distance, face squared distance, and laplacian smooth term")
 
     # data parameters
+    parser.add_argument("--spacing", type=str,
+                        default=1.3671875, 
+                        help="the in-plane spacing of the data")
     parser.add_argument("--ct_json_dir", type=str,
                         default="/home/yd21/Documents/MorphiNet/dataset/dataset_task20_f0.json", 
                         help="the path to the json file with named list of CTA train/valid/test sets")
     parser.add_argument("--mr_json_dir", type=str,
-                        default="/home/yd21/Documents/MorphiNet/dataset/dataset_task17_f0.json", 
+                        # default="/home/yd21/Documents/MorphiNet/dataset/dataset_task17_f0.json", 
+                        default="/home/yd21/Documents/MorphiNet/dataset/dataset_task11_f0.json", 
                         help="the path to the json file with named list of CMR train/valid/test sets")
     parser.add_argument("--ct_data_dir", type=str, 
                         default="/mnt/data/Experiment/nnUNet/nnUNet_raw/Dataset020_SCOTHEART", 
                         help="the path to your processed images, must be in nifti format")
     parser.add_argument("--mr_data_dir", type=str, 
-                        default="/mnt/data/Experiment/nnUNet/nnUNet_raw/Dataset017_CAP_COMBINED", 
+                        # default="/mnt/data/Experiment/nnUNet/nnUNet_raw/Dataset017_CAP_COMBINED", 
+                        default="/mnt/data/Experiment/nnUNet/nnUNet_raw/Dataset011_CAP_SAX", 
                         help="the path to your processed images")
     parser.add_argument("--ckpt_dir", type=str, 
                         default="/mnt/data/Experiment/MorphiNet/Checkpoint", 
@@ -74,8 +79,7 @@ def config():
     parser.add_argument("--block_inplanes", type=int, default=(4, 8, 16, 32), nargs='+', help="the number of intermedium channels in each residual block")
 
     # structure parameters for subdiv module
-    parser.add_argument("--subdiv_levels", type=int, default=0, help="the number of subdivision levels for the mesh")
-    # parser.add_argument("--subdiv_levels", type=int, default=2, help="the number of subdivision levels for the mesh (should be an integer larger than 0, where 0 means no subdivision)")
+    parser.add_argument("--subdiv_levels", type=int, default=0, help="the number of subdivision levels for the mesh (should be an integer larger than 0, where 0 means no subdivision)")
     parser.add_argument("--hidden_features_gsn", type=int, default=16, help="the number of hidden features for the graph subdivide network")
 
     # run_id for wandb, will create automatically if not specified for training
@@ -92,7 +96,7 @@ def test(super_params):
     wandb.init(mode="disabled")
     pipeline = TrainPipeline(
         super_params=super_params,
-        seed=42, num_workers=0,
+        seed=42, num_workers=19,
         is_training=False
     )
     pipeline.test(super_params.save_on)
@@ -110,19 +114,23 @@ def ablation(super_params):
 if __name__ == '__main__':
     super_params = config()
 
-    fold = 'x'
+    fold = '0'
     super_params.save_on = "cap"
-    part = "myo"
     test_on = "cap"
+    part = "rv"
+    run_date = "2024-06-15-1002"
+    super_params.best_epoch = 161
+    run_mode = "dynamic"
+    super_params.subdiv_levels = 2
     super_params.ct_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task20_f{fold}.json"
-    super_params.ct_data_dir = f"/mnt/data/Experiment/nnUNet/nnUNet_raw/Dataset020_SCOTHEART"
-    super_params.mr_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task10_f{fold}.json"
-    super_params.mr_data_dir = f"/mnt/data/Experiment/nnUNet/nnUNet_raw/Dataset010_Abdul_SAX"
-    super_params.best_epoch = 201
-    super_params.control_mesh_dir = f"/home/yd21/Documents/MorphiNet/template/initial_mesh-{part}.obj"
-    super_params.run_id = f"{super_params.save_on}-{part}-f{fold}"
-    super_params.ckpt_dir = f"/mnt/data/Experiment/MorphiNet/Result/{super_params.save_on}-{part}-f{fold}/trained_weights"
-    super_params.out_dir = f"/mnt/data/Experiment/MorphiNet/Output/{test_on}/{part}/"
-    # ablation(super_params)
+    super_params.ct_data_dir = f"/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset020_SCOTHEART"
+    super_params.mr_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task11_f{fold}.json"
+    super_params.mr_data_dir = f"/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX"
+    super_params.control_mesh_dir = f"/home/yd21/Documents/MorphiNet/template/control_mesh-{part}.obj"
+    super_params.run_id = f"{super_params.save_on}--{part}--f{fold}--{run_date}"
+    super_params.ckpt_dir = f"/mnt/data/Experiment/MorphiNet/Checkpoint/{run_mode}/{super_params.save_on}--{part}--f{fold}--{run_date}/trained_weights"
+    # super_params.out_dir = f"/mnt/data/Experiment/MorphiNet/Output/{test_on}/{part}/"
+    super_params.out_dir = f"/mnt/data/Experiment/MICCAI_24/Ablation/{test_on}/{part}/"
+    ablation(super_params)
 
-    test(super_params)
+    # test(super_params)
