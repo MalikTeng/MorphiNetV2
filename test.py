@@ -31,7 +31,7 @@ def config():
     # training parameters
     parser.add_argument("--max_epochs", type=int, default=200, help="the maximum number of epochs for training")
     parser.add_argument("--pretrain_epochs", type=int, default=120, help="the number of epochs to train the segmentation encoder")
-    parser.add_argument("--delay_epochs", type=int, default=160, help="the number of epochs to delay the fine-tuning and validation from start of pretrain")
+    parser.add_argument("--train_epochs", type=int, default=160, help="the number of epochs to delay the fine-tuning and validation from start of pretrain")
     parser.add_argument("--reduce_count_down", type=int, default=10, help="the count down for reduce the mesh face numbers.")
     parser.add_argument("--val_interval", type=int, default=10, help="the interval of validation")
 
@@ -43,9 +43,6 @@ def config():
     parser.add_argument("--lambda_", type=float, nargs='+', default=[0.1, 3.6, 6.3, 0.1], help="the loss coefficients for DF MSE, Chamfer verts distance, face squared distance, and laplacian smooth term")
 
     # data parameters
-    parser.add_argument("--spacing", type=str,
-                        default=1.3671875, 
-                        help="the in-plane spacing of the data")
     parser.add_argument("--ct_json_dir", type=str,
                         default="/home/yd21/Documents/MorphiNet/dataset/dataset_task20_f0.json", 
                         help="the path to the json file with named list of CTA train/valid/test sets")

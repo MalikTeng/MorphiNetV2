@@ -27,7 +27,7 @@ from monai.utils.module import look_up_option
 
 from .parts import ResNetBlock, ResNetBottleneck
 
-__all__ = ["ResNet", "AutoEncoder", "GSN", "Subdivision"]
+__all__ = ["ResNet", "DownSample", "GSN", "Subdivision"]
 
 
 class AutoEncoder(nn.Module):
@@ -63,6 +63,36 @@ class AutoEncoder(nn.Module):
         x_df = self.decoder(x_df)
 
         return x_df, x_seg
+    
+
+class DownSample(nn.Module):
+    """
+    down-sample should be applied to scale the output segmentation into sizes matching the target distance field.
+    """
+    def __init__(self, out_channels, downsample_scale, spatial_dims=3) -> None:
+        super().__init__()
+
+        conv_type: Union[nn.Conv1d, nn.Conv2d, nn.Conv3d] = Conv[Conv.CONV, spatial_dims]
+        norm_type: Union[nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d] = Norm[Norm.BATCH, spatial_dims]
+
+        num_layers = torch.log2(torch.tensor(downsample_scale)).int().item()
+        ds_layer = []
+        for _ in range(num_layers):
+            ds_layer.extend([
+                conv_type(
+                    out_channels, out_channels, 
+                    kernel_size=3, stride=2, padding=1, bias=True
+                    ),
+                norm_type(out_channels),
+                ])
+        self.ds_block = nn.Sequential(*ds_layer)
+
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x_seg):
+        x_df = self.ds_block(x_seg)
+
+        return x_df
 
 
 class ResNet(nn.Module):
@@ -208,19 +238,21 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
+        dx = self.conv1(x)
+        dx = self.bn1(dx)
+        dx = self.relu(dx)
 
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
+        dx = self.layer1(dx)
+        dx = self.layer2(dx)
+        dx = self.layer3(dx)
+        dx = self.layer4(dx)
 
-        x = self.out(x)
-        x = self.relu(x)
+        dx = self.out(dx)
+        dx = self.relu(dx)
 
-        return x
+        y = x + dx
+
+        return y
 
 
 """

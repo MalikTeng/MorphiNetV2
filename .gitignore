@@ -2,3 +2,5 @@ __pycache__
 figure
 remove_after_confirm
 wandb
+utils/rasterize
+result

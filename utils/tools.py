@@ -5,8 +5,9 @@ import torch
 import numpy as np
 import pandas as pd
 from argparse import Namespace
-from torch.nn.functional import one_hot
 from torch import Tensor
+import torch.nn.functional as F
+from torch.nn.functional import one_hot
 from pytorch3d.structures import Meshes, Pointclouds
 from trimesh.voxel.ops import matrix_to_marching_cubes
 import matplotlib.pyplot as plt
@@ -18,35 +19,17 @@ import plotly.graph_objects as go
 __all__ = ["draw_plotly", "draw_train_loss", "draw_eval_score"]
 
 def draw_plotly(
-    image: Union[Tensor, None] = None, seg_true: Union[Tensor, None] = None, 
-    seg_pred: Union[Tensor, None] = None, mesh_pred: Union[Meshes, None] = None 
+    seg_true: Union[Tensor, None] = None, seg_pred: Union[Tensor, None] = None, 
+    df_true: Union[Tensor, None] = None, df_pred: Union[Tensor, None] = None,
+    mesh_pred: Union[Meshes, None] = None 
     ):
     fig = make_subplots(rows=1, cols=1)
-    if image is not None:
-        # Add image as cross sections, perpendicular to each other.
-        assert image.shape[0] == 1, "Only support one image at a time."
-        image = image.squeeze()   # remove batch and channel dimension
-        X, Y, Z = image.shape
-        _, _, z_grid = np.mgrid[0:X, 0:Y, 0:Z]
-        fig.add_traces([
-            go.Surface(
-                z=Z // 2 * np.ones((X, Y)), surfacecolor=image[..., Z // 2].T, 
-                colorscale="Gray", cmin=0, cmax=1,
-                showscale=False
-                ),
-            go.Surface(
-                z=z_grid[0], x=X // 2 * np.ones((Y, Z)), surfacecolor=image[X // 2], 
-                colorscale="Gray", cmin=0, cmax=1,
-                showscale=False
-                ),
-        ])
 
     if seg_true is not None:
-        assert seg_true.shape[0] == 1, "Only support one seg_true at a time."
-        num_classes = torch.unique(seg_true).shape[0]
+        num_classes = len(torch.unique(seg_true))
         if num_classes == 2:
-            mesh = matrix_to_marching_cubes(seg_true.squeeze().cpu().numpy())
-            x, y, z = mesh.vertices.T
+            mesh = matrix_to_marching_cubes(seg_true[0].cpu().numpy())
+            y, x, z = mesh.vertices.T
             I, J, K = mesh.faces.T
             fig.add_trace(go.Mesh3d(
                 x=x, y=y, z=z,
@@ -56,14 +39,13 @@ def draw_plotly(
                 name="seg_true"
             ))
         else:
-            raise ValueError("Only support binary segmentation for now.")
+            print("ERROR: Only support binary segmentation for now.")
     
     if seg_pred is not None:
-        assert seg_pred.shape[0] == 1, "Only support one prediction at a time."
-        num_classes = torch.unique(seg_pred).shape[0]
+        num_classes = len(torch.unique(seg_pred))
         if num_classes == 2:
-            mesh = matrix_to_marching_cubes(seg_pred.squeeze().cpu().numpy())
-            x, y, z = mesh.vertices.T
+            mesh = matrix_to_marching_cubes(seg_pred[0].cpu().numpy())
+            y, x, z = mesh.vertices.T
             I, J, K = mesh.faces.T
             fig.add_trace(go.Mesh3d(
                 x=x, y=y, z=z,
@@ -73,13 +55,16 @@ def draw_plotly(
                 name="seg_pred"
             ))
         else:
-            raise ValueError("Only support binary segmentation for now.")
+            print("ERROR: Only support binary segmentation for now.")
 
     if mesh_pred is not None:
         assert mesh_pred._N == 1, "Only support one mesh at a time."
-        # rescale the pred mesh to fit the seg_true
-        mesh_pred.scale_verts_(seg_true.shape[-1] / 2)
-        mesh_pred.offset_verts_(torch.tensor([seg_true.shape[-1] / 2] * 3))
+        # transform from NDC space to world space
+        mesh_pred.offset_verts_(torch.tensor([1.0] * 3))
+        if df_pred is None:
+            mesh_pred.scale_verts_(seg_true.shape[-1] / 2)
+        else:
+            mesh_pred.scale_verts_(df_pred.shape[-1] / 2)
         for mesh in mesh_pred:
             x, y, z = mesh.verts_packed().T
             I, J, K = mesh.faces_packed().T
@@ -91,6 +76,34 @@ def draw_plotly(
                 name="meshes_pred"
             ))
 
+    if df_pred is not None:
+        # compute the gradient of the signed distance field
+        grad_pred = torch.gradient(-df_pred, dim=(1, 2, 3), edge_order=1)
+        grad_pred = torch.stack(grad_pred, dim=1)
+        grad_pred /= torch.norm(grad_pred, dim=1, keepdim=True)
+        # mute any nan/inf values in label_grad
+        grad_pred[torch.isnan(grad_pred)] = 0
+        grad_pred[torch.isinf(grad_pred)] = 0
+
+        # compute the grad respective to the mesh vertices
+        grad_pred *= df_pred.unsqueeze(1)
+        verts = mesh_pred.verts_padded()
+        verts = 2 * (verts / df_pred.shape[-1] - 0.5)   # pixel space to NDC space
+        mesh_grad = F.grid_sample(
+            grad_pred.permute(0, 1, 4, 2, 3).float(),           # (N, C: yxz, D, H, W)
+            verts.unsqueeze(1).unsqueeze(1),                    # (N, 1, 1, V, 3: xyz)
+            align_corners=False
+        ).view(1, 3, -1).transpose(-1, -2)[..., [1, 0, 2]]      # (N, C: yxz, 1, 1, V) -> (N, V, C: xyz)
+        verts = (verts / 2 + 0.5) * df_pred.shape[-1]   # NDC space to pixel space
+        x, y, z = verts[0].numpy().T
+        u, v, w = mesh_grad[0].numpy().T
+        fig.add_trace(go.Cone(
+            x=x, y=y, z=z,
+            u=u, v=v, w=w,
+            colorscale="Viridis", sizemode="scaled", sizeref=1, showscale=True
+        ))
+
+
     return fig
 
 def draw_train_loss(train_loss: dict, super_params: Namespace, task_code: str, phase: str):
@@ -101,13 +114,13 @@ def draw_train_loss(train_loss: dict, super_params: Namespace, task_code: str, p
 
     df = pd.DataFrame(train_loss)
     df.set_index(df.index + 1, inplace=True)
-    if phase == "train":
+    if phase == "gsn":
         lambda_ = super_params.lambda_
     else:
         lambda_ = [1]
     df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=0, how="any")
 
-    if len(df) > 0:
+    if len(df) > 1:
         for i, coeff in enumerate(lambda_, start=1):
             df.iloc[:, i] = df.iloc[:, i - 1] - coeff * df.iloc[:, i]
         colors = sns.color_palette("hls", len(df.columns.values))
@@ -127,7 +140,7 @@ def draw_train_loss(train_loss: dict, super_params: Namespace, task_code: str, p
 
 def draw_eval_score(eval_score: dict, super_params: Namespace, task_code: str, module: str):
     df = pd.DataFrame(eval_score)
-    df["Epoch"] = super_params.delay_epochs + (df.index + 1) * super_params.val_interval
+    df["Epoch"] = super_params.train_epochs + (df.index + 1) * super_params.val_interval
     df_melted = df.melt(id_vars="Epoch", var_name="Label", value_name="Score")
     mean_scores = df.drop("Epoch", axis=1).mean(axis=1)
     mean_scores.name = 'Average Score'

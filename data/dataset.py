@@ -34,9 +34,16 @@ def collate_4D_batch(data: List[Dict[str, Union[torch.Tensor, np.ndarray]]]) -> 
     batch = {}
     for key in data[0].keys():
         if isinstance(data[0][key], torch.Tensor):
-            batch[key] = torch.concat([d[key] for d in data], dim=0)
-            if batch[key].dim() == 4:
-                batch[key] = batch[key].unsqueeze(1)
+            if "mr" not in key or "df" in key:
+                batch[key] = torch.concat([d[key] for d in data], dim=0)
+                if batch[key].dim() == 4:
+                    batch[key] = batch[key].unsqueeze(1)
+            else:
+                batch[f"{key[:2]}_batch"] = torch.tensor(
+                    [d[key].shape[1] for d in data], 
+                    dtype=torch.int8, device=data[0][key].device)
+                batch[key] = torch.concat([d[key] for d in data], dim=1)
+                batch[key] = batch[key].flatten(0, 1).unsqueeze(1)
         else:
             batch[key] = np.stack([d[key] for d in data], axis=0)
     return batch

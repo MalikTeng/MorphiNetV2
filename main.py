@@ -26,28 +26,24 @@ def config():
     parser.add_argument("--mode", type=str, default="offline", help="choose the mode for wandb, can be 'disabled', 'offline', 'online'")
     parser.add_argument("--save_on", type=str, default="cap", help="the dataset for validation, can be 'cap' or 'sct'")
     parser.add_argument("--control_mesh_dir", type=str,
-                        # default="/home/yd21/Documents/MorphiNet/template/initial_mesh-myo.obj",
-                        default="/home/yd21/Documents/MorphiNet/template/control_mesh-rv.obj",
+                        default="/home/yd21/Documents/MorphiNet/template/initial_mesh-myo.obj",
                         help="the path to your initial meshes")
 
     # training parameters
     parser.add_argument("--max_epochs", type=int, default=6, help="the maximum number of epochs for training")
-    parser.add_argument("--pretrain_epochs", type=int, default=3, help="the number of epochs to train the segmentation encoder")
-    parser.add_argument("--delay_epochs", type=int, default=4, help="the number of epochs to delay the fine-tuning and validation from start of pretrain")
+    parser.add_argument("--pretrain_epochs", type=int, default=3, help="the number of epochs to train the segmentation UNet")
+    parser.add_argument("--train_epochs", type=int, default=4, help="the number of epochs to train the distance field prediction ResNet")
     parser.add_argument("--reduce_count_down", type=int, default=-1, help="the count down for reduce the mesh face numbers.")
     parser.add_argument("--val_interval", type=int, default=1, help="the interval of validation")
 
     parser.add_argument("--lr", type=float, default=1e-3, help="the learning rate for training")
-    parser.add_argument("--batch_size", type=int, default=8, help="the batch size for training")
+    parser.add_argument("--batch_size", type=int, default=1, help="the batch size for training")
     parser.add_argument("--cache_rate", type=float, default=1.0, help="the cache rate for training, see MONAI document for more details")
     parser.add_argument("--crop_window_size", type=int, nargs='+', default=[128, 128, 128], help="the size of the crop window for training")
     parser.add_argument("--pixdim", type=float, nargs='+', default=[4, 4, 4], help="the pixel dimension of downsampled images")
-    parser.add_argument("--lambda_", type=float, nargs='+', default=[0.02, 10.0, 10.0, 0.25], help="the loss coefficients for DF MSE, Chamfer verts distance, face squared distance, and laplacian smooth term")
+    parser.add_argument("--lambda_", type=float, nargs='+', default=[10.0, 10.0, 0.5], help="the loss coefficients for Chamfer verts distance, point to mesh distance, and laplacian smooth term")
 
     # data parameters
-    parser.add_argument("--spacing", type=str,
-                        default=1.3671875, 
-                        help="the in-plane spacing of the data")
     parser.add_argument("--ct_json_dir", type=str,
                         default="/home/yd21/Documents/MorphiNet/dataset/dataset_task20_f0.json", 
                         help="the path to the json file with named list of CTA train/valid/test sets")
@@ -73,13 +69,13 @@ def config():
 
     # structure parameters for df-predict module
     parser.add_argument("--num_classes", type=int, default=4, help="the number of segmentation classes of foreground exclude background")
-    parser.add_argument("--channels", type=int, default=(8, 16, 32, 64, 128), nargs='+', help="the number of output channels in each layer of the encoder")
-    parser.add_argument("--strides", type=int, default=(2, 2, 2, 2), nargs='+', help="the stride of the convolutional layer in the encoder")
+    parser.add_argument("--channels", type=int, default=(8, 16, 32, 64, 128, 256, 512), nargs='+', help="the number of output channels in each layer of the encoder")
+    parser.add_argument("--strides", type=int, default=(1, 2, 1, 2, 1, 2), nargs='+', help="the stride of the convolutional layer in the encoder")
     parser.add_argument("--layers", type=int, default=(1, 2, 2, 2), nargs='+', help="the number of layers in each residual block of the decoder")
     parser.add_argument("--block_inplanes", type=int, default=(4, 8, 16, 32), nargs='+', help="the number of intermedium channels in each residual block")
 
     # structure parameters for subdiv module
-    parser.add_argument("--subdiv_levels", type=int, default=2, help="the number of subdivision levels for the mesh (should be an integer larger than 0, where 0 means no subdivision)")
+    parser.add_argument("--subdiv_levels", type=int, default=0, help="the number of subdivision levels for the mesh (should be an integer larger than 0, where 0 means no subdivision)")
     parser.add_argument("--hidden_features_gsn", type=int, default=16, help="the number of hidden features for the graph subdivide network")
 
     # run_id for wandb, will create automatically if not specified for training
@@ -106,36 +102,26 @@ def train(super_params):
             )
 
         # train the network
-        if super_params.save_on == "cap":
-            for epoch in range(super_params.max_epochs):
-                torch.cuda.empty_cache()
+        for epoch in range(super_params.max_epochs):
+            torch.cuda.empty_cache()
+            if epoch < super_params.pretrain_epochs:
                 # 1. train segmentation encoder
-                pipeline.train_iter(epoch, "pretrain")
-                if epoch >= super_params.pretrain_epochs:
-                    # 2.2. train whole network
-                    pipeline.train_iter(epoch, "train")
-                    # 2.1 reduce the mesh face numbers
-                    if epoch - super_params.pretrain_epochs == super_params.reduce_count_down:
-                        pipeline.update_precomputed_faces()
-                    # # 3. fine-tune the Subdiv Module
-                    # pipeline.fine_tune(epoch)
-                    if epoch % super_params.val_interval == 0:
-                        # 4. validate the pipeline
-                        pipeline.valid(epoch, super_params.save_on)
-        else:
-            for epoch in range(super_params.max_epochs):
-                torch.cuda.empty_cache()
-                # 1. train segmentation encoder
-                pipeline.train_iter(epoch, "pretrain")
-                if epoch >= super_params.pretrain_epochs:
-                    # 2. train whole network
-                    pipeline.train_iter(epoch, "train")
-                    # 2.1 reduce the mesh face numbers
-                    if epoch - super_params.pretrain_epochs == super_params.reduce_count_down:
-                        pipeline.update_precomputed_faces()
-                # 3. validate network
-                if epoch >= super_params.delay_epochs and \
-                    (epoch - super_params.delay_epochs) % super_params.val_interval == 0:
+                pipeline.train_iter(epoch, "unet")
+            elif epoch < super_params.train_epochs:
+                # drop the rotation and flip augmentation
+                if epoch == super_params.pretrain_epochs:
+                    pipeline._data_warper(rotation=False)
+                # 2. train distance field prediction module
+                pipeline.train_iter(epoch, "resnet")
+            else:
+                # 3. fine-tune the subdiv module
+                pipeline.train_iter(epoch, "gsn")
+                # 3.1 reduce the mesh face numbers
+                if epoch - super_params.train_epochs == super_params.reduce_count_down:
+                    pipeline.update_precomputed_faces()
+                # 4. validate network
+                if epoch >= super_params.train_epochs and \
+                    (epoch - super_params.train_epochs) % super_params.val_interval == 0:
                     pipeline.valid(epoch, super_params.save_on)
 
 
