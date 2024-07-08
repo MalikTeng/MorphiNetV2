@@ -14,13 +14,84 @@ from pytorch3d.loss import chamfer_distance, point_mesh_face_distance
 from pytorch3d.ops import cot_laplacian, packed_to_padded, sample_points_from_meshes
 from pytorch3d.ops.knn import knn_points
 
+import plotly.graph_objects as go
 
-__all__ = ["mesh_laplacian_smoothing", "skeleton_loss_fn", "face_score"]
+
+__all__ = ["surface_crossing_loss", "mesh_laplacian_smoothing"]
 
 
 # ----------------------- point to face distance -----------------------
 
 _DEFAULT_MIN_TRIANGLE_AREA: float = 5e-3
+
+
+# PointFaceDistance
+class _PointFaceDistance(Function):
+    """
+    Torch autograd Function wrapper PointFaceDistance Cuda implementation
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        points,
+        points_first_idx,
+        tris,
+        tris_first_idx,
+        max_points,
+        min_triangle_area=_DEFAULT_MIN_TRIANGLE_AREA,
+    ):
+        """
+        Args:
+            ctx: Context object used to calculate gradients.
+            points: FloatTensor of shape `(P, 3)`
+            points_first_idx: LongTensor of shape `(N,)` indicating the first point
+                index in each example in the batch
+            tris: FloatTensor of shape `(T, 3, 3)` of triangular faces. The `t`-th
+                triangular face is spanned by `(tris[t, 0], tris[t, 1], tris[t, 2])`
+            tris_first_idx: LongTensor of shape `(N,)` indicating the first face
+                index in each example in the batch
+            max_points: Scalar equal to maximum number of points in the batch
+            min_triangle_area: (float, defaulted) Triangles of area less than this
+                will be treated as points/lines.
+        Returns:
+            dists: FloatTensor of shape `(P,)`, where `dists[p]` is the squared
+                euclidean distance of `p`-th point to the closest triangular face
+                in the corresponding example in the batch
+            idxs: LongTensor of shape `(P,)` indicating the closest triangular face
+                in the corresponding example in the batch.
+
+            `dists[p]` is
+            `d(points[p], tris[idxs[p], 0], tris[idxs[p], 1], tris[idxs[p], 2])`
+            where `d(u, v0, v1, v2)` is the distance of point `u` from the triangular
+            face `(v0, v1, v2)`
+
+        """
+        dists, idxs = _C.point_face_dist_forward(
+            points,
+            points_first_idx,
+            tris,
+            tris_first_idx,
+            max_points,
+            min_triangle_area,
+        )
+        ctx.save_for_backward(points, tris, idxs)
+        ctx.min_triangle_area = min_triangle_area
+        return dists
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad_dists):
+        grad_dists = grad_dists.contiguous()
+        points, tris, idxs = ctx.saved_tensors
+        min_triangle_area = ctx.min_triangle_area
+        grad_points, grad_tris = _C.point_face_dist_backward(
+            points, tris, idxs, grad_dists, min_triangle_area
+        )
+        return grad_points, None, grad_tris, None, None, None
+
+
+point_face_distance = _PointFaceDistance.apply
 
 
 # FacePointDistance
@@ -84,18 +155,22 @@ class _FacePointDistance(Function):
 
 face_point_distance = _FacePointDistance.apply
 
-@torch.no_grad()
-def face_score(
+
+def surface_crossing_loss(
     meshes: Meshes,
     pcls: Pointclouds,
+    meshes_labels: torch.LongTensor,
     min_triangle_area: float = _DEFAULT_MIN_TRIANGLE_AREA,
 ):
     """
-    Computes the distance between a pointcloud and a mesh within a batch.
-    Given a pair `(mesh, pcl)` in the batch, we define the distance to be face_point(mesh, pcl)
+    Computes the distance between surface point clouds from a mesh and faces of another mesh in a batch.
+    Given a pair `(mesh, pcl)` in the batch, we define the distance to be the
+    sum of two distances, namely `point_face(mesh, pcl) + face_point(mesh, pcl)`
 
-    face_point(mesh, pcl): Computes the squared distance of each triangular face in
-        mesh to the closest point in pcl.
+    `point_face(mesh, pcl)`: Computes the squared distance of each point p in pcl
+        to the closest triangular face in mesh and averages across all points in pcl
+    `face_point(mesh, pcl)`: Computes the squared distance of each triangular face in
+        mesh to the closest point in pcl and averages across all faces in mesh.
 
     The above distance functions are applied for all `(mesh, pcl)` pairs in the batch
     and then averaged across the batch.
@@ -107,36 +182,100 @@ def face_score(
             will be treated as points/lines.
 
     Returns:
-        face_point(mesh, pcl) distance: between all `(mesh, pcl)` in a batch averaged across the batch.
+        loss: The `point_face(mesh, pcl) + face_point(mesh, pcl)` distance
+            between all `(mesh, pcl)` in a batch averaged across the batch.
     """
 
-    if meshes._N != pcls._N:
-        raise ValueError("meshes and pointclouds must be equal sized batches")
+    # if len(meshes) != len(pcls):
+    #     raise ValueError("meshes and pointclouds must be equal sized batches")
+    # N = len(meshes)
 
-    # packed representation for pointclouds
-    points = pcls.points_packed()  # (P, 3)
-    points_first_idx = pcls.cloud_to_packed_first_idx()
-    # max_points = pcls.num_points_per_cloud().max().item()
+    penalty = 0.0
 
-    # packed representation for faces
-    verts_packed = meshes.verts_packed()
-    faces_packed = meshes.faces_packed()
-    tris = verts_packed[faces_packed]  # (T, 3, 3)
-    tris_first_idx = meshes.mesh_to_faces_packed_first_idx()
-    max_tris = meshes.num_faces_per_mesh().max().item()
+    for label_pairs in [[1, 0], [2, 1], [0, 2]]:
 
-    # face to point distance: shape (T,)
-    face_to_point = face_point_distance(
-        points, points_first_idx, tris, tris_first_idx, max_tris, min_triangle_area
-    )
-    face_dist = face_to_point.view(meshes._N, -1).mean(0)
+        # get the label as mask of mesh faces
+        points_label = torch.nonzero(meshes_labels == label_pairs[0])[:, 0]
+        meshes_label = torch.nonzero(meshes_labels == label_pairs[1]).T
+        # get the subset of pointclouds and meshes
+        pcls_subset = Pointclouds(points=pcls[:, points_label])
+        meshes_subset = meshes.submeshes([meshes_label])
 
-    # group subdivied faces in set of four as result of subdivide original faces, and calculate a possibility to get rid of subdvided faces in that set
-    # face_dist = torch.softmax(face_dist.view(-1, 6).mean(1), dim=0)
-    face_dist = torch.softmax(face_dist.view(-1, 4).mean(1), dim=0)
+        # # create a plot drawing the pcls_subset and meshes_subset in the same scene using plotly
+        # fig = go.Figure()
+        # fig.add_trace(
+        #     go.Scatter3d(
+        #         x=pcls_subset.points_packed()[:, 0].cpu().numpy(),
+        #         y=pcls_subset.points_packed()[:, 1].cpu().numpy(),
+        #         z=pcls_subset.points_packed()[:, 2].cpu().numpy(),
+        #         mode="markers",
+        #         marker=dict(size=2),
+        #     )
+        # )
+        # verts = meshes_subset.verts_packed().detach().cpu().numpy()
+        # faces = meshes_subset.faces_packed().detach().cpu().numpy()
+        # fig.add_trace(
+        #     go.Mesh3d(
+        #         x=verts[:, 0],
+        #         y=verts[:, 1],
+        #         z=verts[:, 2],
+        #         i=faces[:, 0],
+        #         j=faces[:, 1],
+        #         k=faces[:, 2],
+        #         opacity=0.5,
+        #     )
+        # )
+        # fig.update_layout(scene=dict(aspectmode="data"))
+        # fig.write_html(f"points_surface-{label_pairs[0]}_{label_pairs[1]}.html")
 
-    return face_dist
+        # packed representation for pointclouds
+        points = pcls_subset.points_packed()  # (P, 3)
+        points_first_idx = pcls_subset.cloud_to_packed_first_idx()
+        max_points = pcls_subset.num_points_per_cloud().max().item()
 
+        # packed representation for faces
+        verts_packed = meshes_subset.verts_packed()
+        faces_packed = meshes_subset.faces_packed()
+        tris = verts_packed[faces_packed]  # (T, 3, 3)
+        tris_first_idx = meshes_subset.mesh_to_faces_packed_first_idx()
+        max_tris = meshes_subset.num_faces_per_mesh().max().item()
+
+        # point to face distance: shape (P,)
+        point_to_face = point_face_distance(
+            points, points_first_idx, tris, tris_first_idx, max_points, min_triangle_area
+        )
+
+        # weight each example by the inverse of number of points in the example
+        point_to_cloud_idx = pcls_subset.packed_to_cloud_idx()  # (sum(P_i),)
+        num_points_per_cloud = pcls_subset.num_points_per_cloud()  # (N,)
+        weights_p = num_points_per_cloud.gather(0, point_to_cloud_idx)
+        weights_p = 1.0 / weights_p.float()
+        point_to_face = point_to_face * weights_p
+
+        # face to point distance: shape (T,)
+        face_to_point = face_point_distance(
+            points, points_first_idx, tris, tris_first_idx, max_tris, min_triangle_area
+        )
+
+        # weight each example by the inverse of number of faces in the example
+        tri_to_mesh_idx = meshes_subset.faces_packed_to_mesh_idx()  # (sum(T_n),)
+        num_tris_per_mesh = meshes_subset.num_faces_per_mesh()  # (N, )
+        weights_t = num_tris_per_mesh.gather(0, tri_to_mesh_idx)
+        weights_t = 1.0 / weights_t.float()
+        face_to_point = face_to_point * weights_t
+
+
+        # the penalty is applied to where distance is smaller than d_min in the NDC space.
+        point_to_face_penalty = torch.clamp(1 / 128 - point_to_face, min=0)
+
+        face_to_point_penalty = torch.clamp(1 / 128 - face_to_point, min=0)
+
+        penalty += point_to_face_penalty.sum() + face_to_point_penalty.sum()
+
+    return penalty
+
+
+# ----------------------- laplacian smoothing -----------------------
 
 def mesh_laplacian_smoothing(meshes, method: str = "uniform"):
     r"""
@@ -263,217 +402,3 @@ def mesh_laplacian_smoothing(meshes, method: str = "uniform"):
 
     loss = loss * weights
     return loss.sum() / N
-
-
-@torch.no_grad()
-def create_convex_hull(seg_true: Tensor, seg_bbox: Tensor, slice_info: str, seg_indices: Union[int, str], device: torch.device) -> List[torch.Tensor]:
-    with torch.no_grad():
-        point_label = []
-        for b, vol in enumerate(seg_true):
-            # load segmentation parameters
-            label = vol > 0 if isinstance(seg_indices, str) else vol == seg_indices
-            bbox = seg_bbox[b]
-            margin = torch.div(128 - bbox.diff(1).squeeze(), 2, rounding_mode="floor").int()
-
-            coord = torch.meshgrid(*[torch.arange(s) for s in vol.shape])
-            coord = torch.stack(coord, axis=0).view(3, -1).float().to(device)
-
-            # load view parameters
-            view_param = json.load(open(slice_info[b], "r"))
-            point_view = []
-            for view in view_param.values():
-                normal_start = torch.tensor(view["normal_vector"][0], device=device)
-                normal_end = torch.tensor(view["normal_vector"][1], device=device)
-                normal = normal_end - normal_start
-                normal_start = normal_start - bbox[:, 0] + margin
-                d_view = torch.dot(normal, normal_start)
-                coord_idx_view = abs(torch.matmul(normal, coord) - d_view) < 1
-                coord_view = coord[:, coord_idx_view & label.flatten()]
-                point_view.append(coord_view.T)
-            point_view = torch.cat(point_view, axis=0)
-            point_label.append(point_view)
-        # create a convex hull from the segmentation point_label
-        convex_mesh = [convex_hull(b.cpu().numpy()) for b in point_label]
-        # transform the convex_label from voxel space to the NDC space and return it as a list of torch.tensor
-        return Meshes(
-            verts=[torch.tensor(2 * (m.vertices - m.centroid) / m.extents.max(), dtype=torch.float32, device=device) 
-                   for m in convex_mesh],
-            faces=[torch.tensor(m.faces, dtype=torch.long, device=device) for m in convex_mesh]
-        )
-        
-
-def skeleton_loss_fn(subdiv_mesh: Meshes, seg_true: Tensor, seg_bbox: Tensor, slice_info: List[str], seg_indices: Union[int, str], lambda_: List[float], device: torch.device) -> Tensor:
-    """
-        collect ground-truth segmentation labels from all image-views as label skeleton and calculate the attenuated k-nn distance error between the surface centroid of subdivided mesh and the skeleton.
-
-        input:
-            subdiv_mesh: subdivided meshes in voxel space
-            seg_true: list of input segmentation labels
-            seg_bbox: bounding box of the segmentation label
-            slice_info: slice_info json file includes the data shape and affine matrix for every CMR slices
-            seg_indices: index to select the class label in segmentation matching with the mesh
-            device: choose either 'cuda' or 'cpu'
-        output:
-            loss: torch.tensor
-    """
-    convex_label = create_convex_hull(seg_true, seg_bbox, slice_info, seg_indices, device)
-
-    loss_chmf, _ = chamfer_distance(
-        convex_label.verts_padded(), subdiv_mesh.verts_padded(),
-        point_reduction="mean", batch_reduction="mean")
-    true_points = sample_points_from_meshes(convex_label, 2 * subdiv_mesh._F)
-    pointcloud_true_ct = Pointclouds(points=true_points)
-    loss_norm = point_mesh_face_distance(subdiv_mesh, pointcloud_true_ct, min_triangle_area=1e-3)
-    loss_smooth = mesh_laplacian_smoothing(subdiv_mesh, method="cotcurv")
-
-    loss = lambda_[1] * loss_chmf + \
-        lambda_[2] * loss_norm + \
-            lambda_[3] * loss_smooth
-
-    return loss
-
-
-# @torch.no_grad()
-# def distance_field(dots: torch.tensor, affine: torch.tensor, image_shape: list, get_outline: bool = False) -> torch.tensor:
-#     """Generate distance transform.
-
-#     Args:
-#         dots: input outline dots of segmentation as (N, V).
-#         affine: affine matrix transform the dots to image coordinate as (4, 4).
-#         image_shape: shape of the image as (H, W, D).
-#         get_outline: whether to get the outline of the segmentation.
-#     Returns:
-#         np.ndarray: Distance field.
-#     """
-#     dots = dots.detach()
-#     pixels = torch.matmul(affine,
-#                         torch.cat([dots, torch.ones_like(dots[:1])], axis=0))[:3]
-#     pixels_idx = torch.bucketize(pixels[:2], torch.arange(max(image_shape)).to(dots.device), right=True)
-#     pixels_idx[0] = torch.clamp(pixels_idx[0], 0, image_shape[0] - 1)
-#     pixels_idx[1] = torch.clamp(pixels_idx[1], 0, image_shape[1] - 1)
-
-#     field = torch.zeros(tuple(image_shape[:2]), dtype=torch.float32, device=dots.device)
-#     field[pixels_idx[0], pixels_idx[1]] = 1.0
-#     if get_outline:
-#         field = sample_outline(field)
-#         pixels_idx = torch.where(field > 0)
-
-#     fg_dist = distance_transform_edt(field[None, None]).squeeze()
-#     bg_dist = distance_transform_edt(1 - field[None, None]).squeeze()
-#     field = fg_dist + bg_dist
-#     field = field[pixels_idx[0], pixels_idx[1]]
-
-#     if get_outline:
-#         pixels_idx = torch.stack([*pixels_idx, torch.zeros_like(pixels_idx[0])], axis=0)
-#         pixels_idx = torch.cat([pixels_idx, torch.ones_like(pixels_idx[:1])], axis=0)
-#         pixels_idx = torch.matmul(torch.inverse(affine), pixels_idx.float())[:3]
-
-#     return field, pixels_idx
-
-# def sample_outline(image):
-#     a = F.max_pool2d(image[None, None], 
-#                      kernel_size=(3, 1), stride=1, padding=(1, 0))[0]
-#     b = F.max_pool2d(image[None, None], 
-#                      kernel_size=(1, 3), stride=1, padding=(0, 1))[0]
-#     border, _ = torch.max(torch.cat([a, b], dim=0), dim=0)
-#     outline = border - image
-#     return outline
-
-
-# def slice_silhouette_loss(subdiv_mesh: Meshes, seg_true: MetaTensor, scale_downsample: int, slice_info: str, seg_indices: Union[int, str], device: torch.device, alpha: float=2.0, reduction: str="mean") -> Tensor:
-#     """
-#         slicer find the silhouette of the mesh at a given image-view plane. follwoing steps are performed:
-
-#         1. load the mesh and image-view plane parameters -- data array shape and affine matrix transforming the array from voxel space to patient space (world coordinates).
-#         2. locate the long- and short-axes planes in the voxel space.
-#         3. find faces from the mesh intersect with the long- and short-axes planes.
-#         4. find the silhouette of the mesh by projecting the barycentric coordinates of the faces onto the image-view plane.
-#         5. convert the silhouette to the original voxel space and save it as a binary mask.
-
-#         input:
-#             subdiv_mesh: subdivided meshes in voxel space
-#             seg_true: list of input segmentation labels
-#             slice_info: slice_info json file includes the data shape and affine matrix for every CMR slices
-#             scale_downsample: downsample scale factor calculated from the crop_window_size and pixdim
-#             seg_indices: index to select the class label in segmentation matching with the mesh
-#             device: choose either 'cuda' or 'cpu'
-#             alpha: reference in paper, Karimi, D. et. al. (2019) Reducing the Hausdorff Distance in Medical Image Segmentation with Convolutional Neural Networks, IEEE Transactions on medical imaging, 39(2), 499-513
-#             reduction: choose whether to return the average or sum the distance error of points on all image-views
-#         output:
-#             loss: torch.tensor
-#     """
-#     b = len(seg_true)
-#     silhouette_error = 0.0
-#     for i in range(b):
-#         with torch.no_grad():
-#             # load segmentation parameters
-#             volume_affine = torch.linalg.inv(seg_true[i].affine.float()) # from patient space to voxel space
-#             h, w, d = seg_true[i].shape[1:]
-#             bbox = torch.meshgrid(*[torch.arange(s) for s in seg_true[i].shape[1:]])
-#             bbox = torch.stack(bbox, axis=0).view(3, -1).to(device)
-#             bbox = bbox[:, seg_true[i].as_tensor().flatten() > 0]
-#             bbox_min, bbox_max = bbox.min(axis=1)[0], bbox.max(axis=1)[0]
-#             bbox_extent = bbox_max - bbox_min
-#             bbox_centre = bbox_min + bbox_extent / 2
-#             # load view parameters
-#             view_param = json.load(open(slice_info[i], "r"))
-
-#         view_error = 0.0
-#         for view in view_param.keys():
-#             with torch.no_grad():
-#                 view_affine = torch.tensor(view_param[view]["affine_matrix"])
-#                 view_shape = list(view_param[view]["data_shape"])
-#                 # create a grid of the voxel space
-#                 coord = torch.meshgrid(*[torch.arange(s) for s in view_shape])
-#                 coord = torch.stack(coord, axis=0).view(3, -1)
-#                 # locate the long- and short-axes planes in the voxel space
-#                 normal = volume_affine @ view_affine @ torch.tensor([0, 0, 1, 0], dtype=torch.float32)
-#                 normal = normal[:3] / torch.linalg.norm(normal[:3])
-#                 coord = torch.matmul(volume_affine @ view_affine,
-#                                     torch.cat([coord.float(), torch.ones_like(coord)[:1]], axis=0))[:3]
-#                 coord = torch.round(coord)
-#                 coord = coord[:, (coord[0] >= 0) & (coord[0] < h) & \
-#                                 (coord[1] >= 0) & (coord[1] < w) & \
-#                                     (coord[2] >= 0) & (coord[2] < d)]
-#                 normal = normal.to(device)
-#                 coord = coord.to(device)
-#                 # find the silhouette of the segmentation on the same plane
-#                 label = seg_true[i].as_tensor()[0, coord[0].long(), coord[1].long(), coord[2].long()]
-#                 p_label = coord[:, 
-#                                 (label > 0) if isinstance(seg_indices, str) 
-#                                 else (label == seg_indices)]
-#                 if p_label.shape[1] == 0:
-#                     continue
-            
-#             # rescale and translate the mesh to match with the segmentation label
-#             mesh = subdiv_mesh[i]
-#             mesh.scale_verts_(bbox_extent / 2)
-#             mesh.offset_verts_(bbox_centre)
-#             verts, faces = mesh.verts_packed(), mesh.faces_packed()
-#             # find the centroid of the faces
-#             centroid = 1/3 * verts[faces].sum(dim=1)
-#             # find the distance from the centroid to the plane
-#             dist = torch.dot(normal, coord[:, 0])
-#             p = torch.matmul(centroid, normal) - dist
-#             # find the silhouette of the mesh as the centroid of faces projected on the plane, tolerance is set to 1.5 mm
-#             p_pred = centroid - p[:, None] * normal[None]
-#             p_pred = p_pred[torch.where(abs(p) < 1.5)[0]].T
-
-#             # calculate the difference matrix between p_pred and p_label and applies the distance weights calculated from distance_transform_edt, referencing monai.losses.HausdorffDTLoss
-#             slice_affine = torch.linalg.inv(volume_affine @ view_affine).to(device)
-#             pred_edt, _ = distance_field(p_pred, slice_affine, view_shape)
-#             label_edt, p_label = distance_field(p_label, slice_affine, view_shape, get_outline=True)
-
-#             distance = pred_edt[:, None] ** alpha + label_edt[None] ** alpha
-#             error = torch.softmax((p_pred[..., None] - p_label[:, None]) ** 2, dim=0) * distance
-            
-#             if reduction == "mean":
-#                 view_error += error.mean()
-#             elif reduction == "sum":
-#                 view_error += error.sum()
-
-#         silhouette_error += view_error / len(view_param.keys())
-    
-#     silhouette_error /= b
-
-#     return silhouette_error

@@ -24,7 +24,7 @@ __all__ = ["pre_transform"]
 
 def pre_transform(
         keys: tuple, modal: str, section: str, rotation: bool,
-        crop_window_size: list, pixdim: list, spacing: float = 1.5
+        crop_window_size: list, pixdim: list, spacing: float = 2.0
 ):
     """
     Conducting pre-transformation that comprises multichannel conversion,
@@ -56,7 +56,7 @@ def pre_transform(
                 [spacing] * 3 if modal == "ct" else [spacing, spacing, -1], 
                 mode=("bilinear", "nearest"), 
                 allow_missing_keys=True),
-        Orientationd(keys, axcodes="RAS", allow_missing_keys=True),
+        Orientationd(keys, axcodes="RAS", allow_missing_keys=True), # (D, W, H)
 
         # distance field transformation
         CopyItemsd(keys[1], names=f"{keys[1]}_ds"),         # keys: {"image", "label", "label_ds"}
@@ -93,14 +93,15 @@ def pre_transform(
                 # spatial augmentation
                 RandZoomd(
                     keys,
-                    min_zoom=0.9, max_zoom=1.2,
+                    min_zoom=0.9 if modal == "ct" else [1.0, 0.9, 0.9], 
+                    max_zoom=1.2 if modal == "ct" else [1.0, 1.2, 1.2],
                     mode=("trilinear", "nearest-exact"),
                     align_corners=(True, None),
                     prob=0.15,
                 ),
-                RandRotate90d(keys, prob=0.5, spatial_axes=(0, 1)),
-                RandFlipd(keys, prob=0.5, spatial_axis=[0]),
+                RandRotate90d(keys, prob=0.5, spatial_axes=(1, 2)),
                 RandFlipd(keys, prob=0.5, spatial_axis=[1]),
+                RandFlipd(keys, prob=0.5, spatial_axis=[2]),
                 # ensure the data type
                 EnsureTyped([*keys, f"{keys[0][:2]}_df"], data_type="tensor", dtype=torch.float32),
             ])
@@ -119,7 +120,8 @@ def pre_transform(
                 # spatial augmentation
                 RandZoomd(
                     keys,
-                    min_zoom=0.9, max_zoom=1.2,
+                    min_zoom=0.9 if modal == "ct" else [1.0, 0.9, 0.9], 
+                    max_zoom=1.2 if modal == "ct" else [1.0, 1.2, 1.2],
                     mode=("trilinear", "nearest-exact"),
                     align_corners=(True, None),
                     prob=0.15,

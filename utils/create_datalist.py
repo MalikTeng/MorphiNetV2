@@ -50,42 +50,42 @@ def create_dataset_json(
     ]
     data_json_new["numTraining"] = len(data_json_new["training"])
 
-    if os.path.exists(dataset_input_dir + "/imagesTs"):
-        test_list = set([case.replace(image_file_extension, '') for case in os.listdir(dataset_input_dir + "/imagesTs")])
-        test_list = np.array(list(test_list))
-        data_json_new["test"] = [
-            {
-                "image": f"./imagesTs/{case}{image_file_extension}",
-            }
-            for case in test_list
-        ]
-        data_json_new["numTest"] = len(data_json_new["test"])
-    else:
-        data_json_new["test"] = []
-        data_json_new["numTest"] = 0
-    
-    # if 'cap' in task_name.lower():
-    #     file_dir = "/mnt/data/Experiment/MICCAI_24/cap/MorphiNet/lv/f0"
-    # elif 'scot' in task_name.lower():
-    #     file_dir = "/mnt/data/Experiment/MICCAI_24/sct/MorphiNet/lv/f0"
-    # elif 'mmwhs' in task_name.lower():
-    #     file_dir = "/mnt/data/Experiment/MICCAI_24/mmwhs/MorphiNet/lv/f0"
+    # if os.path.exists(dataset_input_dir + "/imagesTs"):
+    #     test_list = set([case.replace(image_file_extension, '') for case in os.listdir(dataset_input_dir + "/imagesTs")])
+    #     test_list = np.array(list(test_list))
+    #     data_json_new["test"] = [
+    #         {
+    #             "image": f"./imagesTs/{case}{image_file_extension}",
+    #         }
+    #         for case in test_list
+    #     ]
+    #     data_json_new["numTest"] = len(data_json_new["test"])
     # else:
-    #     raise ValueError("Task name not recognized!")
+    #     data_json_new["test"] = []
+    #     data_json_new["numTest"] = 0
     
-    # # copy files from image and label Tr folders to image and label Ts folders
-    # if not os.path.exists(os.path.join(dataset_input_dir, "labelsTs")):
-    #     os.makedirs(os.path.join(dataset_input_dir, "imagesTs"))
-    #     os.makedirs(os.path.join(dataset_input_dir, "labelsTs"))
-    # for case in os.listdir(file_dir):
-    #     os.system(f"cp {dataset_input_dir}/imagesTr/{case.split('-')[0]}* {dataset_input_dir}/imagesTs/")
-    #     os.system(f"cp {dataset_input_dir}/labelsTr/{case.split('-')[0]}* {dataset_input_dir}/labelsTs/")
+    if 'cap' in task_name.lower():
+        file_dir = "/mnt/data/Experiment/MICCAI_24/cap/MorphiNet/lv/f0"
+    elif 'scot' in task_name.lower():
+        file_dir = "/mnt/data/Experiment/MICCAI_24/sct/MorphiNet/lv/f0"
+    elif 'mmwhs' in task_name.lower():
+        file_dir = "/mnt/data/Experiment/MICCAI_24/mmwhs/MorphiNet/lv/f0"
+    else:
+        raise ValueError("Task name not recognized!")
+    
+    # copy files from image and label Tr folders to image and label Ts folders
+    if not os.path.exists(os.path.join(dataset_input_dir, "labelsTs")):
+        os.makedirs(os.path.join(dataset_input_dir, "imagesTs"))
+        os.makedirs(os.path.join(dataset_input_dir, "labelsTs"))
+    for case in os.listdir(file_dir):
+        os.system(f"cp {dataset_input_dir}/imagesTr/{case.split('-')[0]}* {dataset_input_dir}/imagesTs/")
+        os.system(f"cp {dataset_input_dir}/labelsTr/{case.split('-')[0]}* {dataset_input_dir}/labelsTs/")
 
-    # data_json_new["test"] = [{
-    #     "image": f"./imagesTs/{case.replace(label_file_extension, '')}{image_file_extension}",
-    #     "label": f"./labelsTs/{case.replace(label_file_extension, '')}{label_file_extension}"
-    # } for case in os.listdir(f"{dataset_input_dir}/labelsTs/")]
-    # data_json_new["numTest"] = len(data_json_new["test"])
+    data_json_new["test"] = [{
+        "image": f"./imagesTs/{case.replace(label_file_extension, '')}{image_file_extension}",
+        "label": f"./labelsTs/{case.replace(label_file_extension, '')}{label_file_extension}"
+    } for case in os.listdir(f"{dataset_input_dir}/labelsTs/")]
+    data_json_new["numTest"] = len(data_json_new["test"])
     
     return data_json_new
 

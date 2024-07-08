@@ -269,18 +269,20 @@ class ResNet(nn.Module):
 from typing import List
 import torch
 from torch import Tensor
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn import Module, ModuleList, Linear, LayerNorm, LeakyReLU, Sequential
+
+from pytorch3d.structures import Meshes
+
 from torch_geometric.typing import (
     Adj,
     OptPairTensor,
     OptTensor,
 )
-import torch.nn as nn
-from torch.nn import Sequential, ModuleList, LeakyReLU
-from pytorch3d.structures import Meshes
-from torch_geometric.nn import MessagePassing
-from torch_geometric.nn.dense.linear import Linear
-from torch_geometric.utils import scatter, to_undirected
-from torch_geometric.utils.num_nodes import maybe_num_nodes
+from torch_geometric.nn import MessagePassing, DeepGCNLayer, GCNConv
+from torch_geometric.nn.dense.linear import Linear as DenseLinear
+from torch_geometric.utils import degree
 
 
 # function for pre-computed faces index
@@ -288,10 +290,12 @@ from torch_geometric.utils.num_nodes import maybe_num_nodes
 class Subdivision():
     def __init__(self, 
                  mesh: Meshes, num_layers: int,
+                 mesh_label: torch.LongTensor=None,
                  allow_subdiv_faces: List[torch.LongTensor]=[None, None]
                  ) -> list:
         
         self.faces_levels = []
+        self.labels_levels = []
         for l in range(num_layers):
             new_faces = self.subdivide_faces_fn(mesh, allow_subdiv_faces[l])
             self.faces_levels.append(new_faces)
@@ -300,6 +304,9 @@ class Subdivision():
             new_verts = verts[edges].mean(dim=1)
             new_verts = torch.cat([verts, new_verts], dim=0)
             mesh = Meshes(verts=[new_verts], faces=[new_faces])
+
+            mesh_label = mesh_label.tile([4]) if mesh_label is not None else None
+            self.labels_levels.append(mesh_label)
 
     def subdivide_faces_fn(self, mesh: Meshes, allow_subdiv_faces: torch.LongTensor=None):
         verts_packed = mesh.verts_packed()
@@ -337,163 +344,51 @@ class Subdivision():
 
         return subdivided_faces_packed
     
-# # function for pre-computed faces index
-# @ torch.no_grad()
-# class Subdivision():
-#     def __init__(self, 
-#                  mesh: Meshes, num_layers: int,
-#                  allow_subdiv_faces: List[torch.LongTensor]=[None, None]
-#                  ) -> list:
-        
-#         self.faces_levels = []
-#         for l in range(num_layers):
-#             new_faces = self.subdivide_faces_fn(mesh, allow_subdiv_faces[l])
-#             self.faces_levels.append(new_faces)
-
-#             verts = mesh.verts_packed()
-#             edges = mesh.edges_packed()
-#             new_verts = verts[edges].mean(dim=1)
-#             face_points = verts[mesh.faces_packed()].mean(dim=1)
-#             new_verts = torch.cat([verts, new_verts, face_points], dim=0)
-#             mesh = Meshes(verts=[new_verts], faces=[new_faces])
-
-#     def subdivide_faces_fn(self, mesh: Meshes, allow_subdiv_faces: torch.LongTensor=None):
-#         verts_packed = mesh.verts_packed()
-#         faces_packed = mesh.faces_packed()
-#         faces_packed_to_edges_packed = (
-#             verts_packed.shape[0] + mesh.faces_packed_to_edges_packed()
-#         )
-#         faces_idx = torch.arange(faces_packed_to_edges_packed.max() + 1, faces_packed_to_edges_packed.max() + mesh._F + 1,device=faces_packed.device)
-#         if allow_subdiv_faces is not None:
-#             faces_packed = faces_packed[allow_subdiv_faces]
-#             faces_packed_to_edges_packed = faces_packed_to_edges_packed[allow_subdiv_faces]
-#             faces_idx = faces_idx[allow_subdiv_faces]
-
-#         f0 = torch.stack([
-#             faces_packed[:, 0],                     # 0
-#             faces_packed_to_edges_packed[:, 2],     # 3
-#             faces_idx,                              # 6
-#         ], dim=1)
-#         f1 = torch.stack([
-#             faces_packed[:, 1],                     # 1
-#             faces_idx,                              # 6
-#             faces_packed_to_edges_packed[:, 2],     # 3
-#         ], dim=1)
-#         f2 = torch.stack([
-#             faces_packed[:, 1],                     # 1
-#             faces_packed_to_edges_packed[:, 0],     # 5
-#             faces_idx,                              # 6
-#         ], dim=1)
-#         f3 = torch.stack([
-#             faces_packed[:, 2],                     # 2
-#             faces_idx,                              # 6
-#             faces_packed_to_edges_packed[:, 0],     # 5
-#         ], dim=1)
-#         f4 = torch.stack([
-#             faces_packed[:, 2],                     # 2
-#             faces_packed_to_edges_packed[:, 1],     # 4
-#             faces_idx,                              # 6
-#         ], dim=1)
-#         f5 = torch.stack([
-#             faces_packed[:, 0],                     # 0
-#             faces_idx,                              # 6
-#             faces_packed_to_edges_packed[:, 1],     # 4
-#         ], dim=1)
-
-#         subdivided_faces_packed = torch.cat([f0, f1, f2, f3, f4, f5], dim=0)
-
-#         if allow_subdiv_faces is not None:
-#             subdivided_faces_packed = torch.cat(
-#                 [mesh.faces_packed()[~allow_subdiv_faces], subdivided_faces_packed], dim=0
-#             )
-
-#         return subdivided_faces_packed
-    
-def gcn_norm(edge_index, edge_weight=None, num_nodes=None, flow="source_to_target", dtype=None):
-
-    assert flow in ['source_to_target', 'target_to_source']
-    num_nodes = maybe_num_nodes(edge_index, num_nodes)
-
-    if edge_weight is None:
-        edge_weight = torch.ones((edge_index.size(1), ), dtype=dtype,
-                                 device=edge_index.device)
-
-    row, col = edge_index[0], edge_index[1]
-    idx = col if flow == 'source_to_target' else row
-    deg = scatter(edge_weight, idx, dim=0, dim_size=num_nodes, reduce='sum')
-    deg_inv_sqrt = deg.pow_(-0.5)
-    deg_inv_sqrt.masked_fill_(deg_inv_sqrt == float('inf'), 0)
-    edge_weight = deg_inv_sqrt[row] * edge_weight * deg_inv_sqrt[col]
-
-    return edge_index, edge_weight
-
 
 class GSNLayer(MessagePassing):
     def __init__(self, in_channels: int, out_channels: int, **kwargs):
-
-        kwargs.setdefault('aggr', 'add')
+        kwargs.setdefault("aggr", "add")
         super().__init__(**kwargs)
 
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.hidden_features = kwargs.get('hidden_features', 16)
+        self.hidden_features = kwargs.get("hidden_features", 16)
 
         self.lin = Sequential(
-            Linear(in_channels, self.hidden_features, bias=False,
+            DenseLinear(in_channels, self.hidden_features, bias=False,
                    weight_initializer='glorot'),
-                   LeakyReLU(inplace=True),
-            Linear(self.hidden_features, self.hidden_features, bias=False,
-                     weight_initializer='glorot'),
-                     LeakyReLU(inplace=True),
-            Linear(self.hidden_features, out_channels, bias=False,
-                        weight_initializer='glorot')
+            LeakyReLU(inplace=True),
+            DenseLinear(self.hidden_features, self.hidden_features, bias=False,
+                   weight_initializer='glorot'),
+            LeakyReLU(inplace=True),
+            DenseLinear(self.hidden_features, out_channels, bias=False,
+                   weight_initializer='glorot')
         )
 
         self.reset_parameters()
 
     def reset_parameters(self):
-        super().reset_parameters()
         for m in self.lin:
-            if isinstance(m, Linear):
+            if isinstance(m, DenseLinear):
                 m.reset_parameters()
 
-    def forward(self, x: Tensor, edge_index: Adj,
-                edge_weight: OptTensor = None) -> Tensor:
-
-        edge_index, edge_weight = gcn_norm(  # yapf: disable
-            edge_index, edge_weight, x.size(self.node_dim),
-            self.flow, x.dtype)
-
+    def forward(self, x, edge_index):
+        
+        # Step 1: h_{\theta}(x_j - x_i) == h_{\theta}(x)
         x = self.lin(x)
-
-        out = self.propagate(edge_index, x=x, edge_weight=edge_weight,
-                             size=None)
-
-        return out
-
-    def message(self, x_j: Tensor, edge_weight: OptTensor) -> Tensor:
-        return x_j if edge_weight is None else edge_weight.view(-1, 1) * x_j
-
-
-class UpdateLayer(MessagePassing):
-    def __init__(self, **kwargs):
-
-        kwargs.setdefault('aggr', 'mean')
-        super().__init__(**kwargs)
-
-    def forward(self, x: Tensor, edge_index: Adj, edge_weight: OptTensor=None):
         
-        # edge_index, edge_weight = gcn_norm(  # yapf: disable
-        #     edge_index, edge_weight, x.size(self.node_dim),
-        #     self.flow, x.dtype)
-        
-        out = self.propagate(edge_index, x=x, edge_weight=edge_weight,
-                           size=None)
-        
-        return out
-    
-    def message(self, x_j: Tensor, edge_weight: OptTensor) -> Tensor:
-        return x_j if edge_weight is None else edge_weight.view(-1, 1) * x_j
+        # Step 2: normalisation
+        row, col = edge_index
+        deg = degree(col, x.size(0), dtype=x.dtype)
+        deg_inv_sqrt = deg.pow(-0.5)
+        deg_inv_sqrt[deg_inv_sqrt == float("inf")] = 0
+        norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
+
+        # Step 3: propagating messages
+        x = self.propagate(edge_index, x=x, norm=norm)
+
+        return x
+
+    def message(self, x_j, x_i, norm):
+        return norm.view(-1, 1) * (x_j - x_i) if norm is not None else x_j - x_i
 
 
 class GSN(nn.Module):
@@ -505,16 +400,10 @@ class GSN(nn.Module):
             for _ in range(num_layers)
         ])
 
-        self.update_layer = UpdateLayer()
-
-    def face_to_edge(self, faces: torch.LongTensor, num_nodes: int):
-        edge_index = torch.cat([faces[:2], faces[1:], faces[::2]], dim=1)
-        edge_index = to_undirected(edge_index, num_nodes=num_nodes)
-
-        return edge_index
 
     def forward(self, meshes: Meshes, subdivided_faces: list[torch.LongTensor]):
         
+        level_outs = []
         for l, gcn_layer in enumerate(self.gcn_layers):
             # 1. update the vertices with learnt offsets.
             offsets = gcn_layer(
@@ -525,15 +414,19 @@ class GSN(nn.Module):
             if len(subdivided_faces) > 0:
                 # 2. create new vertices at the middle of the edges.
                 new_faces = subdivided_faces[l].expand(meshes._N, -1, -1).to(meshes.device)
-                centre_faces = new_faces[:, 3*meshes._F:, :] - meshes._V
-                centre_edges = self.face_to_edge(centre_faces.view(-1, 3).t().contiguous(), meshes._V)
                 verts = meshes.verts_padded()
                 edges = meshes[0].edges_packed()
-                new_verts = verts[:, edges].mean(dim=2)
-                new_verts = self.update_layer(new_verts, centre_edges)
-                new_verts = torch.cat([verts, new_verts], dim=1)
+                edge_verts = verts[:, edges].mean(dim=2)
+                new_verts = torch.cat([verts, edge_verts], dim=1)
+            
+            else:
+                new_verts = meshes.verts_padded()
+                new_faces = meshes.faces_padded()
 
-                # 3. create new meshes with the same topology as the original mesh.
-                meshes = Meshes(verts=new_verts, faces=new_faces)
-        
-        return meshes
+            # 3. create new meshes with the same topology as the original mesh.
+            meshes = Meshes(verts=new_verts, faces=new_faces)
+
+            # 4. output the new mesh
+            level_outs.append(meshes)
+
+        return level_outs

@@ -33,37 +33,6 @@ class MaskCTd(MapTransform):
         return data
 
 
-# class RandomShiftd(MapTransform):
-#     """
-#     create slice shift along the last axis mimic the respiratory motion.
-#     """
-#     def __init__(self, keys: KeysCollection, pixdim: list, allow_missing_keys: bool = False) -> None:
-#         super().__init__(keys, allow_missing_keys)
-#         self.pixdim = list(map(int, pixdim))
-
-#     def __call__(self, data):
-#         image = data["ct_image"]
-#         label = data["ct_label"]
-#         image = image.get_array()
-#         label = label.get_array()
-
-#         # randomly selet three batch from range(image.shape[-1] // self.pixdim[-1])
-#         batches = np.random.choice(range(int(image.shape[-1] // self.pixdim[-1]) - 1), 3, replace=False)
-#         for batch in batches:
-#             idx_start, idx_end = batch * self.pixdim[-1], (batch + 1) * self.pixdim[-1]
-#             # randomly shifting the image and label by a number of slices a batch (defined by pixdim) along the last axis
-#             shift = np.random.randint(-3, 3)
-#             image[..., idx_start: idx_end] = np.roll(image[..., idx_start: idx_end], shift, axis=0)
-#             image[..., idx_start: idx_end] = np.roll(image[..., idx_start: idx_end], shift, axis=1)
-#             label[..., idx_start: idx_end] = np.roll(label[..., idx_start: idx_end], shift, axis=0)
-#             label[..., idx_start: idx_end] = np.roll(label[..., idx_start: idx_end], shift, axis=1)
-
-#         data["ct_image"] = MetaTensor(image, meta=data["ct_image"].meta, applied_operations=["RandomShiftd"])
-#         data["ct_label"] = MetaTensor(label, meta=data["ct_label"].meta, applied_operations=["RandomShiftd"])
-
-#         return data
-
-
 class Adjustd(MapTransform):
     """
     process the input data to be compatible with the rest transforms.
@@ -163,19 +132,21 @@ class DFConvertd(MapTransform):
         label = label.as_tensor().clone()
 
         # combine left and right myocardium (index 2 and 4) to have four classes (background: 0, left ventricle: 1, myocardium: 2, right ventricle: 3)
-        lv = label == 1
+        # lv = label == 1
+        # myo = label == 2
+        # rv = label == 3
+        foreground = label > 0
         myo = label == 2
-        rv = label == 3
 
         df = []
-        for c in [lv, myo, rv]:
+        # for c in [lv, myo, rv]:
+        for c in [foreground, myo]:
             df_class = distance_transform_edt(c.to(torch.float32)) +\
                 distance_transform_edt(1 - c.to(torch.float32))
             df.append(df_class[:, None])
 
-        df = MetaTensor(torch.cat(df, dim=1), 
-                        meta=data[self.key].meta, 
-                        applied_operations=["DFConvertd"])
+        df = MetaTensor(torch.cat(df, dim=1), affine=data[self.key].affine)
+
         data[f"{self.modal}_df"] = df
 
         # remove the original label
