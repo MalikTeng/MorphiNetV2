@@ -40,46 +40,13 @@ def collate_4D_batch(data: List[Dict[str, Union[torch.Tensor, np.ndarray]]]) -> 
                     batch[key] = batch[key].unsqueeze(1)
             else:
                 batch[f"{key[:2]}_batch"] = torch.tensor(
-                    [d[key].shape[1] for d in data], 
+                    [d[key].shape[0] for d in data], 
                     dtype=torch.int8, device=data[0][key].device)
                 batch[key] = torch.concat([d[key] for d in data], dim=1)
                 batch[key] = batch[key].flatten(0, 1).unsqueeze(1)
         else:
             batch[key] = np.stack([d[key] for d in data], axis=0)
     return batch
-
-
-def load_multimodal_datalist(
-        image_paths: list,
-        label_paths: list,
-        keys: tuple,
-        slice_info_paths: list,
-) -> list:
-    """
-    :params image_paths: sorted list of image file paths
-    :params label_paths: sorted list of label file paths
-    :params keys: IDs of image and label in a sequence, e.g., ('image', 'label')
-
-    :returns sorted list of dictionary -- {'label': label_path, 'image': image_path}
-    """
-    assert len(image_paths) == len(label_paths)
-    if slice_info_paths is not None:
-        expected_data = [
-            {
-                keys[0]: image_path,
-                keys[1]: label_path,
-                keys[2]: slice_info_path,
-            } for image_path, label_path, slice_info_path in zip(image_paths, label_paths, slice_info_paths)
-        ]
-    else:
-        expected_data = [
-            {
-                keys[0]: image_path,
-                keys[1]: label_path,
-            } for image_path, label_path in zip(image_paths, label_paths)
-        ]
-
-    return expected_data
 
 
 class Dataset(Randomizable, CacheDataset):

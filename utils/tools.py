@@ -85,24 +85,42 @@ def draw_plotly(
         grad_pred[torch.isnan(grad_pred)] = 0
         grad_pred[torch.isinf(grad_pred)] = 0
 
-        # compute the grad respective to the mesh vertices
-        grad_pred *= df_pred.unsqueeze(1)
-        verts = mesh_pred.verts_padded()
-        verts = 2 * (verts / df_pred.shape[-1] - 0.5)   # pixel space to NDC space
-        mesh_grad = F.grid_sample(
-            grad_pred.permute(0, 1, 4, 2, 3).float(),           # (N, C: yxz, D, H, W)
-            verts.unsqueeze(1).unsqueeze(1),                    # (N, 1, 1, V, 3: xyz)
-            align_corners=False
-        ).view(1, 3, -1).transpose(-1, -2)[..., [1, 0, 2]]      # (N, C: yxz, 1, 1, V) -> (N, V, C: xyz)
-        verts = (verts / 2 + 0.5) * df_pred.shape[-1]   # NDC space to pixel space
-        x, y, z = verts[0].numpy().T
-        u, v, w = mesh_grad[0].numpy().T
-        fig.add_trace(go.Cone(
+        # draw the zero-level set from the df_pred
+        mesh = matrix_to_marching_cubes((df_pred[0].cpu().numpy() < 1.2).astype(int))
+        verts, faces = mesh.vertices, mesh.faces
+        if seg_true is not None:
+            verts *= seg_true.shape[-1] / df_pred.shape[-1]
+        y, x, z = verts.T
+        I, J, K = faces.T
+        fig.add_trace(go.Mesh3d(
             x=x, y=y, z=z,
-            u=u, v=v, w=w,
-            colorscale="Viridis", sizemode="scaled", sizeref=1, showscale=True
+            i=I, j=J, k=K,
+            color="gray",
+            opacity=0.25,
+            name="df_pred"
         ))
 
+        if mesh_pred is not None:
+            # compute the grad respective to the mesh vertices
+            grad_pred *= df_pred.unsqueeze(1)
+            verts = mesh_pred.verts_padded()
+            verts = 2 * (verts / df_pred.shape[-1] - 0.5)   # pixel space to NDC space
+            mesh_grad = F.grid_sample(
+                grad_pred.permute(0, 1, 4, 2, 3).float(),           # (N, C: yxz, D, H, W)
+                verts.unsqueeze(1).unsqueeze(1),                    # (N, 1, 1, V, 3: xyz)
+                align_corners=False
+            ).view(1, 3, -1).transpose(-1, -2)[..., [1, 0, 2]]      # (N, C: yxz, 1, 1, V) -> (N, V, C: xyz)
+            verts = (verts / 2 + 0.5) * df_pred.shape[-1]   # NDC space to pixel space
+            x, y, z = verts[0].numpy().T
+            u, v, w = mesh_grad[0].numpy().T
+            fig.add_trace(go.Cone(
+                x=x, y=y, z=z,
+                u=u, v=v, w=w,
+                colorscale="Viridis", sizemode="scaled", sizeref=1, showscale=True
+            ))
+
+    if mesh_pred is not None or seg_pred is not None:
+        fig.write_html(f"{'seg_true vs mesh_pred' if mesh_pred is not None else 'seg_true vs seg_pred'}.html")
 
     return fig
 

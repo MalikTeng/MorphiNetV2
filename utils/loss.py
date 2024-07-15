@@ -266,9 +266,9 @@ def surface_crossing_loss(
 
 
         # the penalty is applied to where distance is smaller than d_min in the NDC space.
-        point_to_face_penalty = torch.clamp(1 / 128 - point_to_face, min=0)
+        point_to_face_penalty = torch.clamp(2e-05 - point_to_face, min=0)
 
-        face_to_point_penalty = torch.clamp(1 / 128 - face_to_point, min=0)
+        face_to_point_penalty = torch.clamp(2e-05 - face_to_point, min=0)
 
         penalty += point_to_face_penalty.sum() + face_to_point_penalty.sum()
 

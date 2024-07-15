@@ -11,6 +11,7 @@ from monai.transforms import (
     RandRotate90d,
     RandZoomd,
     RandFlipd,
+    Resized,
     ScaleIntensityd,
     Spacingd,
     SpatialPadd,
@@ -45,9 +46,9 @@ def pre_transform(
         LoadImaged(keys, ensure_channel_first=False, image_only=True, allow_missing_keys=True),
     ]
 
-    # mask out the CTAs segmentation labels
-    if modal.lower() == "ct":
-        transforms.append(MaskCTd(keys))
+    # # mask out the CTAs segmentation labels
+    # if modal.lower() == "ct":
+    #     transforms.append(MaskCTd(keys))
 
     transforms.extend([
         # isotropic resampling
@@ -56,20 +57,24 @@ def pre_transform(
                 [spacing] * 3 if modal == "ct" else [spacing, spacing, -1], 
                 mode=("bilinear", "nearest"), 
                 allow_missing_keys=True),
-        Orientationd(keys, axcodes="RAS", allow_missing_keys=True), # (D, W, H)
+        Orientationd(keys, axcodes="RAS", allow_missing_keys=True),     # (D, W, H)
+        CopyItemsd(keys[1], names=f"{keys[1]}_ds"),         # keys: {"image", "label", "label_ds"}
 
         # distance field transformation
-        CopyItemsd(keys[1], names=f"{keys[1]}_ds"),         # keys: {"image", "label", "label_ds"}
-        # (distance field) resampling and cropping                           keys: {"image", "label"}
+        # resampling and cropping                           keys: {"image", "label"}
         Spacingd(f"{keys[1]}_ds", 
                 [-1] * 3 if modal == "ct" else [spacing, -1, -1],
                 mode="nearest", padding_mode="zeros"),
         CropForegroundd(f"{keys[1]}_ds", source_key=keys[1], margin=1),
-        # (distance field) create distance field from down-sampled label
-        FlexResized(f"{keys[1]}_ds", crop_window_size[0] // pixdim[0], 
-                modal, down_sampled=True),
-        SpatialPadd(f"{keys[1]}_ds", crop_window_size[0] // pixdim[0],
-                method="end", mode="minimum"),
+        # create distance field from down-sampled label
+        Resized(
+            f"{keys[1]}_ds", int(crop_window_size[0] // pixdim[0]), 
+            size_mode="longest", mode="nearest"
+            ),
+        SpatialPadd(
+            f"{keys[1]}_ds", int(crop_window_size[0] // pixdim[0]),
+            method="symmetric", mode="minimum"
+            ),
         DFConvertd(f"{keys[1]}_ds"),                        # keys: {"image", "label", "df"}
     ])
 

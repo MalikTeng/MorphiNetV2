@@ -14,23 +14,37 @@ __all__ = ["MaskCTd", "DFConvertd", "Adjustd", "FlexResized", "Probd"]
 
 class MaskCTd(MapTransform):
     """
-    this transform mask the CTA images near the basal and apex plane, i.e., the first and last slices.
+    this transform mask the CT pred near the basal and apex plane, i.e., the first and last slices.
     """
     def __init__(self, keys: KeysCollection, allow_missing_keys: bool = False) -> None:
         super().__init__(keys, allow_missing_keys)
 
     def __call__(self, data):
-        image = data["ct_image"]
-        image = image.get_array()
+        try:
+            pred = data["pred"]
+        except KeyError:
+            return data
+        else:
+            pred = pred.get_array()
 
-        # mask the CTA images near the basal and apex plane
-        mask = np.zeros_like(image).astype(bool)
-        mask[..., 20:-30] = True
-        image[~mask] = image.min()
+            # mask the CTA images near the basal and apex plane
+            mask = np.zeros_like(pred).astype(bool)
+            mask[:, 16:-16] = True
+            pred[~mask] = pred.min()
 
-        data["ct_image"] = MetaTensor(image, affine=data["ct_image"].affine)
+            data["pred"] = MetaTensor(pred, affine=data["pred"].affine)
 
-        return data
+            return data
+
+        # image = data["ct_image"]
+        # image = image.get_array()
+
+        # # mask the CTA images near the basal and apex plane
+        # mask = np.zeros_like(image).astype(bool)
+        # mask[..., 20:-30] = True
+        # image[~mask] = image.min()
+
+        # data["ct_image"] = MetaTensor(image, affine=data["ct_image"].affine)
 
 
 class Adjustd(MapTransform):
@@ -68,6 +82,7 @@ class Adjustd(MapTransform):
                 print(f"Error: {key} is not in the data dictionary.")
 
         return data
+
 
 class FlexResized(MapTransform):
     """
@@ -131,10 +146,7 @@ class DFConvertd(MapTransform):
         label = data[self.key]
         label = label.as_tensor().clone()
 
-        # combine left and right myocardium (index 2 and 4) to have four classes (background: 0, left ventricle: 1, myocardium: 2, right ventricle: 3)
-        # lv = label == 1
-        # myo = label == 2
-        # rv = label == 3
+        # four classes (background: 0, left ventricle: 1, myocardium: 2, right ventricle: 3)
         foreground = label > 0
         myo = label == 2
 
