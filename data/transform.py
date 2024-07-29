@@ -18,7 +18,7 @@ from monai.transforms import (
     EnsureTyped
 )
 
-from data.components import *
+from components import *
 
 __all__ = ["pre_transform"]
 

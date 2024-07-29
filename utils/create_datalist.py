@@ -10,10 +10,11 @@
 # limitations under the License.
 
 import json
-import os
+import os, shutil
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 
 import numpy as np
+np.random.seed(42)
 from sklearn.model_selection import KFold
 
 
@@ -41,6 +42,10 @@ def create_dataset_json(
 
     train_list = set([case.replace(label_file_extension, '') for case in os.listdir(dataset_input_dir + "/labelsTr")])   # seperate train and valid set on a patient-bases
     train_list = np.array(list(train_list))
+
+    np.random.shuffle(train_list)
+    train_list, test_list = train_list[:int(len(train_list)*0.8)], train_list[int(len(train_list)*0.8):]
+
     data_json_new["training"] = [
         {
             "image": f"./imagesTr/{case}{image_file_extension}",
@@ -50,42 +55,31 @@ def create_dataset_json(
     ]
     data_json_new["numTraining"] = len(data_json_new["training"])
 
-    if os.path.exists(dataset_input_dir + "/imagesTs"):
-        test_list = set([case.replace(image_file_extension, '') for case in os.listdir(dataset_input_dir + "/imagesTs")])
-        test_list = np.array(list(test_list))
-        data_json_new["test"] = [
-            {
-                "image": f"./imagesTs/{case}{image_file_extension}",
-            }
-            for case in test_list
-        ]
-        data_json_new["numTest"] = len(data_json_new["test"])
-    else:
-        data_json_new["test"] = []
-        data_json_new["numTest"] = 0
+    # Remove existing files in imagesTs and labelsTs folders
+    shutil.rmtree(dataset_input_dir + "/imagesTs")
+    shutil.rmtree(dataset_input_dir + "/labelsTs")
     
-    # if 'cap' in task_name.lower():
-    #     file_dir = "/mnt/data/Experiment/MICCAI_24/cap/MorphiNet/lv/f0"
-    # elif 'scot' in task_name.lower():
-    #     file_dir = "/mnt/data/Experiment/MICCAI_24/sct/MorphiNet/lv/f0"
-    # elif 'mmwhs' in task_name.lower():
-    #     file_dir = "/mnt/data/Experiment/MICCAI_24/mmwhs/MorphiNet/lv/f0"
-    # else:
-    #     raise ValueError("Task name not recognized!")
-    
-    # # copy files from image and label Tr folders to image and label Ts folders
-    # if not os.path.exists(os.path.join(dataset_input_dir, "labelsTs")):
-    #     os.makedirs(os.path.join(dataset_input_dir, "imagesTs"))
-    #     os.makedirs(os.path.join(dataset_input_dir, "labelsTs"))
-    # for case in os.listdir(file_dir):
-    #     os.system(f"cp {dataset_input_dir}/imagesTr/{case.split('-')[0]}* {dataset_input_dir}/imagesTs/")
-    #     os.system(f"cp {dataset_input_dir}/labelsTr/{case.split('-')[0]}* {dataset_input_dir}/labelsTs/")
+    # Recreate empty imagesTs and labelsTs folders
+    os.makedirs(dataset_input_dir + "/imagesTs")
+    os.makedirs(dataset_input_dir + "/labelsTs")
 
-    # data_json_new["test"] = [{
-    #     "image": f"./imagesTs/{case.replace(label_file_extension, '')}{image_file_extension}",
-    #     "label": f"./labelsTs/{case.replace(label_file_extension, '')}{label_file_extension}"
-    # } for case in os.listdir(f"{dataset_input_dir}/labelsTs/")]
-    # data_json_new["numTest"] = len(data_json_new["test"])
+    # Copy image and label files from imagesTr and labelsTr to imagesTs and labelsTs folders
+    for case in test_list:
+        image_src = os.path.join(dataset_input_dir, "imagesTr", f"{case}{image_file_extension}")
+        image_dst = os.path.join(dataset_input_dir, "imagesTs", f"{case}{image_file_extension}")
+        label_src = os.path.join(dataset_input_dir, "labelsTr", f"{case}{label_file_extension}")
+        label_dst = os.path.join(dataset_input_dir, "labelsTs", f"{case}{label_file_extension}")
+        shutil.copyfile(image_src, image_dst)
+        shutil.copyfile(label_src, label_dst)
+
+    data_json_new["test"] = [
+        {
+            "image": f"./imagesTs/{case}{image_file_extension}",
+            "label": f"./labelsTs/{case}{label_file_extension}"
+        }
+        for case in test_list
+    ]
+    data_json_new["numTest"] = len(data_json_new["test"])
     
     return data_json_new
 
@@ -139,15 +133,15 @@ if __name__ == "__main__":
     parser.add_argument("-input_dir", "--input_dir", type=str, 
                         default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/")
     parser.add_argument("-file_extension", "--file_extension", type=str, 
-                        default=".nrrd", help="the file extension of the data (.nii.gz / .nrrd)")
+                        default=".nii.gz", help="the file extension of the data (.nii.gz / .nrrd)")
     parser.add_argument("-task_name", "--task_name", type=str, 
-                        default="Dataset010_CAP_SAX_NRRD", help="the task name")
+                        default="Dataset020_SCOTHEART", help="the task name")
     parser.add_argument("-d", "--description", help="the task description",
-                        default="CAP SAX cine MRI image data w/ cross-validation")
+                        default="CT image data w/ cross-validation")
     parser.add_argument("-l", "--labels", type=json.loads, help="the label name",
                         default='{"0": "background", "1": "lv", "2": "lv-myo", "3": "rv", "4": "rv-myo"}')
     parser.add_argument("-m", "--modality", type=str, 
-                        default="MR", help="the modality name")
+                        default="CT", help="the modality name")
     
     parser.add_argument("-output_dir", "--output_dir", type=str, 
                         default="dataset/")

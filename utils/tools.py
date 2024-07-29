@@ -119,8 +119,8 @@ def draw_plotly(
                 colorscale="Viridis", sizemode="scaled", sizeref=1, showscale=True
             ))
 
-    if mesh_pred is not None or seg_pred is not None:
-        fig.write_html(f"{'seg_true vs mesh_pred' if mesh_pred is not None else 'seg_true vs seg_pred'}.html")
+    # if mesh_pred is not None or seg_pred is not None:
+    #     fig.write_html(f"{'seg_true vs mesh_pred' if mesh_pred is not None else 'seg_true vs seg_pred'}.html")
 
     return fig
 
@@ -133,7 +133,7 @@ def draw_train_loss(train_loss: dict, super_params: Namespace, task_code: str, p
     df = pd.DataFrame(train_loss)
     df.set_index(df.index + 1, inplace=True)
     if phase == "gsn":
-        lambda_ = super_params.lambda_
+        lambda_ = [super_params.lambda_0, super_params.lambda_1, super_params.lambda_2]
     else:
         lambda_ = [1]
     df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=0, how="any")

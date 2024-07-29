@@ -29,7 +29,7 @@ class MaskCTd(MapTransform):
 
             # mask the CTA images near the basal and apex plane
             mask = np.zeros_like(pred).astype(bool)
-            mask[:, 16:-16] = True
+            mask[:, 30:-30] = True
             pred[~mask] = pred.min()
 
             data["pred"] = MetaTensor(pred, affine=data["pred"].affine)
@@ -151,10 +151,10 @@ class DFConvertd(MapTransform):
         myo = label == 2
 
         df = []
-        # for c in [lv, myo, rv]:
         for c in [foreground, myo]:
             df_class = distance_transform_edt(c.to(torch.float32)) +\
                 distance_transform_edt(1 - c.to(torch.float32))
+            # df_class = distance_transform_edt(1 - c.to(torch.float32))
             df.append(df_class[:, None])
 
         df = MetaTensor(torch.cat(df, dim=1), affine=data[self.key].affine)

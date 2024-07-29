@@ -1,89 +1,0 @@
-wandb: Currently logged in as: yu-deng. Use `wandb login --relogin` to force relogin
-Detected CUDA files, patching ldflags
-Emitting ninja build file utils/rasterize/build.ninja...
-Building extension module rasterize_cuda...
-Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
-ninja: no work to do.
-wandb: Tracking run with wandb version 0.17.3
-wandb: Run data is saved locally in /home/yd21/Documents/MorphiNet_Abdul/wandb/run-20240701_161909-l2yxlcod
-wandb: Run `wandb offline` to turn off syncing.
-wandb: Syncing run cap--myo--f0--2024-07-01-1619
-wandb: ⭐️ View project at https://wandb.ai/yu-deng/MorphiNet
-wandb: 🚀 View run at https://wandb.ai/yu-deng/MorphiNet/runs/l2yxlcod
-Loading extension module rasterize_cuda...
-Preparing MR data with rotation...
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  10%|█         | 1/10 [00:00<00:01,  7.05it/s]Loading dataset:  30%|███       | 3/10 [00:00<00:00, 11.14it/s]Loading dataset:  50%|█████     | 5/10 [00:00<00:00, 11.81it/s]Loading dataset:  70%|███████   | 7/10 [00:00<00:00, 12.99it/s]Loading dataset:  90%|█████████ | 9/10 [00:00<00:00, 12.69it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 12.21it/s]
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  20%|██        | 2/10 [00:00<00:00, 12.59it/s]Loading dataset:  40%|████      | 4/10 [00:00<00:00, 13.98it/s]Loading dataset:  60%|██████    | 6/10 [00:00<00:00, 13.56it/s]Loading dataset:  80%|████████  | 8/10 [00:00<00:00, 13.15it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 10.68it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 11.72it/s]
-Preparing MR data with rotation...
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  10%|█         | 1/10 [00:00<00:04,  1.81it/s]Loading dataset:  20%|██        | 2/10 [00:01<00:04,  1.83it/s]Loading dataset:  30%|███       | 3/10 [00:01<00:03,  1.83it/s]Loading dataset:  40%|████      | 4/10 [00:02<00:03,  1.82it/s]Loading dataset:  50%|█████     | 5/10 [00:02<00:02,  1.83it/s]Loading dataset:  60%|██████    | 6/10 [00:03<00:02,  1.82it/s]Loading dataset:  70%|███████   | 7/10 [00:03<00:01,  1.83it/s]Loading dataset:  80%|████████  | 8/10 [00:04<00:01,  1.80it/s]Loading dataset:  90%|█████████ | 9/10 [00:04<00:00,  1.80it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.79it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.81it/s]
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  10%|█         | 1/10 [00:00<00:05,  1.75it/s]Loading dataset:  20%|██        | 2/10 [00:01<00:04,  1.71it/s]Loading dataset:  30%|███       | 3/10 [00:01<00:04,  1.74it/s]Loading dataset:  40%|████      | 4/10 [00:02<00:03,  1.77it/s]Loading dataset:  50%|█████     | 5/10 [00:02<00:02,  1.76it/s]Loading dataset:  60%|██████    | 6/10 [00:03<00:02,  1.78it/s]Loading dataset:  70%|███████   | 7/10 [00:03<00:01,  1.77it/s]Loading dataset:  80%|████████  | 8/10 [00:04<00:01,  1.77it/s]Loading dataset:  90%|█████████ | 9/10 [00:05<00:00,  1.78it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.78it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.77it/s]
-Preparing MR data without rotation...
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  20%|██        | 2/10 [00:00<00:00, 11.08it/s]Loading dataset:  40%|████      | 4/10 [00:00<00:00, 13.69it/s]Loading dataset:  60%|██████    | 6/10 [00:00<00:00, 14.28it/s]Loading dataset:  80%|████████  | 8/10 [00:00<00:00, 13.93it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 13.24it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 13.35it/s]
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  20%|██        | 2/10 [00:00<00:00, 12.91it/s]Loading dataset:  40%|████      | 4/10 [00:00<00:00, 14.08it/s]Loading dataset:  60%|██████    | 6/10 [00:00<00:00, 13.87it/s]Loading dataset:  80%|████████  | 8/10 [00:00<00:00, 13.47it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 10.78it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 11.89it/s]
-Preparing MR data without rotation...
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  10%|█         | 1/10 [00:00<00:04,  1.82it/s]Loading dataset:  20%|██        | 2/10 [00:01<00:04,  1.83it/s]Loading dataset:  30%|███       | 3/10 [00:01<00:03,  1.84it/s]Loading dataset:  40%|████      | 4/10 [00:02<00:03,  1.82it/s]Loading dataset:  50%|█████     | 5/10 [00:02<00:02,  1.83it/s]Loading dataset:  60%|██████    | 6/10 [00:03<00:02,  1.82it/s]Loading dataset:  70%|███████   | 7/10 [00:03<00:01,  1.83it/s]Loading dataset:  80%|████████  | 8/10 [00:04<00:01,  1.80it/s]Loading dataset:  90%|█████████ | 9/10 [00:04<00:00,  1.80it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.78it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.81it/s]
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  10%|█         | 1/10 [00:00<00:05,  1.74it/s]Loading dataset:  20%|██        | 2/10 [00:01<00:04,  1.74it/s]Loading dataset:  30%|███       | 3/10 [00:01<00:03,  1.80it/s]Loading dataset:  40%|████      | 4/10 [00:02<00:03,  1.82it/s]Loading dataset:  50%|█████     | 5/10 [00:02<00:02,  1.82it/s]Loading dataset:  60%|██████    | 6/10 [00:03<00:02,  1.83it/s]Loading dataset:  70%|███████   | 7/10 [00:03<00:01,  1.82it/s]Loading dataset:  80%|████████  | 8/10 [00:04<00:01,  1.83it/s]Loading dataset:  90%|█████████ | 9/10 [00:04<00:00,  1.85it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.85it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.83it/s]
-wandb: - 63.828 MB of 63.828 MB uploadedwandb: \ 63.828 MB of 63.828 MB uploadedwandb: | 63.828 MB of 63.828 MB uploadedwandb: / 63.840 MB of 63.840 MB uploadedwandb:                                                                                
-wandb: 
-wandb: Run history:
-wandb:  eval_score ▁███
-wandb:    gsn_loss █▅▅▄▃▃▃▄▃▂▂▃▃▂▂▃▃▁▂▃▃▃▃▁▂▂▃▂▃▃▂▂▃▂▂▃▃▃▃▂
-wandb: resnet_loss ▅▅█▄▂▁▅▅▅▆▃▃▅▄▄▄▃▄▃▃
-wandb:   unet_loss █▂▁▂▂▂▂▃▂▃▅▅▅▅▅▅▅▅▅▅▅▄▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅
-wandb: 
-wandb: Run summary:
-wandb:  eval_score 0.16466
-wandb:    gsn_loss 4.20598
-wandb: resnet_loss 70.02395
-wandb:   unet_loss 3.11543
-wandb: 
-wandb: 🚀 View run cap--myo--f0--2024-07-01-1619 at: https://wandb.ai/yu-deng/MorphiNet/runs/l2yxlcod
-wandb: ⭐️ View project at: https://wandb.ai/yu-deng/MorphiNet
-wandb: Synced 6 W&B file(s), 14 media file(s), 16 artifact file(s) and 0 other file(s)
-wandb: Find logs at: ./wandb/run-20240701_161909-l2yxlcod/logs
-wandb: WARNING The new W&B backend becomes opt-out in version 0.18.0; try it out with `wandb.require("core")`! See https://wandb.me/wandb-core for more information.
-wandb: Currently logged in as: yu-deng. Use `wandb login --relogin` to force relogin
-Detected CUDA files, patching ldflags
-Emitting ninja build file utils/rasterize/build.ninja...
-Building extension module rasterize_cuda...
-Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
-ninja: no work to do.
-wandb: Tracking run with wandb version 0.17.3
-wandb: Run data is saved locally in /home/yd21/Documents/MorphiNet_Abdul/wandb/run-20240701_183719-j4uz4fus
-wandb: Run `wandb offline` to turn off syncing.
-wandb: Syncing run cap--myo--f0--2024-07-01-1837
-wandb: ⭐️ View project at https://wandb.ai/yu-deng/MorphiNet
-wandb: 🚀 View run at https://wandb.ai/yu-deng/MorphiNet/runs/j4uz4fus
-Loading extension module rasterize_cuda...
-Preparing MR data with rotation...
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  10%|█         | 1/10 [00:00<00:01,  6.68it/s]Loading dataset:  20%|██        | 2/10 [00:00<00:00,  8.29it/s]Loading dataset:  40%|████      | 4/10 [00:00<00:00, 11.98it/s]Loading dataset:  60%|██████    | 6/10 [00:00<00:00, 13.10it/s]Loading dataset:  80%|████████  | 8/10 [00:00<00:00, 13.21it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 12.68it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 12.07it/s]
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  20%|██        | 2/10 [00:00<00:00, 12.63it/s]Loading dataset:  40%|████      | 4/10 [00:00<00:00, 14.01it/s]Loading dataset:  60%|██████    | 6/10 [00:00<00:00, 13.68it/s]Loading dataset:  80%|████████  | 8/10 [00:00<00:00, 13.26it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 10.71it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 11.78it/s]
-Preparing MR data with rotation...
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  10%|█         | 1/10 [00:00<00:04,  1.83it/s]Loading dataset:  20%|██        | 2/10 [00:01<00:04,  1.84it/s]Loading dataset:  30%|███       | 3/10 [00:01<00:03,  1.83it/s]Loading dataset:  40%|████      | 4/10 [00:02<00:03,  1.82it/s]Loading dataset:  50%|█████     | 5/10 [00:02<00:02,  1.83it/s]Loading dataset:  60%|██████    | 6/10 [00:03<00:02,  1.83it/s]Loading dataset:  70%|███████   | 7/10 [00:03<00:01,  1.84it/s]Loading dataset:  80%|████████  | 8/10 [00:04<00:01,  1.80it/s]Loading dataset:  90%|█████████ | 9/10 [00:04<00:00,  1.80it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.79it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.81it/s]
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  10%|█         | 1/10 [00:00<00:05,  1.76it/s]Loading dataset:  20%|██        | 2/10 [00:01<00:04,  1.75it/s]Loading dataset:  30%|███       | 3/10 [00:01<00:03,  1.81it/s]Loading dataset:  40%|████      | 4/10 [00:02<00:03,  1.84it/s]Loading dataset:  50%|█████     | 5/10 [00:02<00:02,  1.84it/s]Loading dataset:  60%|██████    | 6/10 [00:03<00:02,  1.85it/s]Loading dataset:  70%|███████   | 7/10 [00:03<00:01,  1.85it/s]Loading dataset:  80%|████████  | 8/10 [00:04<00:01,  1.85it/s]Loading dataset:  90%|█████████ | 9/10 [00:04<00:00,  1.86it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.85it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.84it/s]
-Preparing MR data without rotation...
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  10%|█         | 1/10 [00:00<00:00,  9.99it/s]Loading dataset:  30%|███       | 3/10 [00:00<00:00, 12.81it/s]Loading dataset:  50%|█████     | 5/10 [00:00<00:00, 13.35it/s]Loading dataset:  70%|███████   | 7/10 [00:00<00:00, 13.88it/s]Loading dataset:  90%|█████████ | 9/10 [00:00<00:00, 13.17it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 13.06it/s]
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  20%|██        | 2/10 [00:00<00:00, 12.70it/s]Loading dataset:  40%|████      | 4/10 [00:00<00:00, 13.91it/s]Loading dataset:  60%|██████    | 6/10 [00:00<00:00, 12.71it/s]Loading dataset:  80%|████████  | 8/10 [00:00<00:00, 12.74it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 10.51it/s]Loading dataset: 100%|██████████| 10/10 [00:00<00:00, 11.48it/s]
-Preparing MR data without rotation...
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  10%|█         | 1/10 [00:00<00:04,  1.87it/s]Loading dataset:  20%|██        | 2/10 [00:01<00:04,  1.87it/s]Loading dataset:  30%|███       | 3/10 [00:01<00:03,  1.87it/s]Loading dataset:  40%|████      | 4/10 [00:02<00:03,  1.84it/s]Loading dataset:  50%|█████     | 5/10 [00:02<00:02,  1.84it/s]Loading dataset:  60%|██████    | 6/10 [00:03<00:02,  1.83it/s]Loading dataset:  70%|███████   | 7/10 [00:03<00:01,  1.83it/s]Loading dataset:  80%|████████  | 8/10 [00:04<00:01,  1.80it/s]Loading dataset:  90%|█████████ | 9/10 [00:04<00:00,  1.79it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.78it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.81it/s]
-Loading dataset:   0%|          | 0/10 [00:00<?, ?it/s]Loading dataset:  10%|█         | 1/10 [00:00<00:05,  1.72it/s]Loading dataset:  20%|██        | 2/10 [00:01<00:04,  1.71it/s]Loading dataset:  30%|███       | 3/10 [00:01<00:03,  1.77it/s]Loading dataset:  40%|████      | 4/10 [00:02<00:03,  1.79it/s]Loading dataset:  50%|█████     | 5/10 [00:02<00:02,  1.80it/s]Loading dataset:  60%|██████    | 6/10 [00:03<00:02,  1.81it/s]Loading dataset:  70%|███████   | 7/10 [00:03<00:01,  1.82it/s]Loading dataset:  80%|████████  | 8/10 [00:04<00:01,  1.81it/s]Loading dataset:  90%|█████████ | 9/10 [00:04<00:00,  1.82it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.81it/s]Loading dataset: 100%|██████████| 10/10 [00:05<00:00,  1.80it/s]
-wandb: - 55.562 MB of 55.574 MB uploadedwandb: \ 55.562 MB of 55.574 MB uploadedwandb: | 55.574 MB of 55.574 MB uploadedwandb:                                                                                
-wandb: 
-wandb: Run history:
-wandb:  eval_score ▁███
-wandb:    gsn_loss █▄▃▁▃▃▄▅▅▄▆▇▄▆▆▆▆▄▆▆▆▆▅▆▅▆▆▇▆▄▆▆▆▅▇▅█▆█▇
-wandb: resnet_loss █▇▁▅▅▁▅█▃▅▃▃▄▄█▃▇▃▂▁
-wandb:   unet_loss █▃▂▁▁▁▁▁▁▁▂▂▂▂▂▂▃▃▃▃▃▃▃▃▃▃▃▃▃▃▄▄▃▃▄▃▄▄▄▄
-wandb: 
-wandb: Run summary:
-wandb:  eval_score 0.06392
-wandb:    gsn_loss 5.11444
-wandb: resnet_loss 16.748
-wandb:   unet_loss 2.80748
-wandb: 
-wandb: 🚀 View run cap--myo--f0--2024-07-01-1837 at: https://wandb.ai/yu-deng/MorphiNet/runs/j4uz4fus
-wandb: ⭐️ View project at: https://wandb.ai/yu-deng/MorphiNet
-wandb: Synced 6 W&B file(s), 19 media file(s), 16 artifact file(s) and 0 other file(s)
-wandb: Find logs at: ./wandb/run-20240701_183719-j4uz4fus/logs
-wandb: WARNING The new W&B backend becomes opt-out in version 0.18.0; try it out with `wandb.require("core")`! See https://wandb.me/wandb-core for more information.
-ERROR: Only support binary segmentation for now.

@@ -20,10 +20,12 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any, Dict, Union
 
+from monai.networks.nets import DynUNet
 from monai.networks.layers.factories import Conv, Norm, Pool
 from monai.networks.layers.utils import get_pool_layer
 from monai.utils import ensure_tuple_rep
 from monai.utils.module import look_up_option
+from monai.transforms.utils import distance_transform_edt
 
 from .parts import ResNetBlock, ResNetBottleneck
 
@@ -161,6 +163,15 @@ class ResNet(nn.Module):
         conv1_kernel_size = ensure_tuple_rep(conv1_t_size, spatial_dims)
         conv1_stride = ensure_tuple_rep(conv1_t_stride, spatial_dims)
 
+        # self.conv0 = StandardDynUNet(
+        #     spatial_dims=3, 
+        #     in_channels=num_classes, out_channels=num_classes,
+        #     kernel_size=(3, 3, 3), strides=(1, 2, 2),
+        #     upsample_kernel_size=(2, 2), 
+        #     filters=(16, 32, 64),
+        #     dropout=False, deep_supervision=False, res_block=False,
+        # )
+
         self.conv1 = conv_type(
             n_input_channels,
             self.in_planes,
@@ -175,7 +186,7 @@ class ResNet(nn.Module):
         self.layer2 = self._make_layer(block, block_inplanes[1], layers[1], spatial_dims, shortcut_type)
         self.layer3 = self._make_layer(block, block_inplanes[2], layers[2], spatial_dims, shortcut_type)
         self.layer4 = self._make_layer(block, block_inplanes[3], layers[3], spatial_dims, shortcut_type)
-        self.out = conv_type(block_inplanes[3] * block.expansion, num_classes, kernel_size=1, stride=1, bias=True)
+        self.out = conv_type(block_inplanes[3] * block.expansion, 2, kernel_size=1, stride=1, bias=True)
 
         for m in self.modules():
             if isinstance(m, conv_type):
@@ -238,20 +249,44 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        dx = self.conv1(x)
-        dx = self.bn1(dx)
-        dx = self.relu(dx)
 
-        dx = self.layer1(dx)
-        dx = self.layer2(dx)
-        dx = self.layer3(dx)
-        dx = self.layer4(dx)
+        # # add conv layers to complete the segmentation
+        # dx = torch.sigmoid(self.conv0(x))
+        # x_ = x + (torch.argmax(x, dim=1, keepdim=True) == 0) * dx
+        
+        # if self.training:
+        #     f_x = torch.argmax(x, dim=1, keepdim=True)
+        # else:
+        #     f_x = torch.argmax(x_, dim=1, keepdim=True)
 
-        dx = self.out(dx)
-        dx = self.relu(dx)
+        # compute the distance field
+        # foreground = (f_x > 0).to(torch.float32)
+        # myo = (f_x == 2).to(torch.float32)
+        
+        # compute the distance field
+        x = torch.argmax(x, dim=1, keepdim=True)
+        foreground = (x > 0).to(torch.float32)
+        myo = (x == 2).to(torch.float32)
+        f = torch.stack(
+            [distance_transform_edt(i[:, 0]) + distance_transform_edt(1 - i[:, 0]) 
+                for i in [foreground, myo]], 
+                dim=1)
 
-        y = x + dx
+        df = self.conv1(f)
+        df = self.bn1(df)
+        df = self.relu(df)
 
+        df = self.layer1(df)
+        df = self.layer2(df)
+        df = self.layer3(df)
+        df = self.layer4(df)
+
+        df = self.out(df)
+        df = self.relu(df)
+
+        y = f + df
+
+        # return y, x_
         return y
 
 
