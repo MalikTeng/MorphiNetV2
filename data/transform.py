@@ -18,7 +18,7 @@ from monai.transforms import (
     EnsureTyped
 )
 
-from components import *
+from .components import *
 
 __all__ = ["pre_transform"]
 
@@ -46,10 +46,7 @@ def pre_transform(
         LoadImaged(keys, ensure_channel_first=False, image_only=True, allow_missing_keys=True),
     ]
 
-    # # mask out the CTAs segmentation labels
-    # if modal.lower() == "ct":
-    #     transforms.append(MaskCTd(keys))
-
+    # pre-transformation
     transforms.extend([
         # isotropic resampling
         Adjustd(keys, allow_missing_keys=True),

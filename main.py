@@ -1,9 +1,4 @@
 import os, sys
-sys.path.extend([
-    os.path.join(os.path.dirname(__file__), "data"),
-    os.path.join(os.path.dirname(__file__), "model"),
-    os.path.join(os.path.dirname(__file__), "utils"),
-])
 import time
 from glob import glob
 import argparse
@@ -12,8 +7,6 @@ import wandb
 
 from utils.tools import draw_eval_score
 wandb.login()
-
-from run import *
 from utils import *
 
 import warnings
@@ -29,7 +22,8 @@ def config():
     parser = argparse.ArgumentParser()
     # mode parameters
     parser.add_argument("--mode", type=str, default="offline", help="choose the mode for wandb, can be 'disabled', 'offline', 'online'")
-    parser.add_argument("--_4d", action="store_true", help="whether to use 4D mesh for training")
+    parser.add_argument("--_4d", action="store_true", help="toggle to train on 4D image data")
+    parser.add_argument("--_mr", action="store_true", help="toggle to ONLY use MR data for training")
     parser.add_argument("--save_on", type=str, default="cap", help="the dataset for validation, can be 'cap' or 'sct'")
     parser.add_argument("--control_mesh_dir", type=str,
                         default="./template/template_mesh-myo.obj",
@@ -46,26 +40,27 @@ def config():
     parser.add_argument("--batch_size", type=int, default=1, help="the batch size for training")
     parser.add_argument("--cache_rate", type=float, default=1.0, help="the cache rate for training, see MONAI document for more details")
     parser.add_argument("--crop_window_size", type=int, nargs='+', default=[128, 128, 128], help="the size of the crop window for training")
-    parser.add_argument("--pixdim", type=float, nargs='+', default=[2, 2, 2], help="the pixel dimension of downsampled images")
-    parser.add_argument("--lambda_0", type=float, default=2.77, help="the loss coefficients for Chamfer verts distance term")
-    parser.add_argument("--lambda_1", type=float, default=1.52, help="the loss coefficients for point to mesh distance term")
-    parser.add_argument("--lambda_2", type=float, default=1.95, help="the loss coefficients for laplacian smooth term")
-    parser.add_argument("--temperature", type=float, default=1.15, help="the temperature for the distance field warping")
+    parser.add_argument("--pixdim", type=float, nargs='+', default=[4, 4, 4], help="the pixel dimension of downsampled images")
+    parser.add_argument("--lambda_0", type=float, default=2.29, help="the loss coefficients for Chamfer verts distance term")
+    parser.add_argument("--lambda_1", type=float, default=0.57, help="the loss coefficients for point to mesh distance term")
+    parser.add_argument("--lambda_2", type=float, default=1.41, help="the loss coefficients for laplacian smooth term")
+    parser.add_argument("--temperature", type=float, default=1.66, help="the temperature for the distance field warping")
 
     # data parameters
     parser.add_argument("--ct_json_dir", type=str,
                         default="./dataset/dataset_task20_f0.json", 
-                        help="the path to the json file with named list of CTA train/valid/test sets")
+                        help="the path to the json file with named list of CT train/valid/test sets")
     parser.add_argument("--mr_json_dir", type=str,
-                        # default="./dataset/dataset_task11_f0.json",    # less data less burden
-                        default="./dataset/dataset_task10_f0.json",  # use only for 4d
-                        help="the path to the json file with named list of CMR train/valid/test sets")
+                        default="./dataset/dataset_task11_f0.json",    # less data less burden
+                        # default="./dataset/dataset_task10_f0.json",  # use only for 4d
+                        help="the path to the json file with named list of MR train/valid/test sets")
     parser.add_argument("--ct_data_dir", type=str, 
                         default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset020_SCOTHEART", 
                         help="the path to your processed images, must be in nifti format")
     parser.add_argument("--mr_data_dir", type=str, 
+                        default="/mnt/data/Experiment/nnUNet/nnUNet_raw/Dataset011_CAP_SAX", 
                         # default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX", 
-                        default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset010_CAP_SAX_NRRD", 
+                        # default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset010_CAP_SAX_NRRD", 
                         help="the path to your processed images")
     parser.add_argument("--ckpt_dir", type=str, 
                         default="/mnt/data/Experiment/MorphiNet/Checkpoint", 
@@ -77,7 +72,7 @@ def config():
     # path to the pretrained modules
     parser.add_argument("--use_ckpt", type=str, 
                         # default=None,
-                        default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2024-07-29-2042/", 
+                        default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2024-07-30-1649/", 
                         help="the path to the pretrained models")
 
     # structure parameters for df-predict module
@@ -157,4 +152,11 @@ def train(super_params):
 
 if __name__ == '__main__':
     super_params = config()
+
+    # if super_params._mr:
+    #     from run_mr import *
+    # else:
+    #     from run import *
+    from run_mr import *
+
     train(super_params)

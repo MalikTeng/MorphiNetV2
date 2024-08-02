@@ -193,9 +193,14 @@ if __name__ == "__main__":
     
     source_nrrd_dir = "/mnt/data/Experiment/Data/raw_data/Dataset010_CAP_SAX_NRRD/"    # Path to the root directory of the dataset
     
-    # 1. Load your DICOM database into 3D Slicer and convert it to NRRD format volume images (operate in the DICOM module, 3D Slicer and convert only SAX series, toggling 'advance' if encountering any issues),
-    #    and save the NRRD files in the above directory. This will create a structure of directory as follows:
-    #    Abdul
+    # 1. Load your DICOM database into 3D Slicer and convert it to NRRD format volume images, and ensure that you will
+    #       - Operate in the DICOM module using 3D Slicer
+    #       - Convert ONLY SAX series, toggling 'advance' if encountering any issues
+    #       - File extension should be '.seq.nrrd' via save the whole scene but not export a single node in 3D Slicer
+    #
+    #    Save the whole scene including NRRD volumes in the above directory. This will create a structure of directory as follows:
+    #
+    #    DATASET_NAME
     #    ├── PatientID1
     #    │   ├── PatientID1 - MR SAX_0000.seq.nrrd
     #    │   ├── PatientID1 - MR SAX_0001.seq.nrrd
@@ -209,4 +214,5 @@ if __name__ == "__main__":
     
     # 2. Check the image meta information, change directory, and rename NRRD files complying with Decathlon Medical Image Challenge Convention.
     output_nrrd_dir = "/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset010_CAP_SAX_NRRD/imagesTr"   # Path to the output directory
+    
     main(source_nrrd_dir, output_nrrd_dir)

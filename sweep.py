@@ -187,7 +187,7 @@ if __name__ == '__main__':
                 'value': 2
             },
             'hidden_features_gsn': {
-                'values': [16, 32, 64]
+                'value': 16
             },
             'run_id': {
                 'value': f"sct--myo--f0--{run_id}"

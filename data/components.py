@@ -9,10 +9,10 @@ from monai.transforms.utils import distance_transform_edt
 import nibabel as nib
 
 
-__all__ = ["MaskCTd", "DFConvertd", "Adjustd", "FlexResized", "Probd"]
+__all__ = ["Maskd", "DFConvertd", "Adjustd", "FlexResized", "Probd"]
 
 
-class MaskCTd(MapTransform):
+class Maskd(MapTransform):
     """
     this transform mask the CT pred near the basal and apex plane, i.e., the first and last slices.
     """
@@ -20,31 +20,33 @@ class MaskCTd(MapTransform):
         super().__init__(keys, allow_missing_keys)
 
     def __call__(self, data):
-        try:
-            pred = data["pred"]
-        except KeyError:
-            return data
-        else:
-            pred = pred.get_array()
 
-            # mask the CTA images near the basal and apex plane
-            mask = np.zeros_like(pred).astype(bool)
-            mask[:, 30:-30] = True
-            pred[~mask] = pred.min()
+        for key in ["pred", "label"]:
+            try:
+                array = data[key]
+            except KeyError:
+                continue
+            else:
+                array = array.get_array()
 
-            data["pred"] = MetaTensor(pred, affine=data["pred"].affine)
+                if data["modal"] == "ct" and key == "pred":
+                    # mask the CTA images near the basal and apex plane
+                    mask = np.zeros_like(array).astype(bool)
+                    mask[:, 12:-12] = True
+                    array[~mask] = array.min()
 
-            return data
+                    data[key] = MetaTensor(array, affine=data[key].affine)
+                
+                elif data["modal"] == "mr":
+                    # pad slices on the top and bottom of the image
+                    array = np.pad(array, ((0, 0), (12, 12), (0, 0), (0, 0)), mode="constant", constant_values=array.min())
+                    # update the affine
+                    affine = data[key].affine.clone()
+                    affine[:3, -1] -= 12 * data[key].pixdim[0]
+                    data[key] = MetaTensor(array, affine=affine)
 
-        # image = data["ct_image"]
-        # image = image.get_array()
 
-        # # mask the CTA images near the basal and apex plane
-        # mask = np.zeros_like(image).astype(bool)
-        # mask[..., 20:-30] = True
-        # image[~mask] = image.min()
-
-        # data["ct_image"] = MetaTensor(image, affine=data["ct_image"].affine)
+        return data
 
 
 class Adjustd(MapTransform):
