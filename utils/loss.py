@@ -158,7 +158,7 @@ face_point_distance = _FacePointDistance.apply
 
 def surface_crossing_loss(
     meshes: Meshes,
-    pcls: Pointclouds,
+    # pcls: Pointclouds,
     meshes_labels: torch.LongTensor,
     min_triangle_area: float = _DEFAULT_MIN_TRIANGLE_AREA,
 ):
@@ -192,13 +192,14 @@ def surface_crossing_loss(
 
     penalty = 0.0
 
-    for label_pairs in [[1, 0], [2, 1], [0, 2]]:
+    for label_pairs in [[0, 2], [1, 3], [0, 1]]:
 
         # get the label as mask of mesh faces
         points_label = torch.nonzero(meshes_labels == label_pairs[0])[:, 0]
         meshes_label = torch.nonzero(meshes_labels == label_pairs[1]).T
         # get the subset of pointclouds and meshes
-        pcls_subset = Pointclouds(points=pcls[:, points_label])
+        # pcls_subset = Pointclouds(points=pcls[:, points_label])
+        pcls_subset = Pointclouds(points=meshes.verts_padded()[:, points_label])
         meshes_subset = meshes.submeshes([meshes_label])
 
         # # create a plot drawing the pcls_subset and meshes_subset in the same scene using plotly

@@ -25,7 +25,8 @@ def config():
     parser.add_argument("--_4d", action="store_true", help="toggle to train on 4D image data")
     parser.add_argument("--_mr", action="store_true", help="toggle to ONLY use MR data for training")
     parser.add_argument("--save_on", type=str, default="cap", help="the dataset for validation, can be 'cap' or 'sct'")
-    parser.add_argument("--control_mesh_dir", type=str,
+    parser.add_argument("--target", type=str, default=None, help="the target dataset for test, particularly for a different process on acdc data")
+    parser.add_argument("--template_mesh_dir", type=str,
                         default="./template/template_mesh-myo.obj",
                         help="the path to your initial meshes")
 
@@ -41,12 +42,12 @@ def config():
     parser.add_argument("--cache_rate", type=float, default=1.0, help="the cache rate for training, see MONAI document for more details")
     parser.add_argument("--crop_window_size", type=int, nargs='+', default=[128, 128, 128], help="the size of the crop window for training")
     parser.add_argument("--pixdim", type=float, nargs='+', default=[4, 4, 4], help="the pixel dimension of downsampled images")
-    parser.add_argument("--lambda_0", type=float, default=2.29, help="the loss coefficients for Chamfer verts distance term")
-    parser.add_argument("--lambda_1", type=float, default=0.57, help="the loss coefficients for point to mesh distance term")
-    parser.add_argument("--lambda_2", type=float, default=1.41, help="the loss coefficients for laplacian smooth term")
-    parser.add_argument("--temperature", type=float, default=1.66, help="the temperature for the distance field warping")
+    parser.add_argument("--lambda_0", type=float, default=1.06, help="the loss coefficients for Chamfer verts distance term")
+    parser.add_argument("--lambda_1", type=float, default=1.05, help="the loss coefficients for point to mesh distance term")
+    parser.add_argument("--interation", type=int, default=5, help="the interations for the distance field warping")
 
     # data parameters
+    parser.add_argument("--ct_ratio", type=float, default=0.8, help="the portion of CT data for training")
     parser.add_argument("--ct_json_dir", type=str,
                         default="./dataset/dataset_task20_f0.json", 
                         help="the path to the json file with named list of CT train/valid/test sets")
@@ -98,12 +99,14 @@ def config():
 
 
 def test(super_params):
-    wandb.init(mode="disabled")
+    wandb.init(config=super_params, mode="offline", project="MorphiNet-test", name=super_params.run_id.replace("sct", super_params.target))
     pipeline = TrainPipeline(
         super_params=super_params,
         seed=42, num_workers=19,
-        is_training=False
+        is_training=False,
+        target="acdc" if super_params.target == "acdc" else None
     )
+    pipeline._data_warper(rotation=False)
     pipeline.test(super_params.save_on)
 
 
@@ -120,34 +123,37 @@ def ablation(super_params):
 if __name__ == '__main__':
     super_params = config()
 
+    # super_params._mr = True
+
     if super_params._mr:
         from run_mr import *
     else:
         from run import *
 
-    # # checkpoint info
-    # # super_params._4d = True
-    # super_params.save_on = "cap"
-    # ckpt = "cap--myo--f0--2024-07-31-2023"
-    # super_params.best_epoch = 191
+    # checkpoint info
+    # super_params._4d = True
+    super_params.save_on = "cap"
+    ckpt = "sct--myo--f0--2024-08-18-1346"
+    super_params.best_epoch = "best"
+    super_params.iteration = 10
 
-    # # data info
-    # target = "ablation"
-    # super_params.ct_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task20_f0.json"
-    # super_params.ct_data_dir = f"/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset020_SCOTHEART"
-    # super_params.mr_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task11_f0.json"
-    # super_params.mr_data_dir = f"/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX"
-    # # super_params.mr_data_dir = f"/mnt/data/Experiment/nnUNet/nnUNet_raw/Dataset021_ACDC"
+    # data info
+    super_params.target = "acdc"
+    super_params.ct_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task20_f0.json"
+    super_params.ct_data_dir = f"/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset020_SCOTHEART"
+    super_params.mr_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task21_f0.json"
+    super_params.mr_data_dir = f"/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset021_ACDC"
 
-    # # output info
-    # super_params.out_dir = f"/mnt/data/Experiment/TMI_2024/{target}/MorphiNet/myo/f0/"
+    # output info
+    super_params.out_dir = f"/mnt/data/Experiment/TMI_2024/{super_params.target}/MorphiNet/myo/f0/"
+    # super_params.out_dir = f"/mnt/data/Experiment/TMI_2024/{super_params.target}/MorphiNet/myo/00/"
 
-    # # model info
-    # super_params.run_id = ckpt
-    # super_params.ckpt_dir = f"/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/{super_params.run_id}/trained_weights"
-    # super_params.control_mesh_dir = f"/home/yd21/Documents/MorphiNet/template/template_mesh-myo.obj"
+    # model info
+    super_params.run_id = ckpt
+    super_params.ckpt_dir = f"/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/{super_params.run_id}/trained_weights"
+    super_params.template_mesh_dir = f"/home/yd21/Documents/MorphiNet/template/template_mesh-myo.obj"
 
     test(super_params)
 
-    # super_params.out_dir = f"/mnt/data/Experiment/TMI_2024/{target}/myo/"
+    # # super_params.out_dir = f"/mnt/data/Experiment/TMI_2024/{super_params.target}/MorphiNet/myo/f0/"
     # ablation(super_params)

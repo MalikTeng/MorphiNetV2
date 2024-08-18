@@ -29,7 +29,7 @@ from monai.transforms.utils import distance_transform_edt
 
 from .parts import ResNetBlock, ResNetBottleneck
 
-__all__ = ["ResNet", "DownSample", "GSN", "Subdivision", "NODEBlock"]
+__all__ = ["GSN", "Subdivision", "NODEBlock"]
 
 
 class AutoEncoder(nn.Module):
@@ -340,7 +340,9 @@ class Subdivision():
             new_verts = torch.cat([verts, new_verts], dim=0)
             mesh = Meshes(verts=[new_verts], faces=[new_faces])
 
-            mesh_label = mesh_label.tile([4]) if mesh_label is not None else None
+            # mesh_label = mesh_label.tile([4]) if mesh_label is not None else None
+            # self.labels_levels.append(mesh_label)
+            mesh_label = torch.cat([mesh_label, mesh_label[edges].max(dim=1).values], dim=0)
             self.labels_levels.append(mesh_label)
 
     def subdivide_faces_fn(self, mesh: Meshes, allow_subdiv_faces: torch.LongTensor=None):
@@ -390,9 +392,11 @@ class GSNLayer(MessagePassing):
         self.lin = Sequential(
             DenseLinear(in_channels, self.hidden_features, bias=False,
                    weight_initializer='glorot'),
+            LayerNorm(self.hidden_features),
             LeakyReLU(inplace=True),
             DenseLinear(self.hidden_features, self.hidden_features, bias=False,
                    weight_initializer='glorot'),
+            LayerNorm(self.hidden_features),
             LeakyReLU(inplace=True),
             DenseLinear(self.hidden_features, out_channels, bias=False,
                    weight_initializer='glorot')
@@ -403,13 +407,11 @@ class GSNLayer(MessagePassing):
     def reset_parameters(self):
         for m in self.lin:
             if isinstance(m, DenseLinear):
-                m.reset_parameters()
+                nn.init.uniform_(m.weight, -0.1, 0.1)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def forward(self, x, edge_index):
-        
-        # Step 1: h_{\theta}(x_j - x_i) == h_{\theta}(x)
-        x = self.lin(x)
-        
         # Step 2: normalisation
         row, col = edge_index
         deg = degree(col, x.size(0), dtype=x.dtype)
@@ -422,8 +424,10 @@ class GSNLayer(MessagePassing):
 
         return x
 
-    def message(self, x_j, x_i, norm):
-        return norm.view(-1, 1) * (x_j - x_i) if norm is not None else x_j - x_i
+    def message(self, x_i, x_j, norm):
+        # Step 1: h_{\theta}(x_j - x_i)
+        f = self.lin(x_j - x_i)
+        return norm.view(-1, 1) * f if norm is not None else f
 
 
 class GSN(nn.Module):
@@ -439,14 +443,8 @@ class GSN(nn.Module):
         
         level_outs = []
         for l, gcn_layer in enumerate(self.gcn_layers):
-            # 1. update the vertices with learnt offsets.
-            offsets = gcn_layer(
-                meshes.verts_packed(), meshes.edges_packed().t().contiguous()
-                )
-            meshes = meshes.offset_verts(offsets)
-
             if len(subdivided_faces) > 0:
-                # 2. create new vertices at the middle of the edges.
+                # 1. create new vertices at the middle of the edges.
                 new_faces = subdivided_faces[l].expand(meshes._N, -1, -1).to(meshes.device)
                 verts = meshes.verts_padded()
                 edges = meshes[0].edges_packed()
@@ -457,8 +455,14 @@ class GSN(nn.Module):
                 new_verts = meshes.verts_padded()
                 new_faces = meshes.faces_padded()
 
-            # 3. create new meshes with the same topology as the original mesh.
+            # 2. create new meshes with the same topology as the original mesh.
             meshes = Meshes(verts=new_verts, faces=new_faces)
+
+            # 3. update the vertices with learnt offsets.
+            offsets = gcn_layer(
+                meshes.verts_packed(), meshes.edges_packed().t().contiguous()
+                )
+            meshes = meshes.offset_verts(offsets)
 
             # 4. output the new mesh
             level_outs.append(meshes)
@@ -605,120 +609,3 @@ class NODEBlock(nn.Module):
     #     out = odeint(self.odefunc, cxyz, self.times, rtol = self.rtol, atol = self.rtol)
     #     self.cost = self.odefunc.nfe  # Number of evaluations it took to solve it
     #     return out
-
-
-# class Warper(nn.Module):
-#     '''
-#     A single DeformBlock is made up of two NODE Blocks. Refer secion 3 (Overall Architecture)
-#     '''
-#     def __init__(self, 
-#                  latent_size,
-#                  hidden_size, 
-#                  steps,
-#                  time=1.0,
-#                  tol = 1e-5):
-#         super(Warper, self).__init__()
-#         '''
-#         Initialization.
-#         time: some number 0-1
-#         num_hidden: Number of hidden nodes in the MLP of dynamics
-#         latent_len: Length of shape embeddings
-#         tol: tolerance of the ODE Solver
-#         '''
-        
-#         # Several NODE Blocks
-#         for step in range(steps):
-#             setattr(self, f'node{step+1}', NODEBlock(ODEFunc(hidden_size, latent_size), tol = tol))
-        
-#         self.time = time
-#         self.steps = steps
-        
-#     def forward(self, input=None, invert=False, time=None):
-#         '''
-#         Forward/Baclward flow method
-        
-#         input = [code, x]
-#         x: Nx3 input tensor
-#         code: Nxzdim tensor embedding
-#         time: some number 0-1
-        
-#         y: Nx3 output tensor
-#         '''
-
-#         # xyz = input[:, -3:]
-#         # code = input[:, :-3]
-
-#         if time is None:
-#             time=self.time
-
-#         # Note: To enable condioned flows, we concatenate points with their corresponding shape embeddings. 
-#         #       Refer to code comments in ODEFunc.forward() for more details about this choice.
-
-#         time_interval = self.time / (self.steps)
-
-#         if not invert:
-#             xyzs = []
-#             cxyz = input
-#             for step in range(self.steps):
-#                 cxyz = getattr(self, f'node{step+1}')(cxyz, time_interval, 1, False)[-1]
-
-#                 if (step+1) % (max(self.steps // 4, 1)) == 0:
-#                     xyzs.append(cxyz[:, -3:])
-#         else:
-#             xyzs = []
-#             cxyz = input
-#             for step in range(self.steps):
-#                 cxyz = getattr(self, f'node{self.steps-step}')(cxyz, time_interval, 1, True)[-1]
-
-#                 if (step+1) % (max(self.steps // 4, 1)) == 0:
-#                     xyzs.append(cxyz[:, -3:])
-        
-#         xyz = cxyz[:, -3:]  # output the corresponding 'flown' points.
-
-#         return xyz, xyzs
-
-#     def timeflow(self, input=None, sub_steps=1):
-
-#         # Note: To enable condioned flows, we concatenate points with their corresponding shape embeddings. 
-#         #       Refer to code comments in ODEFunc.forward() for more details about this choice.
-
-#         time_interval = self.time / (self.steps)
-
-#         xyzs = []
-#         cxyz = input
-#         for step in range(self.steps):
-#             cxyzs = getattr(self, f'node{self.steps-step}')(cxyz, time_interval, sub_steps, True)[1:]
-#             cxyz = cxyzs[-1]
-
-#             if (step+1) % (max(self.steps // 4, 1)) == 0:
-#                 xyzs.append(cxyzs[:, :, -3:])
-
-#         return xyzs
-
-
-# class Decoder(nn.Module):
-#     def __init__(self, latent_size, warper_kargs, decoder_kargs):
-#         super(Decoder, self).__init__()
-#         self.warper = Warper(latent_size, **warper_kargs)
-#         self.sdf_decoder = SdfDecoder(**decoder_kargs)
-
-#     def forward(self, input, invert=False, output_warped_points=False):
-#         p_final, warped_xyzs = self.warper(input, invert)
-
-#         if not self.training:
-#             x = self.sdf_decoder(p_final)
-#             if output_warped_points:
-#                 return p_final, x
-#             else:
-#                 return x
-#         else:   # training mode, output intermediate positions and their corresponding sdf prediction
-#             xs = []
-#             for p in warped_xyzs:
-#                 xs.append(self.sdf_decoder(p))
-#             if output_warped_points:
-#                 return warped_xyzs, xs
-#             else:
-#                 return xs
-
-#     def forward_template(self, input):
-#         return self.sdf_decoder(input)

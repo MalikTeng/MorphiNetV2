@@ -1,27 +1,58 @@
 from typing import Union
-from matplotlib import axis
-from monai.utils.misc import str2list
-import torch
+from argparse import Namespace
+from itertools import combinations
 import numpy as np
 import pandas as pd
-from argparse import Namespace
+import torch
 from torch import Tensor
-import torch.nn.functional as F
-from torch.nn.functional import one_hot
-from pytorch3d.structures import Meshes, Pointclouds
+from torch.nn import functional as F
+from pytorch3d.structures import Meshes
 from trimesh.voxel.ops import matrix_to_marching_cubes
 import matplotlib.pyplot as plt
 import seaborn as sns
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
-
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+from monai.transforms import RemoveSmallObjects
 
 __all__ = ["draw_plotly", "draw_train_loss", "draw_eval_score"]
+
+
+# def find_optimal_clusters(points, max_clusters=3):
+#     points_np = points.cpu().numpy()
+#     silhouette_scores = []
+#     for n_clusters in range(2, max_clusters + 1):
+#         kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+#         cluster_labels = kmeans.fit_predict(points_np)
+#         silhouette_avg = silhouette_score(points_np, cluster_labels)
+#         silhouette_scores.append(silhouette_avg)
+    
+#     optimal_clusters = silhouette_scores.index(max(silhouette_scores)) + 2
+#     return optimal_clusters
+
+
+# def find_cluster_centers(point_cloud, max_clusters=3):
+#     # Ensure point_cloud is on CPU for sklearn compatibility
+#     point_cloud_np = point_cloud.cpu().numpy()
+
+#     # Find the optimal number of clusters
+#     n_clusters = find_optimal_clusters(point_cloud, max_clusters)
+
+#     # Apply K-Means clustering
+#     kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+#     kmeans.fit(point_cloud_np)
+
+#     # Get cluster centers and convert back to PyTorch tensor
+#     cluster_centers = torch.tensor(kmeans.cluster_centers_, device=point_cloud.device)
+
+#     return cluster_centers, n_clusters
+
 
 def draw_plotly(
     seg_true: Union[Tensor, None] = None, seg_pred: Union[Tensor, None] = None, 
     df_true: Union[Tensor, None] = None, df_pred: Union[Tensor, None] = None,
-    mesh_pred: Union[Meshes, None] = None 
+    mesh_pred: Union[Meshes, None] = None, **kwargs
     ):
     fig = make_subplots(rows=1, cols=1)
 
@@ -39,7 +70,17 @@ def draw_plotly(
                 name="seg_true"
             ))
         else:
-            print("ERROR: Only support binary segmentation for now.")
+            mesh = matrix_to_marching_cubes((seg_true[0] == 2).cpu().numpy())
+            y, x, z = mesh.vertices.T
+            I, J, K = mesh.faces.T
+            fig.add_trace(go.Mesh3d(
+                x=x, y=y, z=z,
+                i=I, j=J, k=K,
+                color="pink",
+                opacity=0.25,
+                name="seg_true"
+            ))
+            # print("ERROR: Only support binary segmentation for now.")
     
     if seg_pred is not None:
         num_classes = len(torch.unique(seg_pred))
@@ -55,7 +96,17 @@ def draw_plotly(
                 name="seg_pred"
             ))
         else:
-            print("ERROR: Only support binary segmentation for now.")
+            mesh = matrix_to_marching_cubes((seg_pred[0] == 2).cpu().numpy())
+            y, x, z = mesh.vertices.T
+            I, J, K = mesh.faces.T
+            fig.add_trace(go.Mesh3d(
+                x=x, y=y, z=z,
+                i=I, j=J, k=K,
+                color="blue",
+                opacity=0.25,
+                name="seg_pred"
+            ))
+            # print("ERROR: Only support binary segmentation for now.")
 
     if mesh_pred is not None:
         assert mesh_pred._N == 1, "Only support one mesh at a time."
@@ -75,54 +126,97 @@ def draw_plotly(
                 opacity=0.1,
                 name="meshes_pred"
             ))
+        
+        mesh_c = kwargs.get("mesh_c")
+        if mesh_c is not None:
+            mesh_c = mesh_c / 2 + 0.5
+            mesh_c = mesh_c * seg_true.shape[-1] if df_pred is None else mesh_c * df_pred.shape[-1]
+            for i, center in enumerate(mesh_c):
+                fig.add_trace(go.Scatter3d(
+                    x=[center[0].item()], y=[center[1].item()], z=[center[2].item()],
+                    mode="markers", marker=dict(size=5, color="blue"),
+                    name=f"mesh_c{i}"
+                ))
 
     if df_pred is not None:
-        # compute the gradient of the signed distance field
-        grad_pred = torch.gradient(-df_pred, dim=(1, 2, 3), edge_order=1)
-        grad_pred = torch.stack(grad_pred, dim=1)
-        grad_pred /= torch.norm(grad_pred, dim=1, keepdim=True)
-        # mute any nan/inf values in label_grad
-        grad_pred[torch.isnan(grad_pred)] = 0
-        grad_pred[torch.isinf(grad_pred)] = 0
-
-        # draw the zero-level set from the df_pred
-        mesh = matrix_to_marching_cubes((df_pred[0].cpu().numpy() < 1.2).astype(int))
-        verts, faces = mesh.vertices, mesh.faces
-        if seg_true is not None:
-            verts *= seg_true.shape[-1] / df_pred.shape[-1]
-        y, x, z = verts.T
-        I, J, K = faces.T
-        fig.add_trace(go.Mesh3d(
-            x=x, y=y, z=z,
-            i=I, j=J, k=K,
-            color="gray",
-            opacity=0.25,
-            name="df_pred"
-        ))
-
         if mesh_pred is not None:
-            # compute the grad respective to the mesh vertices
-            grad_pred *= df_pred.unsqueeze(1)
-            verts = mesh_pred.verts_padded()
-            verts = 2 * (verts / df_pred.shape[-1] - 0.5)   # pixel space to NDC space
-            mesh_grad = F.grid_sample(
-                grad_pred.permute(0, 1, 4, 2, 3).float(),           # (N, C: yxz, D, H, W)
-                verts.unsqueeze(1).unsqueeze(1),                    # (N, 1, 1, V, 3: xyz)
-                align_corners=False
-            ).view(1, 3, -1).transpose(-1, -2)[..., [1, 0, 2]]      # (N, C: yxz, 1, 1, V) -> (N, V, C: xyz)
-            verts = (verts / 2 + 0.5) * df_pred.shape[-1]   # NDC space to pixel space
-            x, y, z = verts[0].numpy().T
-            u, v, w = mesh_grad[0].numpy().T
+            # calculate the distance field gradient
+            direction = torch.gradient(-df_pred[-1], dim=(0, 1, 2), edge_order=1)
+            direction = torch.stack(direction, dim=0)
+            direction = direction / direction.norm(dim=0, keepdim=True)
+            direction[torch.isnan(direction)] = 0
+            direction[torch.isinf(direction)] = 0
+            verts = 2 * (mesh_pred.verts_padded() / df_pred.shape[-1] - 0.5)
+            offset = direction * df_pred[-1].unsqueeze(0)
+            offset = F.grid_sample(
+                offset.unsqueeze(0).permute(0, 1, 4, 2, 3),
+                verts.unsqueeze(1).unsqueeze(1),
+                align_corners=False, padding_mode="zeros"
+            ).view(1, 3, -1).transpose(-1, -2)[0, :, [1, 0, 2]]
+
+            x, y, z = mesh_pred.verts_packed().T
+            u, v, w = offset.T
             fig.add_trace(go.Cone(
                 x=x, y=y, z=z,
                 u=u, v=v, w=w,
-                colorscale="Viridis", sizemode="scaled", sizeref=1, showscale=True
+                colorscale="Viridis", showscale=True,
+                sizeref=1, name="df_grad"
+            ))
+        else:
+            # draw the zero-level set from the df_pred
+            mesh = matrix_to_marching_cubes((df_pred[-1].cpu().numpy() <= 1))
+            verts, faces = mesh.vertices, mesh.faces
+            if seg_true is not None:
+                verts *= seg_true.shape[-1] / df_pred.shape[-1]
+            y, x, z = verts.T
+            I, J, K = faces.T
+            fig.add_trace(go.Mesh3d(
+                x=x, y=y, z=z,
+                i=I, j=J, k=K,
+                color="gray",
+                opacity=0.25,
+                name="df_pred"
             ))
 
-    # if mesh_pred is not None or seg_pred is not None:
-    #     fig.write_html(f"{'seg_true vs mesh_pred' if mesh_pred is not None else 'seg_true vs seg_pred'}.html")
+        if seg_true is not None:
+            # plot the center of lv and rv from the distance field
+            for i, name in zip([1, 2], ["lv", "rv"]):
+                center = torch.nonzero(df_pred[i] <= 1).float().mean(0)
+                fig.add_trace(go.Scatter3d(
+                    x=[center[1].item()], y=[center[0].item()], z=[center[2].item()],
+                    mode="markers", marker=dict(size=5, color="blue"),
+                    name=f"center_{name}"
+                ))
+            
+            # # find the miteral valve centroid
+            # lv = (df_pred[1] == 1)
+            # myo_no_lv = (df_pred[0] == 1)
+            # mv = (lv | myo_no_lv) ^ myo_no_lv
+            # mv_c = torch.nonzero(mv).float().mean(0)
+            # fig.add_trace(go.Scatter3d(
+            #     x=[mv_c[1]], y=[mv_c[0]], z=[mv_c[2]],
+            #     mode="markers", marker=dict(size=5, color="red"),
+            #     name="center_mv"
+            # ))
 
+            # # find the tricuspid valve & pulmonary valve centroid
+            # rv = (df_pred[3] == 1)
+            # myo_no_rv = (df_pred[2] == 1)
+            # rvv = (rv | myo_no_rv) ^ myo_no_rv
+            # rvv = RemoveSmallObjects(min_size=8)(rvv.unsqueeze(0)).squeeze(0)
+            # rvv_c = torch.nonzero(rvv).float()
+
+            # cluster_centers, *_ = find_cluster_centers(rvv_c, max_clusters=4)
+            
+            # for center in cluster_centers:
+            #     fig.add_trace(go.Scatter3d(
+            #         x=[center[1].item()], y=[center[0].item()], z=[center[2].item()],
+            #         mode="markers", marker=dict(size=5, color="green"),
+            #         name="center_rvv"
+            #     ))
+        
     return fig
+
 
 def draw_train_loss(train_loss: dict, super_params: Namespace, task_code: str, phase: str):
     sns.set_theme(style="whitegrid")
@@ -133,7 +227,7 @@ def draw_train_loss(train_loss: dict, super_params: Namespace, task_code: str, p
     df = pd.DataFrame(train_loss)
     df.set_index(df.index + 1, inplace=True)
     if phase == "gsn":
-        lambda_ = [super_params.lambda_0, super_params.lambda_1, super_params.lambda_2]
+        lambda_ = [super_params.lambda_0, super_params.lambda_1]
     else:
         lambda_ = [1]
     df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=0, how="any")

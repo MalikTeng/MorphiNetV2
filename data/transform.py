@@ -12,6 +12,7 @@ from monai.transforms import (
     RandZoomd,
     RandFlipd,
     Resized,
+    ResizeWithPadOrCropd,
     ScaleIntensityd,
     Spacingd,
     SpatialPadd,
@@ -25,7 +26,8 @@ __all__ = ["pre_transform"]
 
 def pre_transform(
         keys: tuple, modal: str, section: str, rotation: bool,
-        crop_window_size: list, pixdim: list, spacing: float = 2.0
+        crop_window_size: list, pixdim: list, spacing: float = 2.0,
+        **kwargs
 ):
     """
     Conducting pre-transformation that comprises multichannel conversion,
@@ -47,30 +49,49 @@ def pre_transform(
     ]
 
     # pre-transformation
+    target = kwargs.get("target")
+    target = target.lower() if target is not None else None
+    if target == "acdc":
+        # ACDC data is with different orientation
+        transforms.extend([
+            # isotropic resampling
+            Adjustd(keys, allow_missing_keys=True),
+            Spacingd(keys, [-1, spacing, spacing],
+                     mode=("bilinear", "nearest"), 
+                     allow_missing_keys=True),
+        ])
+    else:
+        transforms.extend([
+            Adjustd(keys, allow_missing_keys=True),
+            Spacingd(keys, 
+                    [spacing] * 3 if modal == "ct" else [spacing, spacing, -1], 
+                    mode=("bilinear", "nearest"), 
+                    allow_missing_keys=True),
+            Orientationd(keys, axcodes="RAS", allow_missing_keys=True),     # (D, W, H)
+        ])
     transforms.extend([
-        # isotropic resampling
-        Adjustd(keys, allow_missing_keys=True),
-        Spacingd(keys, 
-                [spacing] * 3 if modal == "ct" else [spacing, spacing, -1], 
-                mode=("bilinear", "nearest"), 
-                allow_missing_keys=True),
-        Orientationd(keys, axcodes="RAS", allow_missing_keys=True),     # (D, W, H)
         CopyItemsd(keys[1], names=f"{keys[1]}_ds"),         # keys: {"image", "label", "label_ds"}
 
         # distance field transformation
         # resampling and cropping                           keys: {"image", "label"}
-        Spacingd(f"{keys[1]}_ds", 
-                [-1] * 3 if modal == "ct" else [spacing, -1, -1],
+        Spacingd(f"{keys[1]}_ds", [spacing] * 3,
                 mode="nearest", padding_mode="zeros"),
-        CropForegroundd(f"{keys[1]}_ds", source_key=keys[1], margin=1),
+        CropForegroundd(f"{keys[1]}_ds", source_key=f"{keys[1]}_ds", margin=0),
         # create distance field from down-sampled label
-        Resized(
-            f"{keys[1]}_ds", int(crop_window_size[0] // pixdim[0]), 
-            size_mode="longest", mode="nearest"
+        Maskd([f"{keys[1]}_ds", f"{keys[1][:2]}"], allow_missing_keys=True),
+        FlexResized(
+            f"{keys[1]}_ds", 
+            (-1, crop_window_size[0], -1)
             ),
-        SpatialPadd(
-            f"{keys[1]}_ds", int(crop_window_size[0] // pixdim[0]),
-            method="symmetric", mode="minimum"
+        Resized(
+            f"{keys[1]}_ds", 
+            int(crop_window_size[0] // pixdim[0]), 
+            size_mode="longest", mode="nearest-exact"
+            ),
+        ResizeWithPadOrCropd(
+            f"{keys[1]}_ds", 
+            int(crop_window_size[0] // pixdim[0]), 
+            mode="constant", value=0
             ),
         DFConvertd(f"{keys[1]}_ds"),                        # keys: {"image", "label", "df"}
     ])

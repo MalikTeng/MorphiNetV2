@@ -70,7 +70,7 @@ class Dataset(Randomizable, CacheDataset):
             ):
         self.set_random_state(seed=seed)
         self.indices: np.ndarray = np.array([])
-
+        
         CacheDataset.__init__(
             self, data, transform, cache_num=cache_num, cache_rate=cache_rate, num_workers=num_workers,
             )

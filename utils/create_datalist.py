@@ -10,7 +10,7 @@
 # limitations under the License.
 
 import json
-import os, shutil
+import os, glob, shutil
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 
 import numpy as np
@@ -41,12 +41,11 @@ def create_dataset_json(
     }
     data_json_new["labels"] = labels
 
-    train_list = set([case.replace(label_file_extension, '') for case in os.listdir(dataset_input_dir + "/labelsTr")])   # seperate train and valid set on a patient-bases
-    train_list = np.array(list(train_list))
-
-    np.random.shuffle(train_list)
-    # train_list, test_list = train_list[:int(len(train_list)*0.8)], train_list[int(len(train_list)*0.8):]
-    test_list = train_list.copy()
+    patient_list = set([case.replace(label_file_extension, '').split("frame")[0] for case in os.listdir(dataset_input_dir + "/labelsTr")])   # seperate train and valid set on a patient-bases
+    patient_list = list(patient_list)
+    train_list, test_list = patient_list[:int(len(patient_list)*0.8)], patient_list[int(len(patient_list)*0.8):]
+    train_list = [os.path.basename(i).replace(label_file_extension, '') for case in train_list for i in glob.glob(dataset_input_dir + f"/labelsTr/{case}*")]
+    test_list = [os.path.basename(i).replace(label_file_extension, '') for case in test_list for i in glob.glob(dataset_input_dir + f"/labelsTr/{case}*")]
 
     data_json_new["training"] = [
         {
@@ -138,19 +137,17 @@ if __name__ == "__main__":
     
     # change these with info for the task you want to update
     parser.add_argument("-input_dir", "--input_dir", type=str, 
-                        # default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/")
-                        default="/mnt/data/Experiment/nnUNet/nnUNet_raw/")
+                        default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/")
     parser.add_argument("-file_extension", "--file_extension", type=str, 
                         default=".nii.gz", help="the file extension of the data (.nii.gz / .nrrd)")
     parser.add_argument("-task_name", "--task_name", type=str, 
-                        # default="Dataset010_CAP_SAX_NRRD", help="the task name")
-                        default="Dataset022_MMWHS_CT", help="the task name")
+                        default="Dataset021_ACDC", help="the task name")
     parser.add_argument("-d", "--description", help="the task description",
-                        default="MMWHS CT image data w/ cross-validation")
+                        default="ACDC cine MR SAX image data w/o cross-validation")
     parser.add_argument("-l", "--labels", type=json.loads, help="the label name",
                         default='{"0": "background", "1": "lv", "2": "lv-myo", "3": "rv", "4": "rv-myo"}')
     parser.add_argument("-m", "--modality", type=str, 
-                        default="CT", help="the modality name")
+                        default="MR", help="the modality name")
     
     parser.add_argument("-output_dir", "--output_dir", type=str, 
                         default="dataset/")

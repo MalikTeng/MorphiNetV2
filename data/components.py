@@ -29,21 +29,23 @@ class Maskd(MapTransform):
             else:
                 array = array.get_array()
 
-                if data["modal"] == "ct" and key == "pred":
+                if data["modal"] == "ct" and "pred" in key:
                     # mask the CTA images near the basal and apex plane
                     mask = np.zeros_like(array).astype(bool)
-                    mask[:, 12:-12] = True
+                    mask[:, 6:-6] = True
                     array[~mask] = array.min()
 
-                    data[key] = MetaTensor(array, affine=data[key].affine)
+                    data[key] = MetaTensor(array, affine=data[key].affine, 
+                                           applied_operations=data[key].applied_operations)
                 
                 elif data["modal"] == "mr":
                     # pad slices on the top and bottom of the image
-                    array = np.pad(array, ((0, 0), (12, 12), (0, 0), (0, 0)), mode="constant", constant_values=array.min())
+                    array = np.pad(array, ((0, 0), (6, 6), (0, 0), (0, 0)), mode="constant", constant_values=array.min())
                     # update the affine
                     affine = data[key].affine.clone()
-                    affine[:3, -1] -= 12 * data[key].pixdim[0]
-                    data[key] = MetaTensor(array, affine=affine)
+                    affine[:3, -1] -= 6 * data[key].pixdim[0]
+                    data[key] = MetaTensor(array, affine=affine,
+                                           applied_operations=data[key].applied_operations)
 
 
         return data
@@ -88,33 +90,41 @@ class Adjustd(MapTransform):
 
 class FlexResized(MapTransform):
     """
-    resize 3D image and label by slices rather than volume.
+    resize 3D image and label regarding designated axis.
     """
-    def __init__(self, keys: KeysCollection, size: int, modal: str, down_sampled: bool, allow_missing_keys: bool = False) -> None:
+    def __init__(self, keys: KeysCollection, size: tuple, allow_missing_keys: bool = False) -> None:
         super().__init__(keys, allow_missing_keys)
-        self.size = int(size)
-        self.modal = modal
-        self.down_sampled = down_sampled
+        self.size = np.array([i for i in map(int, size)])
+        self.allow_missing_keys = allow_missing_keys
 
     def __call__(self, data):
-        if self.modal == "ct" or self.down_sampled:
-            if self.down_sampled:
-                keys = self.keys[0]
-                mode = "nearest"
-            else:
-                keys = self.keys
-                mode = ("bilinear", "nearest")
+        if len(self.keys) == 2:
+            keys = []
+            for key, tag in zip(self.keys, ["pred", "label"]):
+                if (tag in key) and (key in data):
+                    keys.append(key)
+                elif (key not in data) and self.allow_missing_keys:
+                    keys.append(None)
+                else:
+                    raise KeyError(f"key: {key} should contain {tag}.")
+            tag_pred = keys[0]
+            tag_label = keys[1]
+        elif len(self.keys) == 1:
+            assert "label" in self.keys[0], f"key: {self.keys[0]} should contain label."
+            tag_pred = None
+            tag_label = self.keys[0]
 
-            data = Resized(keys, self.size, size_mode="longest", mode=mode)(data)
+        data_shape = data[tag_label].get_array().shape[1:]
+        self.size = np.where(self.size == -1, data_shape, self.size)
+        rescale_ratio = max([s / d for s, d in zip(self.size, data_shape)])
+        new_shape = [np.ceil(d * rescale_ratio).astype(np.uint8) for d in data_shape]
 
-            return data
-        
+        assert new_shape[1] == self.size[1], f"new shape: {new_shape}, crop window size: {self.size}"
+
+        if tag_pred is not None:
+            data = Resized([tag_pred, tag_label], new_shape, size_mode="all", mode=("bilinear", "nearest"))(data)
         else:
-            data_shape = data[self.keys[0]].get_array().shape[1:-1]
-            rescale_ratio = self.size / max(data_shape)
-            new_shape = [np.ceil(s * rescale_ratio).astype(np.uint8) for s in data_shape] + [-1]
-
-            data = Resized(self.keys, new_shape, size_mode="all", mode=("bilinear", "nearest"))(data)
+            data = Resized([tag_label], new_shape, size_mode="all", mode="nearest")(data)
 
         return data
 
@@ -150,13 +160,13 @@ class DFConvertd(MapTransform):
 
         # four classes (background: 0, left ventricle: 1, myocardium: 2, right ventricle: 3)
         foreground = label > 0
+        lv = label == 1
         myo = label == 2
+        rv = label == 3
 
         df = []
-        for c in [foreground, myo]:
-            df_class = distance_transform_edt(c.to(torch.float32)) +\
-                distance_transform_edt(1 - c.to(torch.float32))
-            # df_class = distance_transform_edt(1 - c.to(torch.float32))
+        for c in [foreground, lv, rv, myo]:
+            df_class = distance_transform_edt(c) + distance_transform_edt(~c)
             df.append(df_class[:, None])
 
         df = MetaTensor(torch.cat(df, dim=1), affine=data[self.key].affine)

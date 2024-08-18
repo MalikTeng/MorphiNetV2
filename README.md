@@ -112,7 +112,7 @@ $ python main.py \
     --mr_json_dir ./dataset/dataset_taskXX_f0.json # dataset file for CMR data \
     --mr_data_dir /path/to/preprocessed/CMR/data \
 
-    --control_mesh_dir ./template/template_mesh-myo.obj \
+    --template_mesh_dir ./template/template_mesh-myo.obj \
     --subdiv_levels 2 \         # the number of GSN layers equates the subdivision level in a Loop surface subdivision method
 
     --use_ckpt /path/to/your/network/check_point/ \
@@ -124,9 +124,8 @@ $ python main.py \
     --hidden_features_gsn 64 \  # size of hidden features for GSN layers
     --pixdim 4 4 4 \            # volume spacing of downsized latent feature from the last UNet layer
     --lambda_0 2.07 \           # coefficient for Chamfer distance term in loss
-    --lambda_1 0.89 \           # for point-to-surface term
-    --lambda_2 2.79 \           # for Laplacian smoothing term
-    --temperature 2.42 \        # temperature for warping template mesh in the learnt distance field
+    --lambda_1 0.89 \           # for Laplacian smoothing term
+    --iteration 5 \             # iterations for warping template mesh in the learnt distance field
     --lr 0.001 \                # learning rate
     --batch_size 1 \            # batch size, unfortunately, only support batch size of 1
     --mode online \             # online mode for wandb, can be 'online', 'offline', or 'disabled'
@@ -158,7 +157,7 @@ $ python test.py \
     \
     --output_dir /path/to/your/output/directory \
     --ckpt_dir /path/to/your/network/check_point \
-    --control_mesh_dir ./template/template_mesh-myo.obj \
+    --template_mesh_dir ./template/template_mesh-myo.obj \
     \
     --_4d \                                         # if your data is 4D, add this flag
     --_mr                                           # if you want to train the network solely on MR image data, add this flag

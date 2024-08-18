@@ -88,20 +88,23 @@ if __name__ == '__main__':
             'save_on': {
                 'value': 'sct'
             },
+            'ct_ratio': {
+                'value': 1.0
+            },
             '_4d': {
                 'value': False
             },
-            'control_mesh_dir': {
+            'template_mesh_dir': {
                 'value': '/home/yd21/Documents/MorphiNet/template/template_mesh-myo.obj'
             },
             'max_epochs': {
-                'value': 200
+                'value': 120
             },
             'pretrain_epochs': {
-                'value': 100
+                'value': 1
             },
             'train_epochs': {
-                'value': 150
+                'value': 81
             },
             'val_interval': {
                 'value': 10
@@ -126,23 +129,18 @@ if __name__ == '__main__':
             },
             'lambda_0': {
                 'distribution': 'uniform',
-                'min': 0.5,
-                'max': 3.0
+                'min': 0.1,
+                'max': 1.0
             },
             'lambda_1': {
                 'distribution': 'uniform',
-                'min': 0.5,
-                'max': 3.0
+                'min': 0.1,
+                'max': 1.0
             },
-            'lambda_2': {
-                'distribution': 'uniform',
-                'min': 0.5,
-                'max': 3.0
-            },
-            "temperature": {
-                "distribution": "uniform",
-                "min": 0.5,
-                "max": 3.0
+            "iteration": {
+                "distribution": "int_uniform",
+                "min": 5,
+                "max": 15
             },
             'ct_json_dir': {
                 'value': '/home/yd21/Documents/MorphiNet/dataset/dataset_task20_f0.json'
@@ -160,7 +158,7 @@ if __name__ == '__main__':
                 'value': '/mnt/data/Experiment/MorphiNet/Checkpoint'
             },
             'use_ckpt': {
-                'value': '/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2024-07-27-1302/'
+                'value': '/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2024-08-10-2338'
             },
             'out_dir': {
                 'value': '/mnt/data/Experiment/MorphiNet/Result'

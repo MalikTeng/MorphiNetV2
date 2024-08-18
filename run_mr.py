@@ -2,6 +2,7 @@ import os, sys, json, glob
 from collections import OrderedDict
 from itertools import chain
 from trimesh import Trimesh, load
+from trimesh.convex import convex_hull
 import numpy as np
 import nibabel as nib
 import torch
@@ -26,7 +27,7 @@ from monai.transforms import (
     Resized,
     Spacingd,
     SpatialPadd,
-    ScaleIntensityd,
+    ResizeWithPadOrCropd,
     EnsureTyped, 
 )
 from monai.transforms.utils import distance_transform_edt
@@ -49,6 +50,7 @@ class TrainPipeline:
             super_params,
             seed, num_workers,
             is_training=True,
+            **kwargs
         ):
         """
         :param 
@@ -62,6 +64,7 @@ class TrainPipeline:
         self.seed = seed
         self.num_workers = num_workers
         self.is_training = is_training
+        self.target = kwargs.get("target")
         set_determinism(seed=self.seed)
 
         if is_training:
@@ -74,7 +77,7 @@ class TrainPipeline:
                 {k: np.asarray([]) for k in ["total", "df"]}
             )
             self.gsn_loss = OrderedDict(
-                {k: np.asarray([]) for k in ["total", "chmf", "norm", "smooth"]}
+                {k: np.asarray([]) for k in ["total", "chmf", "smooth"]}
             )
             self.eval_df_score = OrderedDict(
                 {k: np.asarray([]) for k in ["myo"]}
@@ -94,29 +97,39 @@ class TrainPipeline:
         ])
         self.post_transform = Compose([
             Spacingd(["pred", "label"], [2.0, 2.0, 2.0], mode=("bilinear", "nearest"), allow_missing_keys=True),
-            CropForegroundd(["pred", "label"], source_key="label", allow_missing_keys=True),
+            CropForegroundd(["pred", "label"], source_key="label", margin=0, allow_missing_keys=True),
             Maskd(["pred", "label", "modal"], allow_missing_keys=True),
-            Resized(
-                ["pred", "label"],
-                self.super_params.crop_window_size[0], 
-                size_mode="longest", mode=("bilinear", "nearest-exact"),
-                align_corners=(False, None), allow_missing_keys=True
+            FlexResized(
+                ["pred", "label"], 
+                (-1, self.super_params.crop_window_size[0], -1), 
+                allow_missing_keys=True
                 ),
-            SpatialPadd(
-                ["pred", "label"],
+            Resized(
+                ["pred", "label"], 
                 self.super_params.crop_window_size[0], 
-                method="symmetric", mode="constant",
+                size_mode="longest", mode=("bilinear", "nearest-exact"), 
+                allow_missing_keys=True
+                ),
+            ResizeWithPadOrCropd(
+                ["pred", "label"],
+                self.super_params.crop_window_size,
+                mode="constant", value=0,
                 allow_missing_keys=True
                 ),
 
             EnsureTyped(["pred", "label"], device=DEVICE, allow_missing_keys=True),
         ])
 
-        self._data_warper(rotation=True)
+        if super_params.use_ckpt is None:
+            self._data_warper(rotation=True)
 
         # import control mesh (NDC space, [-1, 1]) to compute the subdivision matrix
-        template_mesh = load(super_params.control_mesh_dir)
-        self.mesh_label = torch.LongTensor(json.load(open(super_params.control_mesh_dir.replace(".obj", ".json"), "r"))).to(DEVICE)
+        template_mesh = load(super_params.template_mesh_dir)
+        centroid = template_mesh.bounds.mean(axis=0)
+        extent = template_mesh.bounds.ptp(axis=0)
+        template_mesh.apply_translation(-centroid)
+        template_mesh.apply_scale(2 / extent)
+        self._mesh_label(template_mesh)
         self.template_mesh = Meshes(
             verts=[torch.tensor(template_mesh.vertices, dtype=torch.float32)], 
             faces=[torch.tensor(template_mesh.faces, dtype=torch.int64)]
@@ -128,48 +141,68 @@ class TrainPipeline:
         self.rasterizer = Rasterize(self.super_params.crop_window_size) # tool for rasterizing mesh
 
 
+    def _mesh_label(self, mesh):
+        COLOR_MAPPING = {
+            (1, 0, 0): 0,   # LV-ENDO
+            (0, 1, 0): 1,   # RV-ENDO
+            (0, 0, 1): 2,   # LV-EPI
+            (1, 1, 0): 3,   # RV-EPI
+            (1, 0, 1): 4,   # MV & AAV
+            (0, 1, 1): 5,   # TV
+            (1, 1, 1): 6,   # PV
+            (0, 0, 0): 7,   # LEAVE OUT
+        }
+        vert_label = mesh.visual.vertex_colors[:, :3]
+        vert_label = np.where(vert_label <= 85, 0, 1)
+        vert_label = np.array([COLOR_MAPPING[tuple(c)] for c in vert_label])
+        self.vert_label = torch.tensor(vert_label, dtype=torch.long, device=DEVICE)
+        mesh_lv = convex_hull(mesh.vertices[np.any(np.stack([vert_label == i for i in [0]]), axis=0)])
+        mesh_rv = convex_hull(mesh.vertices[np.any(np.stack([vert_label == i for i in [1]]), axis=0)])
+        self.mesh_c = torch.tensor([mesh_lv.center_mass, mesh_rv.center_mass], device=DEVICE)
+
+
     def _data_warper(self, rotation:bool):
         
         if self.is_training or self.super_params.save_on == "cap":
             print(f"Preparing MR data {'with' if rotation else 'without'} rotation...")
             with open(self.super_params.mr_json_dir, "r") as f:
                 mr_train_transform, mr_valid_transform = self._prepare_transform(
-                    ["mr_image", "mr_label"], "mr", rotation
+                    ["mr_image", "mr_label"], "mr", rotation, target=self.target
                     )
                 mr_train_ds, mr_valid_ds, mr_test_ds = self._prepare_dataset(
-                    json.load(f), "mr", mr_train_transform, mr_valid_transform
+                    json.load(f), mr_train_transform, mr_valid_transform
                 )
                 self.mr_train_loader, self.mr_valid_loader, self.mr_test_loader = self._prepare_dataloader(
                     mr_train_ds, mr_valid_ds, mr_test_ds
                 )
 
 
-    def _prepare_transform(self, keys, modal, rotation):
+    def _prepare_transform(self, keys, modal, rotation, **kwargs):
         train_transform = pre_transform(
             keys, modal, "train", rotation,
             self.super_params.crop_window_size,
-            self.super_params.pixdim
+            self.super_params.pixdim, **kwargs
             )
         valid_transform = pre_transform(
             keys, modal, "valid", rotation,
             self.super_params.crop_window_size,
-            self.super_params.pixdim
+            self.super_params.pixdim, **kwargs
             )
         
         return train_transform, valid_transform
 
 
-    def _remap_abs_path(self, data_list, modal, phase):
+    def _remap_abs_path(self, data_list, phase):
         return [{
             "mr_image": os.path.join(self.super_params.mr_data_dir, f"images{phase}", os.path.basename(d["image"])),
             "mr_label": os.path.join(self.super_params.mr_data_dir, f"labels{phase}", os.path.basename(d["label"])),
         } for d in data_list]
         
 
-    def _prepare_dataset(self, data_json, modal, train_transform, valid_transform):
-        train_data = self._remap_abs_path(data_json["train_fold0"], modal, "Tr")
-        valid_data = self._remap_abs_path(data_json["validation_fold0"], modal, "Tr")
-        test_data = self._remap_abs_path(data_json["test"], modal, "Ts")
+    def _prepare_dataset(self, data_json, train_transform, valid_transform):
+        train_data = self._remap_abs_path(data_json["train_fold0"], "Tr")
+        valid_data = self._remap_abs_path(data_json["validation_fold0"], "Tr")
+        test_data = self._remap_abs_path(data_json["test"], "Ts")
 
         if not self.is_training:
             train_ds = None
@@ -242,7 +275,7 @@ class TrainPipeline:
         ).to(DEVICE)
 
         # initialise the subdiv module
-        self.subdivided_faces = Subdivision(self.template_mesh, self.super_params.subdiv_levels, mesh_label=self.mesh_label) # create pre-computed subdivision matrix
+        self.subdivided_faces = Subdivision(self.template_mesh, self.super_params.subdiv_levels, mesh_label=self.vert_label) # create pre-computed subdivision matrix
         self.GSN = GSN(
             hidden_features=self.super_params.hidden_features_gsn, 
             num_layers=self.super_params.subdiv_levels if self.super_params.subdiv_levels > 0 else 2,
@@ -311,78 +344,312 @@ class TrainPipeline:
             return:
                 surface mesh with vertices and faces in NDC space [-1, 1].
         """
-        seg_true = (seg_true == 2).to(torch.float32)    # extract the myocardium
-        verts, faces = marching_cubes(
-            seg_true.squeeze(1).permute(0, 3, 1, 2), 
-            isolevel=0.1,
-            return_local_coords=True,
-        )
-        mesh_true = Meshes(verts, faces)
-        mesh_true = taubin_smoothing(mesh_true, 0.77, -0.34, 30)
+        seg_true_multi = [torch.any(torch.stack([seg_true == i for i in seg_idx]), dim=0) for seg_idx in [[1], [3], [2]]]   # lv, rv, myo
+
+        mesh_true = []
+        for seg_true_ in seg_true_multi:
+            verts, faces = marching_cubes(
+                seg_true_.squeeze(1).permute(0, 3, 1, 2).to(torch.float32), 
+                isolevel=0.1,
+                return_local_coords=True,
+            )
+            mesh_true.append(taubin_smoothing(Meshes(verts, faces), 0.77, -0.34, 30))
 
         return mesh_true
 
 
     @torch.no_grad()
-    def warp_control_mesh(self, df_preds):
+    def warp_template_mesh(self, df_preds):
         """
             input:
                 df preds: the predicted df.
             return:
                 warped control mesh with vertices and faces in NDC space.
         """
+
         b, *_, d = df_preds.shape
-        template_mesh = load(self.super_params.control_mesh_dir)
+
+        # def find_optimal_clusters_batch(points_batch, max_clusters=3):
+        #     batch_size = points_batch.shape[0]
+        #     optimal_clusters = torch.zeros(batch_size, dtype=torch.int64, device=points_batch.device)
+        #     kmeans_results = []
+            
+        #     for i in range(batch_size):
+        #         points = points_batch[i].cpu().numpy()
+        #         silhouette_scores = []
+        #         kmeans_models = []
+        #         for n_clusters in range(2, max_clusters + 1):
+        #             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        #             cluster_labels = kmeans.fit_predict(points)
+        #             silhouette_avg = silhouette_score(points, cluster_labels)
+        #             silhouette_scores.append(silhouette_avg)
+        #             kmeans_models.append(kmeans)
+                
+        #         best_index = silhouette_scores.index(max(silhouette_scores))
+        #         optimal_clusters[i] = best_index + 2
+        #         kmeans_results.append(kmeans_models[best_index])
+            
+        #     return optimal_clusters, kmeans_results
+
+        # def find_cluster_centers_and_normals_batch(point_clouds, max_clusters=3):
+        #     b, num_points, _ = point_clouds.shape
+
+        #     # Find the optimal number of clusters and KMeans results for each point cloud in the batch
+        #     n_clusters_batch, kmeans_results = find_optimal_clusters_batch(point_clouds, max_clusters)
+
+        #     max_n_clusters = n_clusters_batch.max().item()
+
+        #     # Initialize tensors to store cluster centers and normals
+        #     centers = torch.full((b, max_n_clusters, 3), float('nan'), device=DEVICE)
+        #     normals = torch.full((b, max_n_clusters, 3), float('nan'), device=DEVICE)
+
+        #     # Process all point clouds in parallel
+        #     for i in range(b):
+        #         kmeans = kmeans_results[i]
+        #         centers[i, :n_clusters_batch[i]] = torch.tensor(kmeans.cluster_centers_, device=DEVICE)
+                
+        #         # Get cluster labels for all points
+        #         labels = torch.tensor(kmeans.labels_, dtype=torch.long, device=DEVICE)
+                
+        #         # Compute centered points for all clusters at once
+        #         centered_points = point_clouds[i] - centers[i, labels]
+                
+        #         # Compute covariance matrices for all clusters
+        #         cov_matrices = torch.zeros(n_clusters_batch[i], 3, 3, device=DEVICE)
+        #         cov_matrices.index_add_(0, labels, centered_points.unsqueeze(2) * centered_points.unsqueeze(1))
+                
+        #         # Compute eigenvectors for all covariance matrices
+        #         _, eigenvectors = torch.linalg.eigh(cov_matrices)
+                
+        #         # The eigenvector corresponding to the smallest eigenvalue is the normal
+        #         cluster_normals = eigenvectors[:, :, 0]
+                
+        #         # Ensure normals point outward
+        #         mean_centered_points = torch.zeros(n_clusters_batch[i], 3, device=DEVICE)
+        #         mean_centered_points.index_add_(0, labels, centered_points)
+        #         count = torch.bincount(labels, minlength=n_clusters_batch[i]).float().unsqueeze(1)
+        #         mean_centered_points /= count
+                
+        #         dot_products = (cluster_normals * mean_centered_points).sum(dim=1)
+        #         cluster_normals[dot_products < 0] *= -1
+                
+        #         normals[i, :n_clusters_batch[i]] = cluster_normals
+
+        #     return centers, normals, n_clusters_batch
+
+        # def find_cluster_normal(point_clouds, cluster_centers):
+        #     # Compute centered points
+        #     centered_points = point_clouds - cluster_centers.unsqueeze(1)
+
+        #     # Compute covariance matrices
+        #     cov_matrices = torch.bmm(centered_points.transpose(1, 2), centered_points).to(torch.float32)
+
+        #     # Compute eigenvectors for all covariance matrices
+        #     _, eigenvectors = torch.linalg.eigh(cov_matrices)
+
+        #     # The eigenvector corresponding to the smallest eigenvalue is the normal
+        #     normals = eigenvectors[:, :, 0]
+
+        #     # Ensure normals point outward
+        #     mean_centered_points = centered_points.mean(dim=1)
+        #     dot_products = torch.sum(normals * mean_centered_points, dim=-1)
+        #     normals[dot_products < 0] *= -1
+
+        #     return normals
+            
+        # def find_closest_points(points, targets):
+        #     distances = torch.cdist(targets.unsqueeze(1), points)
+        #     closest_indices = distances.argmin(dim=2).squeeze(1)
+        #     return closest_indices
+
+        def find_rotation_matrix_xz(vector_msh, vector_df):
+            # Project vectors onto xz-plane
+            vector_msh_xz = torch.stack([vector_msh[:, 0], vector_msh[:, 2]], dim=1)
+            vector_df_xz = torch.stack([vector_df[:, 0], vector_df[:, 2]], dim=1)
+
+            # Normalize the projected vectors
+            vector_msh_xz = vector_msh_xz / torch.norm(vector_msh_xz, dim=1, keepdim=True)
+            vector_df_xz = vector_df_xz / torch.norm(vector_df_xz, dim=1, keepdim=True)
+
+            # Calculate the cosine of the angle between the projected vectors
+            cos_theta = torch.sum(vector_msh_xz * vector_df_xz, dim=1)
+
+            # Calculate the sine of the angle using the determinant of 2x2 matrix
+            sin_theta = vector_msh_xz[:, 0] * vector_df_xz[:, 1] - vector_msh_xz[:, 1] * vector_df_xz[:, 0]
+
+            # Create rotation matrices
+            R = torch.zeros(vector_msh.shape[0], 3, 3, device=vector_msh.device)
+            R[:, 0, 0] = cos_theta
+            R[:, 0, 2] = sin_theta
+            R[:, 1, 1] = 1
+            R[:, 2, 0] = -sin_theta
+            R[:, 2, 2] = cos_theta
+
+            return R
+
+        # def find_rotation_matrix_rodrigues(source_norm, target_norm):
+        #     """
+        #     Find the rotation matrix that rotates source_norm to target_norm.
+        #     If the angle is > 90 degrees, it aligns them on the same line.
+            
+        #     Args:
+        #     source_norm (torch.Tensor): Source normal vectors of shape (batch_size, 3)
+        #     target_norm (torch.Tensor): Target normal vectors of shape (batch_size, 3)
+            
+        #     Returns:
+        #     torch.Tensor: Rotation matrices of shape (batch_size, 3, 3)
+        #     """
+        #     batch_size = source_norm.shape[0]
+        #     device = source_norm.device
+
+        #     # Ensure input vectors are normalized
+        #     source_norm = F.normalize(source_norm, dim=1)
+        #     target_norm = F.normalize(target_norm, dim=1)
+
+        #     # Compute the dot product
+        #     dot_product = torch.sum(source_norm * target_norm, dim=1)
+
+        #     # If dot product is negative, flip the target vector
+        #     flip_mask = dot_product < 0
+        #     target_norm = torch.where(flip_mask.unsqueeze(1), -target_norm, target_norm)
+
+        #     # Recompute dot product after potential flipping
+        #     dot_product = torch.sum(source_norm * target_norm, dim=1)
+
+        #     # Compute the axis of rotation (cross product)
+        #     axis = torch.cross(source_norm, target_norm, dim=1)
+        #     axis_norm = torch.norm(axis, dim=1, keepdim=True)
+
+        #     # Clamp dot_product to [-1, 1] to avoid numerical issues
+        #     dot_product = torch.clamp(dot_product, -1.0, 1.0)
+
+        #     # Compute the angle
+        #     angle = torch.acos(dot_product)
+
+        #     # If the angle is very small, return identity matrix
+        #     identity = torch.eye(3, device=device).unsqueeze(0).repeat(batch_size, 1, 1)
+        #     small_angle_mask = axis_norm.squeeze(1) < 1e-6
+
+        #     # Handle cases where source and target are opposite
+        #     opposite_mask = (1.0 - dot_product) < 1e-6
+        #     if opposite_mask.any():
+        #         # Find an arbitrary perpendicular vector for rotation axis
+        #         arbitrary_vec = torch.ones_like(source_norm)
+        #         arbitrary_vec[:, 2] = -(source_norm[:, 0] + source_norm[:, 1]) / source_norm[:, 2]
+        #         arbitrary_vec = F.normalize(arbitrary_vec, dim=1)
+        #         axis = torch.where(opposite_mask.unsqueeze(1), arbitrary_vec, axis)
+
+        #     # Normalize the axis
+        #     axis = F.normalize(axis, dim=1)
+
+        #     # Compute rotation matrix using Rodrigues' rotation formula
+        #     k_times_angle = axis * angle.unsqueeze(1)
+        #     k_cross = torch.zeros(batch_size, 3, 3, device=device)
+        #     k_cross[:, 0, 1], k_cross[:, 0, 2] = -axis[:, 2], axis[:, 1]
+        #     k_cross[:, 1, 0], k_cross[:, 1, 2] = axis[:, 2], -axis[:, 0]
+        #     k_cross[:, 2, 0], k_cross[:, 2, 1] = -axis[:, 1], axis[:, 0]
+
+        #     rotation_matrix = (
+        #         identity +
+        #         torch.sin(angle).unsqueeze(1).unsqueeze(2) * k_cross +
+        #         (1 - torch.cos(angle)).unsqueeze(1).unsqueeze(2) * torch.bmm(k_cross, k_cross)
+        #     )
+
+        #     # Use identity matrix for small angles
+        #     rotation_matrix = torch.where(small_angle_mask.unsqueeze(1).unsqueeze(2), identity, rotation_matrix)
+
+        #     return rotation_matrix
+
+        # def gauss_newton_optimization(L, verts):
+        #     # use inexact Gauss-Newton method to update the vertices
+        #     L = L.to_sparse_csr()
+        #     delta = L.mm(rearrange(verts, 'b n c -> (b n) c'))
+        #     LTL = torch.matmul(L.to_dense().t(), L.to_dense())
+        #     LTL.diagonal().add_(1e-6)
+        #     U, S, Vt = torch.linalg.svd(LTL.to(torch.float32))
+        #     S_inv = torch.where(S > 1e-10, 1.0 / S, torch.zeros_like(S))
+        #     verts = torch.matmul(Vt.t(), torch.matmul(U.t(), torch.matmul(L.to_dense().t(), delta)) * S_inv.unsqueeze(1)).to(torch.float32)
+        #     verts = rearrange(verts, '(b n) c -> b n c', b=b)
+
+        #     return verts
+
+        template_mesh = load(self.super_params.template_mesh_dir)
         template_mesh = Meshes(
             verts=[torch.tensor(template_mesh.vertices, dtype=torch.float32)], 
             faces=[torch.tensor(template_mesh.faces, dtype=torch.int64)]
             ).to(DEVICE).extend(b)
+        
+        # sample and apply offset in two-stage manner
+        # stage 1: smooth global offset
         verts = template_mesh.verts_padded()
+        # find the rotation matrix that makes the centroid vector are in the same direction
+        df_c = torch.stack([2 * (torch.nonzero(df <= 1).to(torch.float32).mean(0) / d - 0.5) 
+                            for df in df_preds[:, 2]])[:, [1, 0, 2]]   # reorder dimensions
+        mesh_c = self.mesh_c[1].unsqueeze(0).expand(b, -1)
+        R = find_rotation_matrix_xz(mesh_c, df_c)
+        verts = torch.bmm(R, verts.transpose(1, 2)).transpose(1, 2).to(torch.float32)
 
-        # sample and apply offset in three-stage manner: smooth global -> sharp local
-        for stage in range(3):
+        template_mesh = template_mesh.update_padded(verts)
 
-            df_pred = df_preds[:, 0] if stage < 2 else df_preds[:, 1]      # foreground and myocardium
+        # verts = template_mesh.verts_padded()
+        # # align the tricuspid valve & pulmonary valve centroid & normal
+        # df_rv_c = ((df_preds[:, 3] == 1) | (df_preds[:, 2] == 1)) ^ (df_preds[:, 2] == 1)
+        # df_rv_c = torch.cat([RemoveSmallObjects(min_size=8)(i.unsqueeze(0)) for i in df_rv_c], dim=0)
+        # # convert binary masks to point clouds
+        # df_rv_c = [2 * (torch.nonzero(df).to(torch.float32) / d - 0.5) for df in df_rv_c]
+        # df_rv_c = torch.nn.utils.rnn.pad_sequence(df_rv_c, batch_first=True)
+        # df_rv_c = df_rv_c[:, :, [1, 0, 2]]  # Reorder dimensions
+        # # find cluster centers
+        # cluster_centers, cluster_normals, _ = find_cluster_centers_and_normals_batch(df_rv_c, max_clusters=4)
+        # # find the tricuspid valve and pulmonary valve centroid
+        # mesh_tv = verts[:, self.vert_label == 5]
+        # mesh_tv_c = mesh_tv.mean(1)
+        # mesh_pv = verts[:, self.vert_label == 6]
+        # mesh_pv_c = mesh_pv.mean(1)
+        # # find closest cluster centers to mesh centroids
+        # idx_tv_c = find_closest_points(cluster_centers, mesh_tv_c)
+        # idx_pv_c = find_closest_points(cluster_centers, mesh_pv_c)
+        # df_tv_c = cluster_centers[torch.arange(cluster_centers.size(0)), idx_tv_c]
+        # df_tv_norm = cluster_normals[torch.arange(cluster_normals.size(0)), idx_tv_c]
+        # df_pv_c = cluster_centers[torch.arange(cluster_centers.size(0)), idx_pv_c]
+        # df_pv_norm = cluster_normals[torch.arange(cluster_normals.size(0)), idx_pv_c]
+        # # adjust vertices
+        # mesh_tv_norm = find_cluster_normal(mesh_tv, mesh_tv_c)
+        # R_tv = find_rotation_matrix_rodrigues(mesh_tv_norm, df_tv_norm)
+        # verts[:, self.vert_label == 5] = torch.bmm(R_tv, (mesh_tv - mesh_tv_c.unsqueeze(1)).transpose(1, 2)).transpose(1, 2) + df_tv_c.unsqueeze(1)
+        # mesh_pv_norm = find_cluster_normal(mesh_pv, mesh_pv_c)
+        # R_pv = find_rotation_matrix_rodrigues(mesh_pv_norm, df_pv_norm)
+        # verts[:, self.vert_label == 6] = torch.bmm(R_pv, (mesh_pv - mesh_pv_c.unsqueeze(1)).transpose(1, 2)).transpose(1, 2) + df_pv_c.unsqueeze(1)
+
+        # verts = gauss_newton_optimization(template_mesh.laplacian_packed(), verts)
+        # template_mesh = template_mesh.update_padded(verts)
+
+        # stage 2: local offset
+        verts = template_mesh.verts_padded()
+        for i, l in zip([1, 0, 2, 0], [[0], [2], [1], [3]]): # lv-epi, lv, rv, rv-epi
+            df_pred = df_preds[:, i]
+            verts_idx = torch.any(torch.stack([self.vert_label == i for i in l]), dim=0)
+
             # calculate the gradient of the df
             direction = torch.gradient(-df_pred, dim=(1, 2, 3), edge_order=1)
             direction = torch.stack(direction, dim=1)
             direction /= (torch.norm(direction, dim=1, keepdim=True) + 1e-16)
             direction[torch.isnan(direction)] = 0
             direction[torch.isinf(direction)] = 0
-
-            if stage == 0:
-                # sampled offset is very fuzzy and apply it directly to the control mesh will break its manifold, so try average the offset and apply it
-                offset = torch.stack([2 * (torch.nonzero(df <= 1).to(torch.float32).mean(0) / df.shape[-1] - 0.5) for df in df_pred])[:, [1, 0, 2]] -\
-                      verts.mean(1)   # i, j, k -> x, y, z
-                offset = offset.unsqueeze(1).expand(-1, template_mesh._V, -1)
-                verts += offset
-
-            else:
-                # too large the offset that applies close to valve will break the manifold, so try to reduce the offset with equation y = x * e^(-|x|/t) where t is temperature term
-                offset = direction * df_pred.unsqueeze(1)
+            
+            for _ in range(self.super_params.iteration):
                 offset = F.grid_sample(
-                    offset.permute(0, 1, 4, 2, 3), 
-                    verts.unsqueeze(1).unsqueeze(1),
-                    align_corners=True
+                    direction.permute(0, 1, 4, 2, 3), 
+                    verts[:, verts_idx].unsqueeze(1).unsqueeze(1),
+                    align_corners=False, padding_mode="zeros"
                 ).view(b, 3, -1).transpose(-1, -2)[..., [1, 0, 2]]
-                offset = offset * torch.exp(-abs(offset) / self.super_params.temperature)
 
-                if stage == 1:
-                    norm = torch.norm(offset, dim=-1, keepdim=True)
-                    offset = offset / (norm + 1e-16) * torch.median(norm, dim=1, keepdim=True).values
-                    # transform from NDC space to pixel space
-                    verts = (verts / 2 + 0.5) * d
-                    verts += offset
-                    # transform verts back to NDC space
-                    verts = 2 * (verts / d - 0.5)
+                # transform from NDC space to pixel space
+                verts = d * (verts / 2 + 0.5)
+                verts[:, verts_idx] += offset
+                # transform verts back to NDC space
+                verts = 2 * (verts / d - 0.5)
 
-                else:
-                    # transform from NDC space to pixel space
-                    verts = (verts / 2 + 0.5) * d
-                    verts += offset
-
-        # transform verts back to NDC space and update the control mesh
-        verts = 2 * (verts / d - 0.5)
         template_mesh = template_mesh.update_padded(verts)
 
         return template_mesh
@@ -513,7 +780,7 @@ class TrainPipeline:
             self.decoder.eval()
             self.GSN.train()
 
-            finetune_loss_epoch = dict(total=0.0, chmf=0.0, norm=0.0, smooth=0.0)
+            finetune_loss_epoch = dict(total=0.0, chmf=0.0, smooth=0.0)
             for step, data_mr in enumerate(self.mr_train_loader):
                 img_mr, seg_true_mr = (
                     data_mr["mr_image"].to(DEVICE),
@@ -541,32 +808,33 @@ class TrainPipeline:
                     seg_pred_mr_ds = F.interpolate(seg_pred_mr.as_tensor(), 
                                                     scale_factor=1 / self.super_params.pixdim[-1], 
                                                     mode="trilinear")
-                    mask = (torch.argmax(seg_pred_mr_ds, dim=1, keepdim=True) == 0).detach().to(torch.float32)
-                    seg_pred_mr_ds = (1 - mask) * seg_pred_mr_ds + mask * self.decoder(seg_pred_mr_ds)
+                    mask = (torch.argmax(seg_pred_mr_ds, dim=1, keepdim=True) == 0).detach()
+                    seg_pred_mr_ds = ~mask * seg_pred_mr_ds + mask * self.decoder(seg_pred_mr_ds)
                     seg_pred_mr_ds = torch.stack([self.pred_transform(i) for i in seg_pred_mr_ds])
-                    foreground = (seg_pred_mr_ds > 0).to(torch.float32)
-                    myo = (seg_pred_mr_ds == 2).to(torch.float32)
+                    foreground = (seg_pred_mr_ds > 0)
+                    lv = (seg_pred_mr_ds == 1)
+                    rv = (seg_pred_mr_ds == 3)
+                    myo = (seg_pred_mr_ds == 2)
                     df_pred_mr = torch.stack([
-                        distance_transform_edt(i[:, 0]) + distance_transform_edt(1 - i[:, 0]) 
-                        for i in [foreground, myo]], dim=1)
+                        distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
+                        for i in [foreground, lv, rv, myo]], dim=1)
                     
-                    template_mesh = self.warp_control_mesh(df_pred_mr.detach())
+                    template_mesh = self.warp_template_mesh(df_pred_mr.detach())
                     level_outs = self.GSN(template_mesh, self.subdivided_faces.faces_levels)
 
-                    loss_chmf, loss_norm, loss_smooth = 0.0, 0.0, 0.0
+                    loss_chmf, loss_smooth = 0.0, 0.0
                     for l, subdiv_mesh in enumerate(level_outs):
-                        for i, mesh in enumerate(subdiv_mesh):
+                        verts_label = self.subdivided_faces.labels_levels[l]
+                        for msh_idx, subdiv_idx in enumerate([[0], [1], [2, 3]]):  # lv, rv, myo
                             loss_chmf += chamfer_distance(
-                                mesh_true_mr[i].verts_padded(), mesh.verts_padded(),
-                                point_reduction="mean", batch_reduction="mean")[0]
-                            pointcloud_pred_mr = mesh.verts_packed()[mesh.faces_packed()].mean(1).unsqueeze(0)
-                            loss_norm += surface_crossing_loss(mesh, pointcloud_pred_mr.detach(), self.subdivided_faces.labels_levels[l],
-                                                            min_triangle_area=1e-3)
-                            loss_smooth += mesh_laplacian_smoothing(mesh, method="uniform")
+                                subdiv_mesh.verts_padded()[:, torch.any(torch.stack([verts_label == i for i in subdiv_idx]), dim=0)], 
+                                mesh_true_mr[msh_idx].verts_padded(),
+                                point_reduction="mean", batch_reduction="mean"
+                                )[0] 
+                        loss_smooth += mesh_laplacian_smoothing(subdiv_mesh, method="cotcurv")
                     
                     loss = self.super_params.lambda_0 * loss_chmf +\
-                            self.super_params.lambda_1 * loss_norm +\
-                                self.super_params.lambda_2 * loss_smooth
+                        self.super_params.lambda_1 * loss_smooth
 
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer_gsn)
@@ -574,7 +842,6 @@ class TrainPipeline:
                 
                 finetune_loss_epoch["total"] += loss.item()
                 finetune_loss_epoch["chmf"] += loss_chmf.item()
-                finetune_loss_epoch["norm"] += loss_norm.item()
                 finetune_loss_epoch["smooth"] += loss_smooth.item()
 
             for k, v in finetune_loss_epoch.items():
@@ -634,19 +901,22 @@ class TrainPipeline:
                 seg_pred_ds = F.interpolate(seg_pred.as_tensor(), 
                                                 scale_factor=1 / self.super_params.pixdim[-1], 
                                                 mode="trilinear")
-                mask = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0).detach().to(torch.float32)
-                seg_pred_ds = (1 - mask) * seg_pred_ds + mask * self.decoder(seg_pred_ds)
+                mask = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0).detach()
+                seg_pred_ds = ~mask * seg_pred_ds + mask * self.decoder(seg_pred_ds)
                 seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
-                foreground = (seg_pred_ds > 0).to(torch.float32)
-                myo = (seg_pred_ds == 2).to(torch.float32)
+                foreground = (seg_pred_ds > 0)
+                lv = (seg_pred_ds == 1)
+                rv = (seg_pred_ds == 3)
+                myo = (seg_pred_ds == 2)
                 df_pred = torch.stack([
-                    distance_transform_edt(i[:, 0]) + distance_transform_edt(1 - i[:, 0]) 
-                    for i in [foreground, myo]], dim=1)
+                    distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
+                    for i in [foreground, lv, rv, myo]], dim=1)
                 
                 df_metric_batch_decoder(df_pred, df_true)
 
                 # evaluate the error between subdivided mesh and the true segmentation
-                template_mesh = self.warp_control_mesh(df_pred) 
+                template_mesh = self.warp_template_mesh(df_pred)
+                template_mesh_ = template_mesh.clone()
 
                 subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
 
@@ -656,14 +926,12 @@ class TrainPipeline:
                     for pred_mesh in subdiv_mesh
                     ], dim=0)     
                 seg_true = torch.stack([i["label"] for i in seg_data], dim=0)
-                seg_true = (seg_true == 2).to(torch.float32)
-                msh_metric_batch_decoder(voxeld_mesh, seg_true)
+                msh_metric_batch_decoder(voxeld_mesh, (seg_true == 2).to(torch.float32))
 
                 if step == choice_case:
-                    df_true = df_true[:, 1].unsqueeze(1)
-                    df_pred = df_pred[:, 1].unsqueeze(1)
-                    seg_pred = (torch.argmax(seg_pred, dim=1, keepdim=True) == 2).to(torch.float32)
-                    seg_pred_ds = (seg_pred_ds == 2).to(torch.float32)
+                    df_true = df_true
+                    df_pred = df_pred
+                    seg_pred = torch.stack([self.pred_transform(i) for i in seg_pred])
 
                     cached_data = {
                         "df_true": df_true[0].cpu(),
@@ -675,6 +943,7 @@ class TrainPipeline:
                                                     scale_factor=1 / self.super_params.pixdim[-1], 
                                                     mode="nearest-exact")[0].cpu(),
                         "subdiv_mesh": subdiv_mesh[0].cpu(),
+                        "template_mesh": template_mesh_[0].cpu(),
                     }
 
         # log dice score
@@ -705,7 +974,7 @@ class TrainPipeline:
             torch.save(self.GSN.state_dict(), f"{ckpt_weight_path}/best_GSN.pth")
             # save the subdivided_faces.faces_levels as pth file
             for level, faces in enumerate(self.subdivided_faces.faces_levels):
-                torch.save(faces, f"{ckpt_weight_path}/{epoch+1}_subdivided_faces_l{level}.pth")
+                torch.save(faces, f"{ckpt_weight_path}/best_subdivided_faces_l{level}.pth")
             self.best_eval_score = eval_score_epoch
 
             # save visualization when the eval score is the best
@@ -725,15 +994,16 @@ class TrainPipeline:
                         )),
                     "template vs df_pred": wandb.Plotly(draw_plotly(
                         df_pred=cached_data["df_pred"],
-                        mesh_pred=self.template_mesh.clone().cpu(),
+                        mesh_pred=cached_data["template_mesh"],
+                        mesh_c=self.mesh_c
                         )),
                     "seg_true_ds vs df_pred": wandb.Plotly(draw_plotly(
                         seg_true=cached_data["seg_true_ds"], 
                         df_pred=cached_data["df_pred"],
                         )),
                     "df true vs pred": wandb.Plotly(ff.create_distplot(
-                        [cached_data["df_true"][0].flatten().cpu().numpy(), 
-                        cached_data["df_pred"][0].flatten().cpu().numpy()],
+                        [cached_data["df_true"][-1].flatten().cpu().numpy(), 
+                        cached_data["df_pred"][-1].flatten().cpu().numpy()],
                         group_labels=["df_true", "df_pred"],
                         colors=["#EF553B", "#3366CC"],
                         bin_size=0.1
@@ -745,7 +1015,6 @@ class TrainPipeline:
 
     @torch.no_grad()
     def ablation_study(self, save_on):
-        os.makedirs(f"{self.out_dir}/train_on_mr", exist_ok=True)
         # load networks
         self.encoder_mr.load_state_dict(
             torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_UNet_MR.pth")))
@@ -786,26 +1055,28 @@ class TrainPipeline:
             seg_pred_ds = F.interpolate(seg_pred.as_tensor(), 
                                             scale_factor=1 / self.super_params.pixdim[-1], 
                                             mode="trilinear")
-            mask = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0).detach().to(torch.float32)
-            seg_pred_ds = (1 - mask) * seg_pred_ds + mask * self.decoder(seg_pred_ds)
+            mask = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0)
+            seg_pred_ds = ~mask * seg_pred_ds + mask * self.decoder(seg_pred_ds)
             seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
 
             # produce the distance field prediction
-            foreground = (seg_pred_ds > 0).to(torch.float32)
-            myo = (seg_pred_ds == 2).to(torch.float32)
+            foreground = (seg_pred_ds > 0)
+            lv = (seg_pred_ds == 1)
+            rv = (seg_pred_ds == 3)
+            myo = (seg_pred_ds == 2)
             df_pred = torch.stack([
-                distance_transform_edt(i[:, 0]) + distance_transform_edt(1 - i[:, 0]) 
-                for i in [foreground, myo]], dim=1)
+                distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
+                for i in [foreground, lv, rv, myo]], dim=1)
 
             # produce the mesh prediction
-            template_mesh = self.warp_control_mesh(df_pred) 
+            template_mesh = self.warp_template_mesh(df_pred) 
 
             subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
             
             phases = ['ED', 'ES']
             for i in range(subdiv_mesh._N):
                 # save each mesh as a time instance
-                save_obj(f"{self.out_dir}/train_on_mr/{id}-{phases[i]}.obj", 
+                save_obj(f"{self.out_dir}/{id}-{phases[i]}.obj", 
                             subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
 
             
