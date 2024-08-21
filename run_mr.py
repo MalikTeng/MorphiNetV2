@@ -97,7 +97,7 @@ class TrainPipeline:
         ])
         self.post_transform = Compose([
             Spacingd(["pred", "label"], [2.0, 2.0, 2.0], mode=("bilinear", "nearest"), allow_missing_keys=True),
-            CropForegroundd(["pred", "label"], source_key="label", margin=0, allow_missing_keys=True),
+            CropForegroundd(["pred", "label"], source_key="label", allow_missing_keys=True),
             Maskd(["pred", "label", "modal"], allow_missing_keys=True),
             FlexResized(
                 ["pred", "label"], 
@@ -1014,7 +1014,7 @@ class TrainPipeline:
          
 
     @torch.no_grad()
-    def ablation_study(self, save_on):
+    def test(self, save_on):
         # load networks
         self.encoder_mr.load_state_dict(
             torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_UNet_MR.pth")))

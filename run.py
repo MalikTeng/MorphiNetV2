@@ -1,4 +1,4 @@
-import os, sys, json, glob
+import os, sys, json, glob, tqdm
 from collections import OrderedDict
 from itertools import chain
 from trimesh import Trimesh, load
@@ -103,7 +103,7 @@ class TrainPipeline:
         ])
         self.post_transform = Compose([
             Spacingd(["pred", "label"], [2.0, 2.0, 2.0], mode=("bilinear", "nearest"), allow_missing_keys=True),
-            CropForegroundd(["pred", "label"], source_key="label", margin=0, allow_missing_keys=True),
+            CropForegroundd(["pred", "label"], source_key="label", allow_missing_keys=True),
             Maskd(["pred", "label", "modal"], allow_missing_keys=True),
             FlexResized(
                 ["pred", "label"], 
@@ -962,61 +962,66 @@ class TrainPipeline:
                 img_mr = img_mr[..., :, bbox[0][1]:bbox[1][1], bbox[0][2]:bbox[1][2]]
                 seg_true_mr = seg_true_mr.unflatten(0, (batch, -1)).swapaxes(1, 2)
 
-                self.optimizer_ndf.zero_grad()
-                with torch.autocast(device_type=DEVICE):
-                    seg_pred_mr = sliding_window_inference(
-                        img_mr,
-                        roi_size=self.super_params.crop_window_size[:2],
-                        sw_batch_size=1,
-                        predictor=self.encoder_mr,
-                        overlap=0.5,
-                        mode="gaussian",
-                    )
-                    seg_pred_mr = F.pad(seg_pred_mr, (bbox[0][2]-1, w-bbox[1][2]+1, bbox[0][1]-1, h-bbox[1][1]+1), "constant", 0)
-                    seg_pred_mr = seg_pred_mr.unflatten(0, (batch, -1)).swapaxes(1, 2)
-                    seg_pred_mr = torch.stack([self.post_transform({"pred": i, "label": j, "modal": "mr"})["pred"] 
-                                               for i, j in zip(seg_pred_mr, seg_true_mr)], dim=0)
-                    seg_pred_mr_ds = F.interpolate(seg_pred_mr.as_tensor(), 
-                                                    scale_factor=1 / self.super_params.pixdim[-1], 
-                                                    mode="trilinear")
-                    mask = (torch.argmax(seg_pred_mr_ds, dim=1, keepdim=True) == 0)
-                    seg_pred_mr_ds = ~mask * seg_pred_mr_ds + mask * self.decoder(seg_pred_mr_ds)
-                    seg_pred_mr_ds = torch.stack([self.pred_transform(i) for i in seg_pred_mr_ds])
-                    foreground = (seg_pred_mr_ds > 0)
-                    lv = (seg_pred_mr_ds == 1)
-                    rv = (seg_pred_mr_ds == 3)
-                    myo = (seg_pred_mr_ds == 2)
-                    df_pred_mr = torch.stack([
-                        distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
-                        for i in [foreground, lv, rv, myo]], dim=1)
-                    
-                    template_mesh = self.warp_template_mesh(df_pred_mr.detach())
-                    del df_pred_mr, seg_pred_mr, seg_pred_mr_ds, seg_true_mr, mask, foreground, myo, img_mr # release memory
-                    torch.cuda.empty_cache()
-                    try:
-                        # method 1: NDF applied right after warping the control mesh
-                        ndf_verts = self.NDF(template_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False)
-                        loss_ndf = self.l1_loss_fn(ndf_verts, template_mesh.verts_padded())
-                    except AssertionError:
-                        loss_ndf = torch.nan
+                try:
+                    self.optimizer_ndf.zero_grad()
+                    with torch.autocast(device_type=DEVICE):
+                        seg_pred_mr = sliding_window_inference(
+                            img_mr,
+                            roi_size=self.super_params.crop_window_size[:2],
+                            sw_batch_size=8,
+                            predictor=self.encoder_mr,
+                            overlap=0.5,
+                            mode="gaussian",
+                        )
+                        seg_pred_mr = F.pad(seg_pred_mr, (bbox[0][2]-1, w-bbox[1][2]+1, bbox[0][1]-1, h-bbox[1][1]+1), "constant", 0)
+                        seg_pred_mr = seg_pred_mr.unflatten(0, (batch, -1)).swapaxes(1, 2)
+                        seg_pred_mr = torch.stack([self.post_transform({"pred": i, "label": j, "modal": "mr"})["pred"] 
+                                                for i, j in zip(seg_pred_mr, seg_true_mr)], dim=0)
+                        seg_pred_mr_ds = F.interpolate(seg_pred_mr.as_tensor(), 
+                                                        scale_factor=1 / self.super_params.pixdim[-1], 
+                                                        mode="trilinear")
+                        mask = (torch.argmax(seg_pred_mr_ds, dim=1, keepdim=True) == 0)
+                        seg_pred_mr_ds = ~mask * seg_pred_mr_ds + mask * self.decoder(seg_pred_mr_ds)
+                        seg_pred_mr_ds = torch.stack([self.pred_transform(i) for i in seg_pred_mr_ds])
+                        foreground = (seg_pred_mr_ds > 0)
+                        lv = (seg_pred_mr_ds == 1)
+                        rv = (seg_pred_mr_ds == 3)
+                        myo = (seg_pred_mr_ds == 2)
+                        df_pred_mr = torch.stack([
+                            distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
+                            for i in [foreground, lv, rv, myo]], dim=1)
+                        
+                        template_mesh = self.warp_template_mesh(df_pred_mr.detach())
+                        del df_pred_mr, seg_pred_mr, seg_pred_mr_ds, seg_true_mr, mask, foreground, myo, img_mr # release memory
+                        torch.cuda.empty_cache()
+                        try:
+                            # method 1: NDF applied right after warping the control mesh
+                            ndf_verts = self.NDF(template_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False)
+                            loss_ndf = self.l1_loss_fn(ndf_verts, template_mesh.verts_padded())
+                        except AssertionError:
+                            loss_ndf = torch.nan
 
-                    # template_mesh = template_mesh.update_padded(ndf_verts).detach()
-                    # subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
-                    # # method 2: NDF applied after the GSN
-                    # ndf_verts = self.NDF(subdiv_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False)
-                    # loss_ndf = self.l1_loss_fn(ndf_verts, subdiv_mesh.verts_padded())
-                    # subdiv_mesh = subdiv_mesh.update_padded(ndf_verts)
-                    
-                    loss = loss_ndf
+                        # template_mesh = template_mesh.update_padded(ndf_verts).detach()
+                        # subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
+                        # # method 2: NDF applied after the GSN
+                        # ndf_verts = self.NDF(subdiv_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False)
+                        # loss_ndf = self.l1_loss_fn(ndf_verts, subdiv_mesh.verts_padded())
+                        # subdiv_mesh = subdiv_mesh.update_padded(ndf_verts)
+                        
+                        loss = loss_ndf
 
-                    if loss != loss: continue
+                        if loss != loss: continue
 
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer_ndf)
-                self.scaler.update()
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer_ndf)
+                    self.scaler.update()
 
-                train_loss_epoch["total"] += loss.item()
-                train_loss_epoch["ndf"] += loss_ndf.item()
+                    train_loss_epoch["total"] += loss.item()
+                    train_loss_epoch["ndf"] += loss_ndf.item()
+                except RuntimeError:
+                    id = os.path.basename(self.mr_train_loader.dataset.data[step]["mr_label"]).replace(".nii.gz", '').replace(".seg.nrrd", '')
+                    print("Out of memory at", id, "| shape is ", data_mr["mr_label"].shape)
+                    exit()
 
             for k, v in train_loss_epoch.items():
                 train_loss_epoch[k] = v / (step + 1)
@@ -1083,7 +1088,7 @@ class TrainPipeline:
                 seg_pred = sliding_window_inference(
                     img, 
                     roi_size=roi_size, 
-                    sw_batch_size=1, 
+                    sw_batch_size=8, 
                     predictor=encoder,
                     overlap=0.5, 
                     mode="gaussian", 
@@ -1322,22 +1327,22 @@ class TrainPipeline:
                 seg_true = (seg_true == 2).to(torch.float32)
                 msh_metric_batch_decoder(voxeld_mesh, seg_true)
 
-                # if subdiv_mesh._N > 2:
-                #     for i in range(subdiv_mesh._N):
-                #         # save each mesh as a time instance
-                #         save_obj(f"{self.out_dir}/{id} - {i:02d}.obj", 
-                #                  subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
-                # elif subdiv_mesh._N == 2:
-                #     phases = ['ED', 'ES']
-                #     for i in range(subdiv_mesh._N):
-                #         # save each mesh as a time instance
-                #         save_obj(f"{self.out_dir}/{id}-{phases[i]}.obj", 
-                #                  subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
-                # else:
-                #     save_obj(
-                #     f"{self.out_dir}/{id}.obj", 
-                #         subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
-                #     )
+                if subdiv_mesh._N > 2:
+                    for i in range(subdiv_mesh._N):
+                        # save each mesh as a time instance
+                        save_obj(f"{self.out_dir}/{id} - {i:02d}.obj", 
+                                 subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
+                elif subdiv_mesh._N == 2:
+                    phases = ['ED', 'ES']
+                    for i in range(subdiv_mesh._N):
+                        # save each mesh as a time instance
+                        save_obj(f"{self.out_dir}/{id}-{phases[i]}.obj", 
+                                 subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
+                else:
+                    save_obj(
+                    f"{self.out_dir}/{id}.obj", 
+                        subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
+                    )
 
                 if step == choice_case:
                     seg_pred = torch.stack([self.pred_transform(i) for i in seg_pred])

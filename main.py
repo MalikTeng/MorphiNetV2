@@ -51,15 +51,15 @@ def config():
                         default="./dataset/dataset_task20_f0.json", 
                         help="the path to the json file with named list of CT train/valid/test sets")
     parser.add_argument("--mr_json_dir", type=str,
-                        default="./dataset/dataset_task11_f0.json",    # less data less burden
-                        # default="./dataset/dataset_task10_f0.json",  # use only for 4d
+                        # default="./dataset/dataset_task11_f0.json",    # less data less burden
+                        default="./dataset/dataset_task10_f0.json",  # use only for 4d
                         help="the path to the json file with named list of MR train/valid/test sets")
     parser.add_argument("--ct_data_dir", type=str, 
                         default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset020_SCOTHEART", 
                         help="the path to your processed images, must be in nifti format")
     parser.add_argument("--mr_data_dir", type=str, 
-                        default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX", 
-                        # default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset010_CAP_SAX_NRRD", 
+                        # default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX", 
+                        default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset010_CAP_SAX_NRRD", 
                         help="the path to your processed images")
     parser.add_argument("--ckpt_dir", type=str, 
                         default="/mnt/data/Experiment/MorphiNet/Checkpoint", 
@@ -106,12 +106,13 @@ def train(super_params):
     with wandb.init(config=super_params, mode=super_params.mode, project="MorphiNet", name=super_params.run_id):
         pipeline = TrainPipeline(
             super_params=super_params,
-            seed=8, num_workers=8,
+            seed=8, num_workers=12,
             )
 
         if super_params.save_on == "cap" and super_params._4d:
             # refine 4D mesh with NDF
             pipeline.load_pretrained_weight("all")
+            pipeline._data_warper(rotation=False)
             for epoch in range(super_params.max_epochs, super_params.max_epochs + 50):
                 # 5. refine the 4D mesh with NDF
                 pipeline.train_iter(epoch, "ndf")

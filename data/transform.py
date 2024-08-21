@@ -76,7 +76,7 @@ def pre_transform(
         # resampling and cropping                           keys: {"image", "label"}
         Spacingd(f"{keys[1]}_ds", [spacing] * 3,
                 mode="nearest", padding_mode="zeros"),
-        CropForegroundd(f"{keys[1]}_ds", source_key=f"{keys[1]}_ds", margin=0),
+        CropForegroundd(f"{keys[1]}_ds", source_key=f"{keys[1]}_ds"),
         # create distance field from down-sampled label
         Maskd([f"{keys[1]}_ds", f"{keys[1][:2]}"], allow_missing_keys=True),
         FlexResized(

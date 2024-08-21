@@ -139,11 +139,11 @@ if __name__ == "__main__":
     parser.add_argument("-input_dir", "--input_dir", type=str, 
                         default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/")
     parser.add_argument("-file_extension", "--file_extension", type=str, 
-                        default=".nii.gz", help="the file extension of the data (.nii.gz / .nrrd)")
+                        default=".nrrd", help="the file extension of the data (.nii.gz / .nrrd)")
     parser.add_argument("-task_name", "--task_name", type=str, 
-                        default="Dataset021_ACDC", help="the task name")
+                        default="Dataset010_CAP_SAX_NRRD", help="the task name")
     parser.add_argument("-d", "--description", help="the task description",
-                        default="ACDC cine MR SAX image data w/o cross-validation")
+                        default="CAP cine MR SAX image data w/ cross-validation")
     parser.add_argument("-l", "--labels", type=json.loads, help="the label name",
                         default='{"0": "background", "1": "lv", "2": "lv-myo", "3": "rv", "4": "rv-myo"}')
     parser.add_argument("-m", "--modality", type=str, 
