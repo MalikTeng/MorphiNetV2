@@ -35,6 +35,10 @@ Data preprocessing is required to ensure images, segmentations, and template mes
 
 1. For new CMR data, use `data_preprocessing.py`. Follow the instructions in the script to produce `.seq.nrrd` files from `.dcm` data.
 
+    _If you have image & segmentation mask for your data, you may check if your data is in the same orientation as required using the Jupyter Notebook `orientation.ipynb`._
+
+    __Please be noted that ensuring your data is in the same orientation is crucial for the network to learn the correct features.__
+
 2. Create a data list JSON file:
 ```
 $ python utils/create_datalist.py \
