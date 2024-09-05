@@ -10,13 +10,6 @@ help_code/
 !/utils/rasterize/*.cpp
 !/utils/rasterize/*.cu
 
-# # template models
-# /template/*
-# !/template/control*.obj
-# !/template/template_mesh-myo.obj
-# !/template/cap_ref_0000.nii.gz
-# !/template/cap_ref.nii.gz
-
 # utils
 /utils/template_mesh_creator-cap.py
 sdf_test.py
