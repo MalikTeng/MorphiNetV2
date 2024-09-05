@@ -1,0 +1,24 @@
+# build folders
+__pycache__/
+.vscode/
+wandb/
+template/
+help_code/
+
+# rasterise folder
+/utils/rasterize/*
+!/utils/rasterize/*.cpp
+!/utils/rasterize/*.cu
+
+# utils
+/utils/template_mesh_creator-cap.py
+sdf_test.py
+subdiv_test.py
+update_json_4d.py
+
+# files with extension
+*.out
+*.txt
+*.json
+*.html
+
