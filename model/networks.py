@@ -317,7 +317,7 @@ from torch_geometric.typing import (
 )
 from torch_geometric.nn import MessagePassing, DeepGCNLayer, GCNConv
 from torch_geometric.nn.dense.linear import Linear as DenseLinear
-from torch_geometric.utils import degree
+from torch_geometric.utils import add_self_loops,degree
 
 
 # function for pre-computed faces index
@@ -412,6 +412,9 @@ class GSNLayer(MessagePassing):
                     nn.init.zeros_(m.bias)
 
     def forward(self, x, edge_index):
+        # Step 1: add self-loops to the edge_index
+        edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+
         # Step 2: normalisation
         row, col = edge_index
         deg = degree(col, x.size(0), dtype=x.dtype)

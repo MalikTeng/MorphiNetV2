@@ -10,7 +10,7 @@ Connect with the author: [Malik Teng on LinkedIn](https://www.linkedin.com/in/ma
 
 ## Installation
 
-Tested environment: Ubuntu 20.04.6 LTS, Python 3.9.17, and PyTorch 1.12.1
+Tested environment: Ubuntu 20.04.6 LTS, Python 3.10, PyTorch 2.1.0, CUDA 11.8
 
 To install:
 
@@ -19,15 +19,30 @@ To install:
 git clone https://github.com/MalikTeng/MorphiNet
 ```
 
-2. Install the conda environment:
+2. Install the conda environment using one of these methods:
+
+### Method 1: Using environment.yml (Basic installation)
 ```
 conda env create -f environment.yml
-```
-
-3. Activate the environment:
-```
 conda activate morphinet
 ```
+
+### Method 2: Using the installation script (Recommended)
+This script will create the conda environment and handle all dependencies including PyTorch3D:
+```
+chmod +x install_morphinet.sh
+./install_morphinet.sh
+```
+
+### Environment Requirements and Compatibility Notes
+
+- **Python**: Version 3.10 (compatible with all required packages)
+- **PyTorch**: Version 2.1.0 with CUDA 11.8 support
+- **PyTorch3D**: Installed from conda using the pytorch3d channel
+- **PyTorch Geometric**: Version 2.4.0 with corresponding extensions
+- **CUDA**: Version 11.8 (must match the PyTorch CUDA version)
+
+If you encounter issues with PyTorch3D installation, please refer to the [PyTorch3D installation guide](https://github.com/facebookresearch/pytorch3d/blob/main/INSTALL.md).
 
 ## Preprocessing
 

@@ -32,7 +32,7 @@ def config():
     # training parameters
     parser.add_argument("--max_epochs", type=int, default=10, help="the maximum number of epochs for training")
     parser.add_argument("--pretrain_epochs", type=int, default=5, help="the number of epochs to train the segmentation UNet")
-    parser.add_argument("--train_epochs", type=int, default=6, help="the number of epochs to train the distance field prediction ResNet")
+    parser.add_argument("--train_epochs", type=int, default=8, help="the number of epochs to train the distance field prediction ResNet")
     parser.add_argument("--reduce_count_down", type=int, default=-1, help="the count down for reduce the mesh face numbers.")
     parser.add_argument("--val_interval", type=int, default=1, help="the interval of validation")
 
@@ -51,15 +51,15 @@ def config():
                         default="./dataset/dataset_task20_f0.json", 
                         help="the path to the json file with named list of CT train/valid/test sets")
     parser.add_argument("--mr_json_dir", type=str,
-                        # default="./dataset/dataset_task11_f0.json",    # less data less burden
-                        default="./dataset/dataset_task10_f0.json",  # use only for 4d
+                        default="./dataset/dataset_task11_f0.json",    # less data less burden
+                        # default="./dataset/dataset_task10_f0.json",  # use only for 4d
                         help="the path to the json file with named list of MR train/valid/test sets")
     parser.add_argument("--ct_data_dir", type=str, 
                         default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset020_SCOTHEART", 
                         help="the path to your processed images, must be in nifti format")
     parser.add_argument("--mr_data_dir", type=str, 
-                        # default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX", 
-                        default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset010_CAP_SAX_NRRD", 
+                        default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX", 
+                        # default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset010_CAP_SAX_NRRD", 
                         help="the path to your processed images")
     parser.add_argument("--ckpt_dir", type=str, 
                         default="/mnt/data/Experiment/MorphiNet/Checkpoint", 
@@ -70,8 +70,8 @@ def config():
      
     # path to the pretrained modules
     parser.add_argument("--use_ckpt", type=str, 
-                        # default=None,
-                        default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2024-08-13-1838", 
+                        default=None,
+                        # default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2024-08-13-1838", 
                         help="the path to the pretrained models")
 
     # structure parameters for df-predict module

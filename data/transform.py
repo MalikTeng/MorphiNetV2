@@ -96,23 +96,13 @@ def pre_transform(
         DFConvertd(f"{keys[1]}_ds"),                        # keys: {"image", "label", "df"}
     ])
 
-    # ensure images are with normalised intensity
-    transforms.append(ScaleIntensityd(keys[0]))
+    # # ensure images are with normalised intensity
+    # transforms.append(ScaleIntensityd(keys[0]))
 
     # random data augmentation
     if section == "train":
         if rotation:
             transforms.extend([
-                # intensity argmentation (image only)
-                RandGaussianNoised(keys[0], std=0.01, prob=0.15),
-                RandGaussianSmoothd(
-                    keys[0],
-                    sigma_x=(0.5, 1.15),
-                    sigma_y=(0.5, 1.15),
-                    sigma_z=(0.5, 1.15),
-                    prob=0.15,
-                ),
-                RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
                 # spatial augmentation
                 RandZoomd(
                     keys,
@@ -125,11 +115,6 @@ def pre_transform(
                 RandRotate90d(keys, prob=0.5, spatial_axes=(1, 2)),
                 RandFlipd(keys, prob=0.5, spatial_axis=[1]),
                 RandFlipd(keys, prob=0.5, spatial_axis=[2]),
-                # ensure the data type
-                EnsureTyped([*keys, f"{keys[0][:2]}_df"], data_type="tensor", dtype=torch.float32),
-            ])
-        else:
-            transforms.extend([
                 # intensity argmentation (image only)
                 RandGaussianNoised(keys[0], std=0.01, prob=0.15),
                 RandGaussianSmoothd(
@@ -140,6 +125,14 @@ def pre_transform(
                     prob=0.15,
                 ),
                 RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
+                # normalize the image intensity to 0-1
+                ScaleIntensityd(keys[0], minv=0, maxv=1),
+
+                # ensure the data type
+                EnsureTyped([*keys, f"{keys[0][:2]}_df"], data_type="tensor", dtype=torch.float32),
+            ])
+        else:
+            transforms.extend([
                 # spatial augmentation
                 RandZoomd(
                     keys,
@@ -149,14 +142,30 @@ def pre_transform(
                     align_corners=(True, None),
                     prob=0.15,
                 ),
+                # intensity argmentation (image only)
+                RandGaussianNoised(keys[0], std=0.01, prob=0.15),
+                RandGaussianSmoothd(
+                    keys[0],
+                    sigma_x=(0.5, 1.15),
+                    sigma_y=(0.5, 1.15),
+                    sigma_z=(0.5, 1.15),
+                    prob=0.15,
+                ),
+                RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
+                # normalize the image intensity to 0-1
+                ScaleIntensityd(keys[0], minv=0, maxv=1),
+
                 # ensure the data type
                 EnsureTyped([*keys, f"{keys[0][:2]}_df"], data_type="tensor", dtype=torch.float32),
             ])
     else:
-        transforms.append(
+        transforms.extend([
+            # normalize the image intensity to 0-1
+            ScaleIntensityd(keys[0], minv=0, maxv=1),
+
             EnsureTyped([*keys, f"{keys[0][:2]}_df"], 
                         data_type="tensor", dtype=torch.float32, allow_missing_keys=True)
-            )
+            ])
 
     return Compose(transforms)
 

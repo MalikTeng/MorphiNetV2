@@ -132,29 +132,28 @@ if __name__ == '__main__':
         from run import *
 
     # checkpoint info
-    super_params._4d = True
-    super_params.save_on = "cap"
-    ckpt = "cap--myo--f0--2024-08-20-2312"
+    super_params._4d = False
+    super_params.save_on = "sct"
+    ckpt = "sct--myo--f0--2024-08-18-1346"
     super_params.best_epoch = "best"
     super_params.iteration = 10
 
     # data info
-    super_params.target = "4d"
-    super_params.ct_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task20_f0.json"
-    super_params.ct_data_dir = f"/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset020_SCOTHEART"
+    super_params.target = "mmwhs"
+    super_params.ct_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task22_f0.json"
+    super_params.ct_data_dir = f"/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset022_MMWHS_CT"
     super_params.mr_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task11_f0.json"
     super_params.mr_data_dir = f"/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX"
-
-    # output info
-    super_params.out_dir = f"/mnt/data/Experiment/TMI_2024/{super_params.target}/MorphiNet/myo/f0/"
-    # super_params.out_dir = f"/mnt/data/Experiment/TMI_2024/{super_params.target}/MorphiNet/myo/80/"
 
     # model info
     super_params.run_id = ckpt
     super_params.ckpt_dir = f"/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/{ckpt}/trained_weights"
     super_params.template_mesh_dir = f"/home/yd21/Documents/MorphiNet/template/template_mesh-myo.obj"
 
+    # output info
+    super_params.out_dir = f"/mnt/data/Experiment/TMI_2024/{super_params.target}/MorphiNet/myo/f0/"
+    # super_params.out_dir = f"/mnt/data/Experiment/TMI_2024/{super_params.target}/20/myo/f0/"
     test(super_params)
 
-    # super_params.out_dir = f"/mnt/data/Experiment/TMI_2024/{super_params.target}/MorphiNet/myo/f0/"
+    # super_params.out_dir = f"/mnt/data/Experiment/TMI_2024/{super_params.target}/"
     # ablation(super_params)

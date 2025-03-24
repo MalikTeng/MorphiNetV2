@@ -656,23 +656,54 @@ class TrainPipeline:
 
 
     def load_pretrained_weight(self, phase):
+        # Determine which checkpoint directory to use
+        if self.super_params.use_ckpt is None:
+            # Use checkpoints from the current training process
+            ckpt_dir = os.path.join(self.ckpt_dir, "trained_weights")
+            print(f"Using checkpoints from current training: {ckpt_dir}")
+        else:
+            # Use pretrained checkpoints from the specified directory
+            ckpt_dir = f"{self.super_params.use_ckpt}/trained_weights"
+            print(f"Using pretrained checkpoints from: {ckpt_dir}")
+        
         if phase == "unet" or phase == "all":
-            encoder_mr_ckpt = torch.load(glob.glob(f"{self.super_params.use_ckpt}/trained_weights/best_UNet_MR.pth")[0], 
-                                        map_location=DEVICE)
-            self.encoder_mr.load_state_dict(encoder_mr_ckpt)
-            print("Pretrained UNet loaded.")
+            try:
+                encoder_mr_path = glob.glob(f"{ckpt_dir}/best_UNet_MR.pth")
+                if encoder_mr_path:
+                    encoder_mr_ckpt = torch.load(encoder_mr_path[0], map_location=DEVICE)
+                    self.encoder_mr.load_state_dict(encoder_mr_ckpt)
+                    print("Pretrained UNet loaded.")
+                else:
+                    print("Warning: UNet checkpoint not found, using current model weights.")
+            except Exception as e:
+                print(f"Error loading UNet checkpoint: {e}")
+                print("Using current model weights.")
 
         if phase == "resnet" or phase == "all":
-            decoder_ckpt = torch.load(glob.glob(f"{self.super_params.use_ckpt}/trained_weights/best_ResNet.pth")[0], 
-                                    map_location=DEVICE)
-            self.decoder.load_state_dict(decoder_ckpt)
-            print("Pretrained ResNet loaded.")
+            try:
+                decoder_path = glob.glob(f"{ckpt_dir}/best_ResNet.pth")
+                if decoder_path:
+                    decoder_ckpt = torch.load(decoder_path[0], map_location=DEVICE)
+                    self.decoder.load_state_dict(decoder_ckpt)
+                    print("Pretrained ResNet loaded.")
+                else:
+                    print("Warning: ResNet checkpoint not found, using current model weights.")
+            except Exception as e:
+                print(f"Error loading ResNet checkpoint: {e}")
+                print("Using current model weights.")
 
         if phase == "gsn" or phase == "all":
-            GSN_ckpt = torch.load(glob.glob(f"{self.super_params.use_ckpt}/trained_weights/best_GSN.pth")[0], 
-                                map_location=DEVICE)
-            self.GSN.load_state_dict(GSN_ckpt)
-            print("Pretrained GSN loaded.")
+            try:
+                gsn_path = glob.glob(f"{ckpt_dir}/best_GSN.pth")
+                if gsn_path:
+                    GSN_ckpt = torch.load(gsn_path[0], map_location=DEVICE)
+                    self.GSN.load_state_dict(GSN_ckpt)
+                    print("Pretrained GSN loaded.")
+                else:
+                    print("Warning: GSN checkpoint not found, using current model weights.")
+            except Exception as e:
+                print(f"Error loading GSN checkpoint: {e}")
+                print("Using current model weights.")
 
 
     def train_iter(self, epoch, phase):

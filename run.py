@@ -1,4 +1,4 @@
-import os, sys, json, glob, tqdm
+import os, sys, json, glob, tqdm, time
 from collections import OrderedDict
 from itertools import chain
 from trimesh import Trimesh, load
@@ -231,6 +231,9 @@ class TrainPipeline:
 
         if modal == "ct":
             train_data = train_data[:np.floor(self.super_params.ct_ratio * len(train_data)).astype(int)]
+            target_length = 186  # 0.8 * 232 = 185.6, rounded up to 186
+            while len(train_data) < 186:
+                train_data.extend(train_data[:min(186 - len(train_data), len(train_data))])
 
         if not self.is_training:
             train_ds = None
@@ -432,99 +435,6 @@ class TrainPipeline:
 
         b, *_, d = df_preds.shape
 
-        # def find_optimal_clusters_batch(points_batch, max_clusters=3):
-        #     batch_size = points_batch.shape[0]
-        #     optimal_clusters = torch.zeros(batch_size, dtype=torch.int64, device=points_batch.device)
-        #     kmeans_results = []
-            
-        #     for i in range(batch_size):
-        #         points = points_batch[i].cpu().numpy()
-        #         silhouette_scores = []
-        #         kmeans_models = []
-        #         for n_clusters in range(2, max_clusters + 1):
-        #             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        #             cluster_labels = kmeans.fit_predict(points)
-        #             silhouette_avg = silhouette_score(points, cluster_labels)
-        #             silhouette_scores.append(silhouette_avg)
-        #             kmeans_models.append(kmeans)
-                
-        #         best_index = silhouette_scores.index(max(silhouette_scores))
-        #         optimal_clusters[i] = best_index + 2
-        #         kmeans_results.append(kmeans_models[best_index])
-            
-        #     return optimal_clusters, kmeans_results
-
-        # def find_cluster_centers_and_normals_batch(point_clouds, max_clusters=3):
-        #     b, num_points, _ = point_clouds.shape
-
-        #     # Find the optimal number of clusters and KMeans results for each point cloud in the batch
-        #     n_clusters_batch, kmeans_results = find_optimal_clusters_batch(point_clouds, max_clusters)
-
-        #     max_n_clusters = n_clusters_batch.max().item()
-
-        #     # Initialize tensors to store cluster centers and normals
-        #     centers = torch.full((b, max_n_clusters, 3), float('nan'), device=DEVICE)
-        #     normals = torch.full((b, max_n_clusters, 3), float('nan'), device=DEVICE)
-
-        #     # Process all point clouds in parallel
-        #     for i in range(b):
-        #         kmeans = kmeans_results[i]
-        #         centers[i, :n_clusters_batch[i]] = torch.tensor(kmeans.cluster_centers_, device=DEVICE)
-                
-        #         # Get cluster labels for all points
-        #         labels = torch.tensor(kmeans.labels_, dtype=torch.long, device=DEVICE)
-                
-        #         # Compute centered points for all clusters at once
-        #         centered_points = point_clouds[i] - centers[i, labels]
-                
-        #         # Compute covariance matrices for all clusters
-        #         cov_matrices = torch.zeros(n_clusters_batch[i], 3, 3, device=DEVICE)
-        #         cov_matrices.index_add_(0, labels, centered_points.unsqueeze(2) * centered_points.unsqueeze(1))
-                
-        #         # Compute eigenvectors for all covariance matrices
-        #         _, eigenvectors = torch.linalg.eigh(cov_matrices)
-                
-        #         # The eigenvector corresponding to the smallest eigenvalue is the normal
-        #         cluster_normals = eigenvectors[:, :, 0]
-                
-        #         # Ensure normals point outward
-        #         mean_centered_points = torch.zeros(n_clusters_batch[i], 3, device=DEVICE)
-        #         mean_centered_points.index_add_(0, labels, centered_points)
-        #         count = torch.bincount(labels, minlength=n_clusters_batch[i]).float().unsqueeze(1)
-        #         mean_centered_points /= count
-                
-        #         dot_products = (cluster_normals * mean_centered_points).sum(dim=1)
-        #         cluster_normals[dot_products < 0] *= -1
-                
-        #         normals[i, :n_clusters_batch[i]] = cluster_normals
-
-        #     return centers, normals, n_clusters_batch
-
-        # def find_cluster_normal(point_clouds, cluster_centers):
-        #     # Compute centered points
-        #     centered_points = point_clouds - cluster_centers.unsqueeze(1)
-
-        #     # Compute covariance matrices
-        #     cov_matrices = torch.bmm(centered_points.transpose(1, 2), centered_points).to(torch.float32)
-
-        #     # Compute eigenvectors for all covariance matrices
-        #     _, eigenvectors = torch.linalg.eigh(cov_matrices)
-
-        #     # The eigenvector corresponding to the smallest eigenvalue is the normal
-        #     normals = eigenvectors[:, :, 0]
-
-        #     # Ensure normals point outward
-        #     mean_centered_points = centered_points.mean(dim=1)
-        #     dot_products = torch.sum(normals * mean_centered_points, dim=-1)
-        #     normals[dot_products < 0] *= -1
-
-        #     return normals
-            
-        # def find_closest_points(points, targets):
-        #     distances = torch.cdist(targets.unsqueeze(1), points)
-        #     closest_indices = distances.argmin(dim=2).squeeze(1)
-        #     return closest_indices
-
         def find_rotation_matrix_xz(vector_msh, vector_df):
             # Project vectors onto xz-plane
             vector_msh_xz = torch.stack([vector_msh[:, 0], vector_msh[:, 2]], dim=1)
@@ -550,92 +460,6 @@ class TrainPipeline:
 
             return R
 
-        # def find_rotation_matrix_rodrigues(source_norm, target_norm):
-        #     """
-        #     Find the rotation matrix that rotates source_norm to target_norm.
-        #     If the angle is > 90 degrees, it aligns them on the same line.
-            
-        #     Args:
-        #     source_norm (torch.Tensor): Source normal vectors of shape (batch_size, 3)
-        #     target_norm (torch.Tensor): Target normal vectors of shape (batch_size, 3)
-            
-        #     Returns:
-        #     torch.Tensor: Rotation matrices of shape (batch_size, 3, 3)
-        #     """
-        #     batch_size = source_norm.shape[0]
-        #     device = source_norm.device
-
-        #     # Ensure input vectors are normalized
-        #     source_norm = F.normalize(source_norm, dim=1)
-        #     target_norm = F.normalize(target_norm, dim=1)
-
-        #     # Compute the dot product
-        #     dot_product = torch.sum(source_norm * target_norm, dim=1)
-
-        #     # If dot product is negative, flip the target vector
-        #     flip_mask = dot_product < 0
-        #     target_norm = torch.where(flip_mask.unsqueeze(1), -target_norm, target_norm)
-
-        #     # Recompute dot product after potential flipping
-        #     dot_product = torch.sum(source_norm * target_norm, dim=1)
-
-        #     # Compute the axis of rotation (cross product)
-        #     axis = torch.cross(source_norm, target_norm, dim=1)
-        #     axis_norm = torch.norm(axis, dim=1, keepdim=True)
-
-        #     # Clamp dot_product to [-1, 1] to avoid numerical issues
-        #     dot_product = torch.clamp(dot_product, -1.0, 1.0)
-
-        #     # Compute the angle
-        #     angle = torch.acos(dot_product)
-
-        #     # If the angle is very small, return identity matrix
-        #     identity = torch.eye(3, device=device).unsqueeze(0).repeat(batch_size, 1, 1)
-        #     small_angle_mask = axis_norm.squeeze(1) < 1e-6
-
-        #     # Handle cases where source and target are opposite
-        #     opposite_mask = (1.0 - dot_product) < 1e-6
-        #     if opposite_mask.any():
-        #         # Find an arbitrary perpendicular vector for rotation axis
-        #         arbitrary_vec = torch.ones_like(source_norm)
-        #         arbitrary_vec[:, 2] = -(source_norm[:, 0] + source_norm[:, 1]) / source_norm[:, 2]
-        #         arbitrary_vec = F.normalize(arbitrary_vec, dim=1)
-        #         axis = torch.where(opposite_mask.unsqueeze(1), arbitrary_vec, axis)
-
-        #     # Normalize the axis
-        #     axis = F.normalize(axis, dim=1)
-
-        #     # Compute rotation matrix using Rodrigues' rotation formula
-        #     k_times_angle = axis * angle.unsqueeze(1)
-        #     k_cross = torch.zeros(batch_size, 3, 3, device=device)
-        #     k_cross[:, 0, 1], k_cross[:, 0, 2] = -axis[:, 2], axis[:, 1]
-        #     k_cross[:, 1, 0], k_cross[:, 1, 2] = axis[:, 2], -axis[:, 0]
-        #     k_cross[:, 2, 0], k_cross[:, 2, 1] = -axis[:, 1], axis[:, 0]
-
-        #     rotation_matrix = (
-        #         identity +
-        #         torch.sin(angle).unsqueeze(1).unsqueeze(2) * k_cross +
-        #         (1 - torch.cos(angle)).unsqueeze(1).unsqueeze(2) * torch.bmm(k_cross, k_cross)
-        #     )
-
-        #     # Use identity matrix for small angles
-        #     rotation_matrix = torch.where(small_angle_mask.unsqueeze(1).unsqueeze(2), identity, rotation_matrix)
-
-        #     return rotation_matrix
-
-        # def gauss_newton_optimization(L, verts):
-        #     # use inexact Gauss-Newton method to update the vertices
-        #     L = L.to_sparse_csr()
-        #     delta = L.mm(rearrange(verts, 'b n c -> (b n) c'))
-        #     LTL = torch.matmul(L.to_dense().t(), L.to_dense())
-        #     LTL.diagonal().add_(1e-6)
-        #     U, S, Vt = torch.linalg.svd(LTL.to(torch.float32))
-        #     S_inv = torch.where(S > 1e-10, 1.0 / S, torch.zeros_like(S))
-        #     verts = torch.matmul(Vt.t(), torch.matmul(U.t(), torch.matmul(L.to_dense().t(), delta)) * S_inv.unsqueeze(1)).to(torch.float32)
-        #     verts = rearrange(verts, '(b n) c -> b n c', b=b)
-
-        #     return verts
-
         template_mesh = load(self.super_params.template_mesh_dir)
         template_mesh = Meshes(
             verts=[torch.tensor(template_mesh.vertices, dtype=torch.float32)], 
@@ -654,39 +478,6 @@ class TrainPipeline:
 
         template_mesh = template_mesh.update_padded(verts)
 
-        # verts = template_mesh.verts_padded()
-        # # align the tricuspid valve & pulmonary valve centroid & normal
-        # df_rv_c = ((df_preds[:, 3] == 1) | (df_preds[:, 2] == 1)) ^ (df_preds[:, 2] == 1)
-        # df_rv_c = torch.cat([RemoveSmallObjects(min_size=8)(i.unsqueeze(0)) for i in df_rv_c], dim=0)
-        # # convert binary masks to point clouds
-        # df_rv_c = [2 * (torch.nonzero(df).to(torch.float32) / d - 0.5) for df in df_rv_c]
-        # df_rv_c = torch.nn.utils.rnn.pad_sequence(df_rv_c, batch_first=True)
-        # df_rv_c = df_rv_c[:, :, [1, 0, 2]]  # Reorder dimensions
-        # # find cluster centers
-        # cluster_centers, cluster_normals, _ = find_cluster_centers_and_normals_batch(df_rv_c, max_clusters=4)
-        # # find the tricuspid valve and pulmonary valve centroid
-        # mesh_tv = verts[:, self.vert_label == 5]
-        # mesh_tv_c = mesh_tv.mean(1)
-        # mesh_pv = verts[:, self.vert_label == 6]
-        # mesh_pv_c = mesh_pv.mean(1)
-        # # find closest cluster centers to mesh centroids
-        # idx_tv_c = find_closest_points(cluster_centers, mesh_tv_c)
-        # idx_pv_c = find_closest_points(cluster_centers, mesh_pv_c)
-        # df_tv_c = cluster_centers[torch.arange(cluster_centers.size(0)), idx_tv_c]
-        # df_tv_norm = cluster_normals[torch.arange(cluster_normals.size(0)), idx_tv_c]
-        # df_pv_c = cluster_centers[torch.arange(cluster_centers.size(0)), idx_pv_c]
-        # df_pv_norm = cluster_normals[torch.arange(cluster_normals.size(0)), idx_pv_c]
-        # # adjust vertices
-        # mesh_tv_norm = find_cluster_normal(mesh_tv, mesh_tv_c)
-        # R_tv = find_rotation_matrix_rodrigues(mesh_tv_norm, df_tv_norm)
-        # verts[:, self.vert_label == 5] = torch.bmm(R_tv, (mesh_tv - mesh_tv_c.unsqueeze(1)).transpose(1, 2)).transpose(1, 2) + df_tv_c.unsqueeze(1)
-        # mesh_pv_norm = find_cluster_normal(mesh_pv, mesh_pv_c)
-        # R_pv = find_rotation_matrix_rodrigues(mesh_pv_norm, df_pv_norm)
-        # verts[:, self.vert_label == 6] = torch.bmm(R_pv, (mesh_pv - mesh_pv_c.unsqueeze(1)).transpose(1, 2)).transpose(1, 2) + df_pv_c.unsqueeze(1)
-
-        # verts = gauss_newton_optimization(template_mesh.laplacian_packed(), verts)
-        # template_mesh = template_mesh.update_padded(verts)
-
         # stage 2: local offset
         verts = template_mesh.verts_padded()
         for i, l in zip([1, 0, 2, 0], [[0], [2], [1], [3]]): # lv-epi, lv, rv, rv-epi
@@ -696,7 +487,15 @@ class TrainPipeline:
             # calculate the gradient of the df
             direction = torch.gradient(-df_pred, dim=(1, 2, 3), edge_order=1)
             direction = torch.stack(direction, dim=1)
-            direction /= (torch.norm(direction, dim=1, keepdim=True) + 1e-16)
+            
+            # Calculate the norm of each direction vector
+            direction_norm = torch.norm(direction, dim=1, keepdim=True)
+            
+            # Only normalize vectors with norm > 1, keep vectors with norm <= 1 unchanged
+            mask = (direction_norm > 1.0)
+            direction = torch.where(mask, direction / (direction_norm + 1e-16), direction)
+            
+            # Handle any invalid values
             direction[torch.isnan(direction)] = 0
             direction[torch.isinf(direction)] = 0
             
@@ -719,26 +518,58 @@ class TrainPipeline:
 
 
     def load_pretrained_weight(self, phase):
+        # Determine which checkpoint directory to use
+        if self.super_params.use_ckpt is None:
+            # Use checkpoints from the current training process
+            ckpt_dir = os.path.join(self.ckpt_dir, "trained_weights")
+            print(f"Using checkpoints from current training: {ckpt_dir}")
+        else:
+            # Use pretrained checkpoints from the specified directory
+            ckpt_dir = f"{self.super_params.use_ckpt}/trained_weights"
+            print(f"Using pretrained checkpoints from: {ckpt_dir}")
+        
         if phase == "unet" or phase == "all":
-            encoder_mr_ckpt = torch.load(glob.glob(f"{self.super_params.use_ckpt}/trained_weights/best_UNet_MR.pth")[0], 
-                                        map_location=DEVICE)
-            encoder_ct_ckpt = torch.load(glob.glob(f"{self.super_params.use_ckpt}/trained_weights/best_UNet_CT.pth")[0], 
-                                        map_location=DEVICE)
-            self.encoder_mr.load_state_dict(encoder_mr_ckpt)
-            self.encoder_ct.load_state_dict(encoder_ct_ckpt)
-            print("Pretrained UNet loaded.")
+            try:
+                encoder_mr_path = glob.glob(f"{ckpt_dir}/best_UNet_MR.pth")
+                encoder_ct_path = glob.glob(f"{ckpt_dir}/best_UNet_CT.pth")
+                
+                if encoder_mr_path and encoder_ct_path:
+                    encoder_mr_ckpt = torch.load(encoder_mr_path[0], map_location=DEVICE)
+                    encoder_ct_ckpt = torch.load(encoder_ct_path[0], map_location=DEVICE)
+                    self.encoder_mr.load_state_dict(encoder_mr_ckpt)
+                    self.encoder_ct.load_state_dict(encoder_ct_ckpt)
+                    print("Pretrained UNet loaded.")
+                else:
+                    print("Warning: UNet checkpoints not found, using current model weights.")
+            except Exception as e:
+                print(f"Error loading UNet checkpoints: {e}")
+                print("Using current model weights.")
 
         if phase == "resnet" or phase == "all":
-            decoder_ckpt = torch.load(glob.glob(f"{self.super_params.use_ckpt}/trained_weights/best_ResNet.pth")[0], 
-                                    map_location=DEVICE)
-            self.decoder.load_state_dict(decoder_ckpt)
-            print("Pretrained ResNet loaded.")
+            try:
+                decoder_path = glob.glob(f"{ckpt_dir}/best_ResNet.pth")
+                if decoder_path:
+                    decoder_ckpt = torch.load(decoder_path[0], map_location=DEVICE)
+                    self.decoder.load_state_dict(decoder_ckpt)
+                    print("Pretrained ResNet loaded.")
+                else:
+                    print("Warning: ResNet checkpoint not found, using current model weights.")
+            except Exception as e:
+                print(f"Error loading ResNet checkpoint: {e}")
+                print("Using current model weights.")
 
         if phase == "gsn" or phase == "all":
-            GSN_ckpt = torch.load(glob.glob(f"{self.super_params.use_ckpt}/trained_weights/best_GSN.pth")[0], 
-                                map_location=DEVICE)
-            self.GSN.load_state_dict(GSN_ckpt)
-            print("Pretrained GSN loaded.")
+            try:
+                gsn_path = glob.glob(f"{ckpt_dir}/best_GSN.pth")
+                if gsn_path:
+                    GSN_ckpt = torch.load(gsn_path[0], map_location=DEVICE)
+                    self.GSN.load_state_dict(GSN_ckpt)
+                    print("Pretrained GSN loaded.")
+                else:
+                    print("Warning: GSN checkpoint not found, using current model weights.")
+            except Exception as e:
+                print(f"Error loading GSN checkpoint: {e}")
+                print("Using current model weights.")
 
 
     def train_iter(self, epoch, phase):
@@ -944,95 +775,95 @@ class TrainPipeline:
 
             self.lr_scheduler_gsn.step(finetune_loss_epoch["total"])
 
-        elif phase == "ndf":
-            self.encoder_mr.eval()
-            self.decoder.eval()
-            self.GSN.eval()
-            self.NDF.train()
+        # elif phase == "ndf":
+        #     self.encoder_mr.eval()
+        #     self.decoder.eval()
+        #     self.GSN.eval()
+        #     self.NDF.train()
 
-            train_loss_epoch = dict(total=0.0, ndf=0.0)
-            for step, data_mr in enumerate(self.mr_train_loader):
-                img_mr, seg_true_mr = (
-                    data_mr["mr_image"].to(DEVICE),
-                    data_mr["mr_label"].to(DEVICE),
-                )
-                batch = data_mr["mr_batch"].item()
-                bbox = generate_spatial_bounding_box(seg_true_mr)
-                h, w = img_mr.shape[-2:]
-                img_mr = img_mr[..., :, bbox[0][1]:bbox[1][1], bbox[0][2]:bbox[1][2]]
-                seg_true_mr = seg_true_mr.unflatten(0, (batch, -1)).swapaxes(1, 2)
+        #     train_loss_epoch = dict(total=0.0, ndf=0.0)
+        #     for step, data_mr in enumerate(self.mr_train_loader):
+        #         img_mr, seg_true_mr = (
+        #             data_mr["mr_image"].to(DEVICE),
+        #             data_mr["mr_label"].to(DEVICE),
+        #         )
+        #         batch = data_mr["mr_batch"].item()
+        #         bbox = generate_spatial_bounding_box(seg_true_mr)
+        #         h, w = img_mr.shape[-2:]
+        #         img_mr = img_mr[..., :, bbox[0][1]:bbox[1][1], bbox[0][2]:bbox[1][2]]
+        #         seg_true_mr = seg_true_mr.unflatten(0, (batch, -1)).swapaxes(1, 2)
 
-                try:
-                    self.optimizer_ndf.zero_grad()
-                    with torch.autocast(device_type=DEVICE):
-                        seg_pred_mr = sliding_window_inference(
-                            img_mr,
-                            roi_size=self.super_params.crop_window_size[:2],
-                            sw_batch_size=8,
-                            predictor=self.encoder_mr,
-                            overlap=0.5,
-                            mode="gaussian",
-                        )
-                        seg_pred_mr = F.pad(seg_pred_mr, (bbox[0][2]-1, w-bbox[1][2]+1, bbox[0][1]-1, h-bbox[1][1]+1), "constant", 0)
-                        seg_pred_mr = seg_pred_mr.unflatten(0, (batch, -1)).swapaxes(1, 2)
-                        seg_pred_mr = torch.stack([self.post_transform({"pred": i, "label": j, "modal": "mr"})["pred"] 
-                                                for i, j in zip(seg_pred_mr, seg_true_mr)], dim=0)
-                        seg_pred_mr_ds = F.interpolate(seg_pred_mr.as_tensor(), 
-                                                        scale_factor=1 / self.super_params.pixdim[-1], 
-                                                        mode="trilinear")
-                        mask = (torch.argmax(seg_pred_mr_ds, dim=1, keepdim=True) == 0)
-                        seg_pred_mr_ds = ~mask * seg_pred_mr_ds + mask * self.decoder(seg_pred_mr_ds)
-                        seg_pred_mr_ds = torch.stack([self.pred_transform(i) for i in seg_pred_mr_ds])
-                        foreground = (seg_pred_mr_ds > 0)
-                        lv = (seg_pred_mr_ds == 1)
-                        rv = (seg_pred_mr_ds == 3)
-                        myo = (seg_pred_mr_ds == 2)
-                        df_pred_mr = torch.stack([
-                            distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
-                            for i in [foreground, lv, rv, myo]], dim=1)
+        #         try:
+        #             self.optimizer_ndf.zero_grad()
+        #             with torch.autocast(device_type=DEVICE):
+        #                 seg_pred_mr = sliding_window_inference(
+        #                     img_mr,
+        #                     roi_size=self.super_params.crop_window_size[:2],
+        #                     sw_batch_size=8,
+        #                     predictor=self.encoder_mr,
+        #                     overlap=0.5,
+        #                     mode="gaussian",
+        #                 )
+        #                 seg_pred_mr = F.pad(seg_pred_mr, (bbox[0][2]-1, w-bbox[1][2]+1, bbox[0][1]-1, h-bbox[1][1]+1), "constant", 0)
+        #                 seg_pred_mr = seg_pred_mr.unflatten(0, (batch, -1)).swapaxes(1, 2)
+        #                 seg_pred_mr = torch.stack([self.post_transform({"pred": i, "label": j, "modal": "mr"})["pred"] 
+        #                                         for i, j in zip(seg_pred_mr, seg_true_mr)], dim=0)
+        #                 seg_pred_mr_ds = F.interpolate(seg_pred_mr.as_tensor(), 
+        #                                                 scale_factor=1 / self.super_params.pixdim[-1], 
+        #                                                 mode="trilinear")
+        #                 mask = (torch.argmax(seg_pred_mr_ds, dim=1, keepdim=True) == 0)
+        #                 seg_pred_mr_ds = ~mask * seg_pred_mr_ds + mask * self.decoder(seg_pred_mr_ds)
+        #                 seg_pred_mr_ds = torch.stack([self.pred_transform(i) for i in seg_pred_mr_ds])
+        #                 foreground = (seg_pred_mr_ds > 0)
+        #                 lv = (seg_pred_mr_ds == 1)
+        #                 rv = (seg_pred_mr_ds == 3)
+        #                 myo = (seg_pred_mr_ds == 2)
+        #                 df_pred_mr = torch.stack([
+        #                     distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
+        #                     for i in [foreground, lv, rv, myo]], dim=1)
                         
-                        template_mesh = self.warp_template_mesh(df_pred_mr.detach())
-                        del df_pred_mr, seg_pred_mr, seg_pred_mr_ds, seg_true_mr, mask, foreground, myo, img_mr # release memory
-                        torch.cuda.empty_cache()
-                        try:
-                            # method 1: NDF applied right after warping the control mesh
-                            ndf_verts = self.NDF(template_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False)
-                            loss_ndf = self.l1_loss_fn(ndf_verts, template_mesh.verts_padded())
-                        except AssertionError:
-                            loss_ndf = torch.nan
+        #                 template_mesh = self.warp_template_mesh(df_pred_mr.detach())
+        #                 del df_pred_mr, seg_pred_mr, seg_pred_mr_ds, seg_true_mr, mask, foreground, myo, img_mr # release memory
+        #                 torch.cuda.empty_cache()
+        #                 try:
+        #                     # method 1: NDF applied right after warping the control mesh
+        #                     ndf_verts = self.NDF(template_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False)
+        #                     loss_ndf = self.l1_loss_fn(ndf_verts, template_mesh.verts_padded())
+        #                 except AssertionError:
+        #                     loss_ndf = torch.nan
 
-                        # template_mesh = template_mesh.update_padded(ndf_verts).detach()
-                        # subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
-                        # # method 2: NDF applied after the GSN
-                        # ndf_verts = self.NDF(subdiv_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False)
-                        # loss_ndf = self.l1_loss_fn(ndf_verts, subdiv_mesh.verts_padded())
-                        # subdiv_mesh = subdiv_mesh.update_padded(ndf_verts)
+        #                 # template_mesh = template_mesh.update_padded(ndf_verts).detach()
+        #                 # subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
+        #                 # # method 2: NDF applied after the GSN
+        #                 # ndf_verts = self.NDF(subdiv_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False)
+        #                 # loss_ndf = self.l1_loss_fn(ndf_verts, subdiv_mesh.verts_padded())
+        #                 # subdiv_mesh = subdiv_mesh.update_padded(ndf_verts)
                         
-                        loss = loss_ndf
+        #                 loss = loss_ndf
 
-                        if loss != loss: continue
+        #                 if loss != loss: continue
 
-                    self.scaler.scale(loss).backward()
-                    self.scaler.step(self.optimizer_ndf)
-                    self.scaler.update()
+        #             self.scaler.scale(loss).backward()
+        #             self.scaler.step(self.optimizer_ndf)
+        #             self.scaler.update()
 
-                    train_loss_epoch["total"] += loss.item()
-                    train_loss_epoch["ndf"] += loss_ndf.item()
-                except RuntimeError:
-                    id = os.path.basename(self.mr_train_loader.dataset.data[step]["mr_label"]).replace(".nii.gz", '').replace(".seg.nrrd", '')
-                    print("Out of memory at", id, "| shape is ", data_mr["mr_label"].shape)
-                    exit()
+        #             train_loss_epoch["total"] += loss.item()
+        #             train_loss_epoch["ndf"] += loss_ndf.item()
+        #         except RuntimeError:
+        #             id = os.path.basename(self.mr_train_loader.dataset.data[step]["mr_label"]).replace(".nii.gz", '').replace(".seg.nrrd", '')
+        #             print("Out of memory at", id, "| shape is ", data_mr["mr_label"].shape)
+        #             exit()
 
-            for k, v in train_loss_epoch.items():
-                train_loss_epoch[k] = v / (step + 1)
-                self.ndf_loss[k] = np.append(self.ndf_loss[k], train_loss_epoch[k])
+        #     for k, v in train_loss_epoch.items():
+        #         train_loss_epoch[k] = v / (step + 1)
+        #         self.ndf_loss[k] = np.append(self.ndf_loss[k], train_loss_epoch[k])
 
-            wandb.log(
-                {f"{phase}_loss": train_loss_epoch["total"]},
-                step=epoch + 1
-            )
+        #     wandb.log(
+        #         {f"{phase}_loss": train_loss_epoch["total"]},
+        #         step=epoch + 1
+        #     )
 
-            self.lr_scheduler_ndf.step(train_loss_epoch["total"])
+        #     self.lr_scheduler_ndf.step(train_loss_epoch["total"])
 
 
     def valid(self, epoch, save_on):
@@ -1238,9 +1069,9 @@ class TrainPipeline:
             torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_ResNet.pth")))
         self.GSN.load_state_dict(
             torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_GSN.pth")))
-        if self.super_params._4d:
-            self.NDF.load_state_dict(
-                torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_NDF.pth")))
+        # if self.super_params._4d:
+        #     self.NDF.load_state_dict(
+        #         torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_NDF.pth")))
         # load the subdivided_faces.faces_levels
         self.subdivided_faces.faces_levels = [torch.load(
             glob.glob(f"{self.ckpt_dir}/*_subdivided_faces_l{level}.pth")[-1]
@@ -1264,6 +1095,8 @@ class TrainPipeline:
 
         msh_metric_batch_decoder = DiceMetric(include_background=False, reduction="none")
         actual_heart_size_in_pixel = []
+
+        start_time = time.time()    
 
         choice_case = np.random.choice(len(valid_loader), 1)[0]
         with torch.no_grad():
@@ -1304,14 +1137,14 @@ class TrainPipeline:
                 df_pred = torch.stack([
                     distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
                     for i in [foreground, lv, rv, myo]], dim=1)
-
+                
                 template_mesh = self.warp_template_mesh(df_pred) 
                 template_mesh_ = template_mesh.clone()
 
-                if save_on == "cap" and self.super_params._4d:
-                    # method 1: NDF applied right after warping the control mesh
-                    ndf_verts = self.NDF(template_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False) 
-                    template_mesh = template_mesh.update_padded(ndf_verts)
+                # if save_on == "cap" and self.super_params._4d:
+                #     # method 1: NDF applied right after warping the control mesh
+                #     ndf_verts = self.NDF(template_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False) 
+                #     template_mesh = template_mesh.update_padded(ndf_verts)
 
                 subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
                 
@@ -1327,22 +1160,22 @@ class TrainPipeline:
                 seg_true = (seg_true == 2).to(torch.float32)
                 msh_metric_batch_decoder(voxeld_mesh, seg_true)
 
-                if subdiv_mesh._N > 2:
-                    for i in range(subdiv_mesh._N):
-                        # save each mesh as a time instance
-                        save_obj(f"{self.out_dir}/{id} - {i:02d}.obj", 
-                                 subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
-                elif subdiv_mesh._N == 2:
-                    phases = ['ED', 'ES']
-                    for i in range(subdiv_mesh._N):
-                        # save each mesh as a time instance
-                        save_obj(f"{self.out_dir}/{id}-{phases[i]}.obj", 
-                                 subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
-                else:
-                    save_obj(
-                    f"{self.out_dir}/{id}.obj", 
-                        subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
-                    )
+                # if subdiv_mesh._N > 2:
+                #     for i in range(subdiv_mesh._N):
+                #         # save each mesh as a time instance
+                #         save_obj(f"{self.out_dir}/{id} - {i:02d}.obj", 
+                #                  subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
+                # elif subdiv_mesh._N == 2:
+                #     phases = ['ED', 'ES']
+                #     for i in range(subdiv_mesh._N):
+                #         # save each mesh as a time instance
+                #         save_obj(f"{self.out_dir}/{id}-{phases[i]}.obj", 
+                #                  subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
+                # else:
+                #     save_obj(
+                #     f"{self.out_dir}/{id}.obj", 
+                #         subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
+                #     )
 
                 if step == choice_case:
                     seg_pred = torch.stack([self.pred_transform(i) for i in seg_pred])
@@ -1389,6 +1222,10 @@ class TrainPipeline:
         wandb.log({"actual_heart_size d (pixel)": size_in_pixel[2]})
         wandb.log({"test_score": msh_metric_batch_decoder.aggregate().mean()})
 
+        end_time = time.time()
+        inference_time = (end_time - start_time) / len(valid_loader)
+        print(f"Inference time: {inference_time} seconds")
+
 
     @torch.no_grad()
     def ablation_study(self, save_on):
@@ -1399,6 +1236,9 @@ class TrainPipeline:
             torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_UNet_MR.pth")))
         self.decoder.load_state_dict(
             torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_ResNet.pth")))
+        # if self.super_params._4d:
+        #     self.NDF.load_state_dict(
+        #         torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_NDF.pth")))
         self.GSN.load_state_dict(
             torch.load(os.path.join(self.ckpt_dir, f"{self.super_params.best_epoch}_GSN.pth")))
         # load the subdivided_faces.faces_levels
@@ -1422,12 +1262,34 @@ class TrainPipeline:
             raise ValueError("Invalid dataset name")
         encoder.eval()
 
-        os.makedirs(f"{self.out_dir}/{modal}", exist_ok=True)
+        if not self.super_params._4d:
+            # Create output folders
+            folders = [
+                f"ResNet_before-{modal}/myo/f0",
+                f"ResNet_after-{modal}/myo/f0",
+                f"ResNet_gt-{modal}/myo/f0",
+                f"ResNet_df_true-{modal}/myo/f0",
+                f"ResNet_df_pred-{modal}/myo/f0",
+                "adaptive/myo/f0",
+                "loop/myo/f0",
+                "unwarp_loop/myo/f0",
+                "template_mesh/myo/f0",
+                "level_0/myo/f0",
+                "level_1/myo/f0",
+                "level_2/myo/f0",
+            ]
+
+            for folder in folders:
+                os.makedirs(os.path.join(self.out_dir, folder), exist_ok=True)
+        else:
+            os.makedirs(os.path.join(self.out_dir, "myo/f0"), exist_ok=True)
 
         for i, data in enumerate(valid_loader):
             id = os.path.basename(valid_loader.dataset.data[i][f"{modal}_label"]).replace(".nii.gz", '').replace(".seg.nrrd", '')
             if save_on == "cap":
                 id = id.split('-')[0]
+            elif save_on == "sct":
+                id = id.replace("-ED", "").replace("-ES", "")
 
             img, seg_true, df_true = (
                 data[f"{modal}_image"].to(DEVICE),
@@ -1451,6 +1313,8 @@ class TrainPipeline:
                                             scale_factor=1 / self.super_params.pixdim[-1], 
                                             mode="trilinear")
             mask = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0).detach()
+            seg_pred_ds_before = seg_pred_ds.clone()
+            seg_pred_ds_before = torch.stack([self.pred_transform(i) for i in seg_pred_ds_before])
             seg_pred_ds = ~mask * seg_pred_ds + mask * self.decoder(seg_pred_ds)
             seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
             seg_true = torch.stack([i["label"] for i in seg_data], dim=0)
@@ -1468,20 +1332,30 @@ class TrainPipeline:
                 for i in [foreground, lv, rv, myo]], dim=1)
 
             if not self.super_params._4d:
-                # Save the seg_pred_ds and seg_true_ds as nib file
-                nib.save(nib.nifti1.Nifti1Image(seg_pred_ds[0, 0].cpu().numpy(), np.eye(4)), f"{self.out_dir}/{modal}/{id}_pred.nii.gz")
-                nib.save(nib.nifti1.Nifti1Image(seg_true_ds[0, 0].cpu().numpy(), np.eye(4)), f"{self.out_dir}/{modal}/{id}_true.nii.gz")
-            
+                # Save the seg_pred_ds (before and after self.decoder) and seg_true_ds as nib files
+                for (phase, idx), _ in zip([('ED', 0), ('ES', 1)], range(seg_true_ds.shape[0])):
+                    # Before ResNet
+                    nib.save(nib.nifti1.Nifti1Image(seg_pred_ds_before[idx, 0].cpu().numpy(), np.eye(4)), 
+                             f"{self.out_dir}/ResNet_before-{modal}/myo/f0/{id}-{phase}_pred.nii.gz")
+                    # After ResNet
+                    nib.save(nib.nifti1.Nifti1Image(seg_pred_ds[idx, 0].cpu().numpy(), np.eye(4)), 
+                             f"{self.out_dir}/ResNet_after-{modal}/myo/f0/{id}-{phase}_pred.nii.gz")
+                    # Ground Truth
+                    nib.save(nib.nifti1.Nifti1Image(seg_true_ds[idx, 0].cpu().numpy(), np.eye(4)), 
+                             f"{self.out_dir}/ResNet_gt-{modal}/myo/f0/{id}-{phase}_true.nii.gz")
+
                 # save the prediction and true distance field as npy files
-                np.save(f"{self.out_dir}/{modal}/{id}-df_true.npy", df_true[0].cpu().numpy())
-                np.save(f"{self.out_dir}/{modal}/{id}-df_pred.npy", df_pred[0].cpu().numpy())
+                np.save(f"{self.out_dir}/ResNet_df_true-{modal}/myo/f0/{id}-df_true.npy", 
+                        df_true[0].cpu().numpy())
+                np.save(f"{self.out_dir}/ResNet_df_pred-{modal}/myo/f0/{id}-df_pred.npy", 
+                        df_pred[0].cpu().numpy())
 
                 if save_on == "sct":
                     # warped + adaptive
                     template_mesh = self.warp_template_mesh(df_pred)  
                     subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
                     save_obj(
-                    f"{self.out_dir}/{modal}/{id}-adaptive.obj", 
+                    f"{self.out_dir}/adaptive/myo/f0/{id}.obj", 
                         subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
                     )
 
@@ -1490,7 +1364,7 @@ class TrainPipeline:
                     template_mesh = Trimesh(template_mesh.verts_packed().cpu().numpy(), template_mesh.faces_packed().cpu().numpy())
                     for _ in range(2): template_mesh = template_mesh.subdivide_loop()
                     save_obj(
-                    f"{self.out_dir}/{modal}/{id}-loop.obj", 
+                    f"{self.out_dir}/loop/myo/f0/{id}.obj", 
                         torch.tensor(template_mesh.vertices), torch.tensor(template_mesh.faces)
                     )
 
@@ -1499,22 +1373,28 @@ class TrainPipeline:
                     template_mesh = Trimesh(template_mesh.verts_packed().cpu().numpy(), template_mesh.faces_packed().cpu().numpy())
                     for _ in range(2): template_mesh = template_mesh.subdivide_loop()
                     save_obj(
-                    f"{self.out_dir}/{modal}/{id}-unwarp_loop.obj", 
+                    f"{self.out_dir}/unwarp_loop/myo/f0/{id}.obj", 
                         torch.tensor(template_mesh.vertices), torch.tensor(template_mesh.faces)
                     )
 
                     # unwarp (template mesh)
                     save_obj(
-                        f"{self.out_dir}/{modal}/{id}-template_mesh.obj", 
+                        f"{self.out_dir}/template_mesh/myo/f0/{id}.obj", 
                         self.template_mesh.verts_packed(), self.template_mesh.faces_packed()
                     )
 
             # ****** Increamental Subdivision from 0 --> 2 ******
-            template_mesh = self.warp_template_mesh(df_pred)                             # level 0
+            # template_mesh = self.warp_template_mesh(df_pred)                             # level 0
+            template_mesh = self.warp_template_mesh(df_true)                             # level 0
+            
+            # if self.super_params._4d and save_on == "cap":
+            #     # method 1: NDF applied right after warping the control mesh
+            #     ndf_verts = self.NDF(template_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False) 
+            #     template_mesh = template_mesh.update_padded(ndf_verts)
 
             if not self.super_params._4d and save_on == "sct":
                 save_obj(
-                    f"{self.out_dir}/{modal}/{id}-level_0.obj", 
+                    f"{self.out_dir}/level_0/myo/f0/{id}.obj", 
                     template_mesh.verts_packed(), template_mesh.faces_packed()
                 )
 
@@ -1523,15 +1403,15 @@ class TrainPipeline:
             if not self.super_params._4d and save_on == "sct":
                 for level in range(2):
                     save_obj(
-                        f"{self.out_dir}/{modal}/{id}-level_{level+1}.obj", 
+                        f"{self.out_dir}/level_{level+1}/myo/f0/{id}.obj", 
                         subdiv_mesh[level].verts_packed(), subdiv_mesh[level].faces_packed()
                     )
 
             # ****** Compare outputs w/o NODE ******
-            if self.super_params._4d:
+            elif self.super_params._4d and save_on == "cap":
                 subdiv_mesh = subdiv_mesh[-1]
                 for i in range(subdiv_mesh._N):
                     # save each mesh as a time instance
-                    save_obj(f"{self.out_dir}/{modal}/{id} - {i:02d}.obj", 
+                    save_obj(f"{self.out_dir}/myo/f0/{id}-{i:02d}.obj", 
                             subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
             
