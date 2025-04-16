@@ -443,6 +443,10 @@ class GSN(nn.Module):
         ])
 
     def forward(self, meshes: Meshes, subdivided_faces: list[torch.LongTensor]):
+        # Ensure all vertices are in the correct data type for AMP compatibility
+        verts_precision = next(self.parameters()).dtype
+        if meshes.verts_padded().dtype != verts_precision:
+            meshes = meshes.update_padded(meshes.verts_padded().to(verts_precision))
         
         level_outs = []
         for l, gcn_layer in enumerate(self.gcn_layers):

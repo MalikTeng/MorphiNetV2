@@ -42,8 +42,8 @@ def config():
     parser.add_argument("--cache_rate", type=float, default=1.0, help="the cache rate for training, see MONAI document for more details")
     parser.add_argument("--crop_window_size", type=int, nargs='+', default=[128, 128, 128], help="the size of the crop window for training")
     parser.add_argument("--pixdim", type=float, nargs='+', default=[4, 4, 4], help="the pixel dimension of downsampled images")
-    parser.add_argument("--lambda_0", type=float, default=1.06, help="the loss coefficients for Chamfer verts distance term")
-    parser.add_argument("--lambda_1", type=float, default=1.05, help="the loss coefficients for point to mesh distance term")
+    parser.add_argument("--lambda_0", type=float, default=1.0, help="the loss coefficients for Chamfer verts distance term")
+    parser.add_argument("--lambda_1", type=float, default=0.1, help="the loss coefficients for point to mesh distance term")
     parser.add_argument("--interation", type=int, default=5, help="the interations for the distance field warping")
 
     # data parameters

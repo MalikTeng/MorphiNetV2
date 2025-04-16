@@ -1,10 +1,12 @@
 import torch
 from monai.transforms import (
+    AdjustContrastd,
     Compose,
     LoadImaged,
     CropForegroundd,
     CopyItemsd,
     Orientationd,
+    RandAdjustContrastd,
     RandScaleIntensityd,
     RandGaussianNoised,
     RandGaussianSmoothd,
@@ -19,7 +21,7 @@ from monai.transforms import (
     EnsureTyped
 )
 
-from .components import *
+from data.components import *
 
 __all__ = ["pre_transform"]
 
@@ -104,17 +106,18 @@ def pre_transform(
         if rotation:
             transforms.extend([
                 # spatial augmentation
+                RandRotate90d(keys, prob=0.5, spatial_axes=(1, 2), lazy=True),
+                RandFlipd(keys, prob=0.5, spatial_axis=[1], lazy=True),
+                RandFlipd(keys, prob=0.5, spatial_axis=[2], lazy=True),
                 RandZoomd(
                     keys,
-                    min_zoom=0.9 if modal == "ct" else [1.0, 0.9, 0.9], 
-                    max_zoom=1.2 if modal == "ct" else [1.0, 1.2, 1.2],
+                    min_zoom=0.7 if modal == "ct" else [1.0, 0.7, 0.7], 
+                    max_zoom=1.4 if modal == "ct" else [1.0, 1.4, 1.4],
                     mode=("trilinear", "nearest-exact"),
                     align_corners=(True, None),
                     prob=0.15,
+                    lazy=True,
                 ),
-                RandRotate90d(keys, prob=0.5, spatial_axes=(1, 2)),
-                RandFlipd(keys, prob=0.5, spatial_axis=[1]),
-                RandFlipd(keys, prob=0.5, spatial_axis=[2]),
                 # intensity argmentation (image only)
                 RandGaussianNoised(keys[0], std=0.01, prob=0.15),
                 RandGaussianSmoothd(
@@ -124,8 +127,10 @@ def pre_transform(
                     sigma_z=(0.5, 1.15),
                     prob=0.15,
                 ),
-                RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
+                RandAdjustContrastd(keys[0], gamma=(0.65, 1.5), prob=0.15),
+                # RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
                 # normalize the image intensity to 0-1
+                AdjustContrastd(keys[0], gamma=1.5),
                 ScaleIntensityd(keys[0], minv=0, maxv=1),
 
                 # ensure the data type
@@ -136,11 +141,12 @@ def pre_transform(
                 # spatial augmentation
                 RandZoomd(
                     keys,
-                    min_zoom=0.9 if modal == "ct" else [1.0, 0.9, 0.9], 
-                    max_zoom=1.2 if modal == "ct" else [1.0, 1.2, 1.2],
+                    min_zoom=0.7 if modal == "ct" else [1.0, 0.7, 0.7], 
+                    max_zoom=1.4 if modal == "ct" else [1.0, 1.4, 1.4],
                     mode=("trilinear", "nearest-exact"),
                     align_corners=(True, None),
                     prob=0.15,
+                    lazy=True,
                 ),
                 # intensity argmentation (image only)
                 RandGaussianNoised(keys[0], std=0.01, prob=0.15),
@@ -151,8 +157,10 @@ def pre_transform(
                     sigma_z=(0.5, 1.15),
                     prob=0.15,
                 ),
-                RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
+                RandAdjustContrastd(keys[0], gamma=(0.65, 1.5), prob=0.15),
+                # RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
                 # normalize the image intensity to 0-1
+                AdjustContrastd(keys[0], gamma=1.5),
                 ScaleIntensityd(keys[0], minv=0, maxv=1),
 
                 # ensure the data type
@@ -161,6 +169,7 @@ def pre_transform(
     else:
         transforms.extend([
             # normalize the image intensity to 0-1
+            AdjustContrastd(keys[0], gamma=1.5),
             ScaleIntensityd(keys[0], minv=0, maxv=1),
 
             EnsureTyped([*keys, f"{keys[0][:2]}_df"], 

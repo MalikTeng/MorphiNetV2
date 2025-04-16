@@ -40,10 +40,11 @@ def config():
     parser.add_argument("--batch_size", type=int, default=1, help="the batch size for training")
     parser.add_argument("--cache_rate", type=float, default=1.0, help="the cache rate for training, see MONAI document for more details")
     parser.add_argument("--crop_window_size", type=int, nargs='+', default=[128, 128, 128], help="the size of the crop window for training")
-    parser.add_argument("--pixdim", type=float, nargs='+', default=[4, 4, 4], help="the pixel dimension of downsampled images")
+    parser.add_argument("--pixdim", type=float, nargs='+', default=[8, 8, 8], help="the pixel dimension of downsampled images")
     parser.add_argument("--lambda_0", type=float, default=1.0, help="the loss coefficients for Chamfer verts distance term")
-    parser.add_argument("--lambda_1", type=float, default=1.0, help="the loss coefficients for point to mesh distance term")
+    parser.add_argument("--lambda_1", type=float, default=0.1, help="the loss coefficients for point to mesh distance term")
     parser.add_argument("--iteration", type=int, default=10, help="the iterations for the distance field warping")
+    parser.add_argument("--sigmoid_scale_factor", type=float, default=1.0, help="the scale factor for the sigmoid mask transition")
 
     # data parameters
     parser.add_argument("--ct_ratio", type=float, default=1.0, help="the portion of CT data for training")
@@ -71,7 +72,7 @@ def config():
     # path to the pretrained modules
     parser.add_argument("--use_ckpt", type=str, 
                         default=None,
-                        # default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2024-08-13-1838", 
+                        # default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/cap--myo--f0--2025-03-25-2228", 
                         help="the path to the pretrained models")
 
     # structure parameters for df-predict module
@@ -112,7 +113,7 @@ def train(super_params):
         if super_params.save_on == "cap" and super_params._4d:
             # refine 4D mesh with NDF
             pipeline.load_pretrained_weight("all")
-            pipeline._data_warper(rotation=False)
+            # pipeline._data_warper(rotation=False)
             for epoch in range(super_params.max_epochs, super_params.max_epochs + 50):
                 # 5. refine the 4D mesh with NDF
                 pipeline.train_iter(epoch, "ndf")
@@ -121,29 +122,64 @@ def train(super_params):
                     pipeline.valid(epoch, super_params.save_on)
 
         else:
+            # Simplified training workflow
+            # Check for existing checkpoints
+            has_unet_ckpt = False
+            has_resnet_ckpt = False
+            if super_params.use_ckpt is not None:
+                print(f"Loading pretrained weights from {super_params.use_ckpt}")
+                ckpt_dir = f"{super_params.use_ckpt}/trained_weights"
+                unet_mr_path = glob.glob(f"{ckpt_dir}/best_UNet_MR.pth")
+                unet_ct_path = glob.glob(f"{ckpt_dir}/best_UNet_CT.pth")
+                resnet_path = glob.glob(f"{ckpt_dir}/best_ResNet.pth")
+                
+                has_unet_ckpt = bool(unet_mr_path and unet_ct_path)
+                has_resnet_ckpt = bool(resnet_path)
+                
+                # Load all available checkpoints
+                pipeline.load_pretrained_weight("all")
+            
             # train the network
             for epoch in range(super_params.max_epochs):
                 torch.cuda.empty_cache()
+                
+                # Phase 1: UNet training (segmentation encoder)
                 if epoch < super_params.pretrain_epochs:
-                    if super_params.use_ckpt is None:
-                        # 1. train segmentation encoder
+                    if not has_unet_ckpt:
                         pipeline.train_iter(epoch, "unet")
+                    else:
+                        print(f"Skipping UNet training (epoch {epoch}) - using checkpoint")
+                        # Jump to next phase
+                        epoch = super_params.pretrain_epochs - 1
+                
+                # Phase 2: ResNet training (distance field prediction)
                 elif epoch < super_params.train_epochs:
-                    # drop the rotation and flip augmentation
+                    # First epoch of ResNet phase - ensure UNet weights are loaded
                     if epoch == super_params.pretrain_epochs:
-                        pipeline._data_warper(rotation=False)
                         pipeline.load_pretrained_weight("unet")
-                    # 2. train distance field prediction module
-                    pipeline.train_iter(epoch, "resnet")
+                    
+                    if not has_resnet_ckpt:
+                        pipeline.train_iter(epoch, "resnet")
+                    else:
+                        print(f"Skipping ResNet training (epoch {epoch}) - using checkpoint")
+                        # Jump to next phase
+                        epoch = super_params.train_epochs - 1
+                
+                # Phase 3: GSN training (graph subdivision) - always train this phase
                 else:
-                    # 3. fine-tune the subdiv module
+                    # First epoch of GSN phase - ensure all weights are loaded
+                    if epoch == super_params.train_epochs:
+                        pipeline.load_pretrained_weight("all")
+                    
+                    # Always train the GSN module
                     pipeline.train_iter(epoch, "gsn")
-                    # 3.1 reduce the mesh face numbers
+                    
+                    # Reduce mesh face numbers if needed
                     if epoch - super_params.train_epochs == super_params.reduce_count_down:
                         pipeline.update_precomputed_faces()
-                    # 4. validate network
-                    if epoch >= super_params.train_epochs and \
-                        (epoch - super_params.train_epochs) % super_params.val_interval == 0:
+                    
+                    # Validate network
+                    if (epoch - super_params.train_epochs) % super_params.val_interval == 0:
                         pipeline.valid(epoch, super_params.save_on)
 
 

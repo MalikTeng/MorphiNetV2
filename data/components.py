@@ -32,7 +32,7 @@ class Maskd(MapTransform):
                 if data["modal"] == "ct" and "pred" in key:
                     # mask the CTA images near the basal and apex plane
                     mask = np.zeros_like(array).astype(bool)
-                    mask[:, 6:-6] = True
+                    mask[:, 12:-12] = True
                     array[~mask] = array.min()
 
                     data[key] = MetaTensor(array, affine=data[key].affine, 
@@ -40,10 +40,10 @@ class Maskd(MapTransform):
                 
                 elif data["modal"] == "mr":
                     # pad slices on the top and bottom of the image
-                    array = np.pad(array, ((0, 0), (6, 6), (0, 0), (0, 0)), mode="constant", constant_values=array.min())
+                    array = np.pad(array, ((0, 0), (12, 12), (0, 0), (0, 0)), mode="constant", constant_values=array.min())
                     # update the affine
                     affine = data[key].affine.clone()
-                    affine[:3, -1] -= 6 * data[key].pixdim[0]
+                    affine[:3, -1] -= 12 * data[key].pixdim[0]
                     data[key] = MetaTensor(array, affine=affine,
                                            applied_operations=data[key].applied_operations)
 

@@ -52,9 +52,50 @@ __all__ = ["draw_plotly", "draw_train_loss", "draw_eval_score"]
 def draw_plotly(
     seg_true: Union[Tensor, None] = None, seg_pred: Union[Tensor, None] = None, 
     df_true: Union[Tensor, None] = None, df_pred: Union[Tensor, None] = None,
-    mesh_pred: Union[Meshes, None] = None, **kwargs
+    mesh_pred: Union[Meshes, None] = None, save_html: bool = False, 
+    save_dir: str = None, filename: str = None, export_static: bool = True, 
+    export_png_filename: str = None, **kwargs
     ):
-    fig = make_subplots(rows=1, cols=1)
+    """Draw the plotly figure for visualization.
+    
+    Args:
+        seg_true: ground truth segmentation, shape (C, H, W, D)
+        seg_pred: predicted segmentation, shape (C, H, W, D)
+        df_true: ground truth distance field, shape (C, H, W, D)
+        df_pred: predicted distance field, shape (C, H, W, D)
+        mesh_pred: predicted mesh
+        save_html: whether to save the figure as HTML file
+        save_dir: directory to save the HTML file
+        filename: name of the HTML file to save
+        export_static: whether to export a static image for wandb compatibility
+        export_png_filename: custom filename for the exported PNG (if different from HTML name)
+    """
+    fig = make_subplots(rows=1, cols=1, specs=[[{"type": "scatter3d"}]])
+    
+    # Set up the layout with proper 3D scene configuration
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='X',
+            yaxis_title='Y',
+            zaxis_title='Z',
+            aspectmode='data',  # This ensures proper scaling
+            camera=dict(
+                up=dict(x=0, y=0, z=1),
+                center=dict(x=0, y=0, z=0),
+                eye=dict(x=1.5, y=1.5, z=1.5)
+            )
+        ),
+        width=800,
+        height=800,
+        showlegend=True,
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=0.01
+        ),
+        margin=dict(l=20, r=20, t=30, b=20)  # Tighter margins for better rendering
+    )
 
     if seg_true is not None:
         num_classes = len(torch.unique(seg_true))
@@ -80,7 +121,6 @@ def draw_plotly(
                 opacity=0.25,
                 name="seg_true"
             ))
-            # print("ERROR: Only support binary segmentation for now.")
     
     if seg_pred is not None:
         num_classes = len(torch.unique(seg_pred))
@@ -106,7 +146,6 @@ def draw_plotly(
                 opacity=0.25,
                 name="seg_pred"
             ))
-            # print("ERROR: Only support binary segmentation for now.")
 
     if mesh_pred is not None:
         assert mesh_pred._N == 1, "Only support one mesh at a time."
@@ -140,14 +179,19 @@ def draw_plotly(
 
     if df_pred is not None:
         if mesh_pred is not None:
-            # calculate the distance field gradient
-            direction = torch.gradient(-df_pred[-1], dim=(0, 1, 2), edge_order=1)
+            # Convert both tensors to the same precision (float64) for grid_sample
+            # Calculate the distance field gradient
+            df_pred_double = df_pred[-1].to(torch.float64)
+            direction = torch.gradient(-df_pred_double, dim=(0, 1, 2), edge_order=1)
             direction = torch.stack(direction, dim=0)
-            direction = direction / direction.norm(dim=0, keepdim=True)
+            direction = direction / (direction.norm(dim=0, keepdim=True) + 1e-8)  # avoid division by zero
             direction[torch.isnan(direction)] = 0
             direction[torch.isinf(direction)] = 0
-            verts = 2 * (mesh_pred.verts_padded() / df_pred.shape[-1] - 0.5)
-            offset = direction * df_pred[-1].unsqueeze(0)
+            
+            # Ensure mesh vertices are in the same precision
+            verts = 2 * (mesh_pred.verts_padded().to(torch.float64) / df_pred.shape[-1] - 0.5)
+            
+            offset = direction * df_pred_double.unsqueeze(0)
             offset = F.grid_sample(
                 offset.unsqueeze(0).permute(0, 1, 4, 2, 3),
                 verts.unsqueeze(1).unsqueeze(1),
@@ -215,10 +259,63 @@ def draw_plotly(
             #         name="center_rvv"
             #     ))
         
+    # Save the figure as HTML if requested
+    if save_html and save_dir is not None:
+        import os
+        os.makedirs(save_dir, exist_ok=True)
+        file_name = filename or "plotly_figure.html"
+        html_path = os.path.join(save_dir, file_name)
+        fig.write_html(html_path)
+        print(f"Figure saved to: {html_path}")
+        
+        # Also export as static image for wandb compatibility
+        if export_static:
+            # Use custom PNG filename if provided, otherwise derive from HTML filename
+            png_filename = export_png_filename or file_name.replace('.html', '.png')
+            img_path = os.path.join(save_dir, png_filename)
+            try:
+                # Try to export as static image using plotly's built-in functionality
+                fig.write_image(img_path, scale=2)
+                print(f"Static image saved to: {img_path}")
+            except Exception as e:
+                print(f"Failed to save static image: {e}")
+                # Fallback to matplotlib if plotly export fails
+                try:
+                    import matplotlib.pyplot as plt
+                    from mpl_toolkits.mplot3d import Axes3D
+                    
+                    # Create a simple 3D plot with matplotlib to serve as a fallback
+                    plt.figure(figsize=(10, 10))
+                    ax = plt.subplot(111, projection='3d')
+                    
+                    # Add a title to identify the contents
+                    plot_title = "3D Visualization"
+                    if "seg_true" in locals() and seg_true is not None:
+                        plot_title += " - Segmentation"
+                    if "mesh_pred" in locals() and mesh_pred is not None:
+                        plot_title += " - Mesh"
+                    if "df_pred" in locals() and df_pred is not None:
+                        plot_title += " - Distance Field"
+                    
+                    ax.set_title(plot_title)
+                    ax.set_xlabel('X')
+                    ax.set_ylabel('Y')
+                    ax.set_zlabel('Z')
+                    
+                    # Add a text note about the interactive version
+                    plt.figtext(0.5, 0.01, "Interactive 3D visualization available in HTML file", 
+                                ha='center', fontsize=10)
+                    
+                    plt.savefig(img_path, dpi=200, bbox_inches='tight')
+                    plt.close()
+                    print(f"Fallback image saved to: {img_path}")
+                except Exception as e2:
+                    print(f"Failed to save fallback image: {e2}")
+        
     return fig
 
 
-def draw_train_loss(train_loss: dict, super_params: Namespace, task_code: str, phase: str):
+def draw_train_loss(train_loss: dict, super_params: Namespace, task_code: str, phase: str, ckpt_dir=None):
     sns.set_theme(style="whitegrid")
     _, ax = plt.subplots(figsize=(10, 8))
     plt.xlabel("Epoch")
@@ -247,10 +344,12 @@ def draw_train_loss(train_loss: dict, super_params: Namespace, task_code: str, p
             ax.fill_between(x_i, y_i, color=colors[i], alpha=0.6)
         plt.legend()
 
-    plt.savefig(f"{super_params.ckpt_dir}/{task_code}/{super_params.run_id}/{phase}_loss.png")
+    # Use either provided ckpt_dir or construct it from super_params
+    save_path = f"{ckpt_dir}/{phase}_loss.png" if ckpt_dir else f"{super_params.ckpt_dir}/{task_code}/{super_params.run_id}/{phase}_loss.png"
+    plt.savefig(save_path)
 
 
-def draw_eval_score(eval_score: dict, super_params: Namespace, task_code: str, module: str):
+def draw_eval_score(eval_score: dict, super_params: Namespace, task_code: str, module: str, ckpt_dir=None):
     df = pd.DataFrame(eval_score)
     df["Epoch"] = super_params.train_epochs + (df.index + 1) * super_params.val_interval
     df_melted = df.melt(id_vars="Epoch", var_name="Label", value_name="Score")
@@ -267,4 +366,7 @@ def draw_eval_score(eval_score: dict, super_params: Namespace, task_code: str, m
         ax.text(epoch, df.loc[epoch, h], f'{h}', horizontalalignment="center", color="black", weight="semibold")
     plt.xlabel("Epoch")
     plt.ylabel("Score")
-    plt.savefig(f"{super_params.ckpt_dir}/{task_code}/{super_params.run_id}/eval_{module}_score.png")
+    
+    # Use either provided ckpt_dir or construct it from super_params
+    save_path = f"{ckpt_dir}/eval_{module}_score.png" if ckpt_dir else f"{super_params.ckpt_dir}/{task_code}/{super_params.run_id}/eval_{module}_score.png"
+    plt.savefig(save_path)

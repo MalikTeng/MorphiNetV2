@@ -29,12 +29,18 @@ def train(sweep_params=None):
 
         sweep_params = wandb.config
 
+        # Extract architecture parameters
+        if 'architecture' in sweep_params:
+            sweep_params.kernel_size = sweep_params.architecture['kernel_size']
+            sweep_params.strides = sweep_params.architecture['strides']
+            sweep_params.filters = sweep_params.architecture['filters']
+
         pipeline = TrainPipeline(
             super_params=sweep_params,
             seed=8, num_workers=0,
             )
 
-        if sweep_params.save_on == "cap" and sweep_params._4d.lower() == 'y':
+        if sweep_params.save_on == "cap" and sweep_params._4d:
             # refine 4D mesh with NDF
             pipeline.load_pretrained_weight("all")
             for epoch in range(sweep_params.max_epochs, sweep_params.max_epochs + 50):
@@ -45,32 +51,57 @@ def train(sweep_params=None):
                     pipeline.valid(epoch, sweep_params.save_on)
 
         else:
+            # Simplified training workflow
+            # Check for existing checkpoints
+            has_unet_ckpt = False
+            if sweep_params.use_ckpt is not None:
+                print(f"Loading pretrained weights from {sweep_params.use_ckpt}")
+                ckpt_dir = f"{sweep_params.use_ckpt}/trained_weights"
+                unet_mr_path = glob.glob(f"{ckpt_dir}/best_UNet_MR.pth")
+                unet_ct_path = glob.glob(f"{ckpt_dir}/best_UNet_CT.pth")
+                
+                has_unet_ckpt = bool(unet_mr_path and unet_ct_path)
+                
+                # Load all available checkpoints
+                pipeline.load_pretrained_weight("all")
+            
             # train the network
-            CKPT = False
             for epoch in range(sweep_params.max_epochs):
                 torch.cuda.empty_cache()
+                
+                # Phase 1: UNet training (segmentation encoder)
                 if epoch < sweep_params.pretrain_epochs:
-                    if sweep_params.use_ckpt is not None and CKPT is False:
-                        pipeline.load_pretrained_weight("unet")
-                        CKPT = True
-                    elif CKPT is False:
-                        # 1. train segmentation encoder
+                    if not has_unet_ckpt:
                         pipeline.train_iter(epoch, "unet")
+                    else:
+                        print(f"Skipping UNet training (epoch {epoch}) - using checkpoint")
+                        # Jump to next phase
+                        epoch = sweep_params.pretrain_epochs - 1
+                
+                # Phase 2: ResNet training (distance field prediction)
                 elif epoch < sweep_params.train_epochs:
-                    # drop the rotation and flip augmentation
+                    # First epoch of ResNet phase - ensure UNet weights are loaded
                     if epoch == sweep_params.pretrain_epochs:
-                        pipeline._data_warper(rotation=False)
-                    # 2. train distance field prediction module
+                        pipeline.load_pretrained_weight("unet")
+                    
+                    # if not has_resnet_ckpt:
                     pipeline.train_iter(epoch, "resnet")
+                
+                # Phase 3: GSN training (graph subdivision) - always train this phase
                 else:
-                    # 3. fine-tune the subdiv module
+                    # First epoch of GSN phase - ensure all weights are loaded
+                    if epoch == sweep_params.train_epochs:
+                        pipeline.load_pretrained_weight("all")
+                    
+                    # Always train the GSN module
                     pipeline.train_iter(epoch, "gsn")
-                    # 3.1 reduce the mesh face numbers
+                    
+                    # Reduce mesh face numbers if needed
                     if epoch - sweep_params.train_epochs == sweep_params.reduce_count_down:
                         pipeline.update_precomputed_faces()
-                    # 4. validate network
-                    if epoch >= sweep_params.train_epochs and \
-                        (epoch - sweep_params.train_epochs) % sweep_params.val_interval == 0:
+                    
+                    # Validate network
+                    if (epoch - sweep_params.train_epochs) % sweep_params.val_interval == 0:
                         pipeline.valid(epoch, sweep_params.save_on)
 
 
@@ -86,7 +117,7 @@ if __name__ == '__main__':
         },
         'parameters': {
             'save_on': {
-                'value': 'sct'
+                'value': 'cap'
             },
             'ct_ratio': {
                 'value': 1.0
@@ -98,16 +129,16 @@ if __name__ == '__main__':
                 'value': '/home/yd21/Documents/MorphiNet/template/template_mesh-myo.obj'
             },
             'max_epochs': {
-                'value': 120
+                'value': 200
             },
             'pretrain_epochs': {
-                'value': 1
+                'value': 100
             },
             'train_epochs': {
-                'value': 81
+                'value': 150
             },
             'val_interval': {
-                'value': 10
+                'value': 5
             },
             'reduce_count_down': {
                 'value': -1
@@ -125,7 +156,7 @@ if __name__ == '__main__':
                 'value': [128, 128, 128]
             },
             'pixdim': {
-                'value': [4, 4, 4]
+                'value': [8, 8, 8]
             },
             'lambda_0': {
                 'distribution': 'uniform',
@@ -138,9 +169,7 @@ if __name__ == '__main__':
                 'max': 1.0
             },
             "iteration": {
-                "distribution": "int_uniform",
-                "min": 5,
-                "max": 15
+                'value': 10
             },
             'ct_json_dir': {
                 'value': '/home/yd21/Documents/MorphiNet/dataset/dataset_task20_f0.json'
@@ -158,7 +187,7 @@ if __name__ == '__main__':
                 'value': '/mnt/data/Experiment/MorphiNet/Checkpoint'
             },
             'use_ckpt': {
-                'value': '/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2024-08-10-2338'
+                'value': None,
             },
             'out_dir': {
                 'value': '/mnt/data/Experiment/MorphiNet/Result'
@@ -166,30 +195,51 @@ if __name__ == '__main__':
             'num_classes': {
                 'value': 4
             },
-            'kernel_size': {
-                'value': [3, 3, 3, 3, 3]
-            },
-            'strides': {
-                'value': [1, 2, 2, 2, 2]
-            },
-            'filters': {
-                'value': [8, 16, 32, 64, 128]
+            'architecture': {
+                'values': [
+                    {
+                        'kernel_size': [3, 3, 3],
+                        'strides': [1, 2, 2],
+                        'filters': [8, 16, 32]
+                    },
+                    {
+                        'kernel_size': [3, 3, 3, 3],
+                        'strides': [1, 2, 2, 2],
+                        'filters': [8, 16, 32, 64]
+                    },
+                    {
+                        'kernel_size': [3, 3, 3, 3, 3],
+                        'strides': [1, 2, 2, 2, 2],
+                        'filters': [8, 16, 32, 64, 128]
+                    },
+                    {
+                        'kernel_size': [3, 3, 3, 3, 3, 3],
+                        'strides': [1, 2, 2, 2, 2, 2],
+                        'filters': [8, 16, 32, 64, 128, 256]
+                    }
+                ]
             },
             'layers': {
-                'value': [1, 2, 2, 4]
-            },
-            'block_inplanes': {
-                'value': [8, 16, 32, 64]
+                'values': [
+                    [1, 2, 2, 4],
+                    [1, 2, 2, 4, 4],
+                    [1, 2, 2, 4, 4, 4],
+                ]
             },
             'subdiv_levels': {
                 'value': 2
             },
             'hidden_features_gsn': {
-                'value': 16
+                'values': [8, 16, 32, 64]
             },
             'run_id': {
                 'value': f"sct--myo--f0--{run_id}"
             },
+            'sigmoid_scale_factor': {
+                'distribution': 'uniform',
+                'min': 1.0,
+                'max': 3.0
+            }
         }
     }
 
@@ -197,4 +247,4 @@ if __name__ == '__main__':
     sweep_id = wandb.sweep(sweep_params, project="MorphiNet-sweeps")
 
     # run the sweep
-    wandb.agent(sweep_id, function=train, count=20)
+    wandb.agent(sweep_id, function=train, count=5)

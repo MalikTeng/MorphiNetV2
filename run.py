@@ -68,6 +68,7 @@ class TrainPipeline:
         self.num_workers = num_workers
         self.is_training = is_training
         self.target = kwargs.get("target")
+        self.sigmoid_scale_factor = super_params.sigmoid_scale_factor # Store the new parameter
         set_determinism(seed=self.seed)
 
         if is_training:
@@ -98,8 +99,8 @@ class TrainPipeline:
         # data augmentation for resizing the segmentation prediction into crop window size
         self.pred_transform = Compose([
             AsDiscrete(argmax=True),
-            KeepLargestConnectedComponent(independent=True),
             RemoveSmallObjects(min_size=8),
+            KeepLargestConnectedComponent(independent=True, connectivity=1),
         ])
         self.post_transform = Compose([
             Spacingd(["pred", "label"], [2.0, 2.0, 2.0], mode=("bilinear", "nearest"), allow_missing_keys=True),
@@ -126,8 +127,9 @@ class TrainPipeline:
             EnsureTyped(["pred", "label"], device=DEVICE, allow_missing_keys=True),
         ])
 
-        if super_params.use_ckpt is None:
-            self._data_warper(rotation=True)
+        # if super_params.use_ckpt is None:
+        #     self._data_warper(rotation=True)
+        self._data_warper(rotation=False)
 
         # import control mesh (NDC space, [-1, 1]) to compute the subdivision matrix
         template_mesh = load(super_params.template_mesh_dir)
@@ -225,15 +227,15 @@ class TrainPipeline:
         
 
     def _prepare_dataset(self, data_json, modal, train_transform, valid_transform):
-        train_data = self._remap_abs_path(data_json["train_fold0"], modal, "Tr")
-        valid_data = self._remap_abs_path(data_json["validation_fold0"], modal, "Tr")
-        test_data = self._remap_abs_path(data_json["test"], modal, "Ts")
+        train_data = self._remap_abs_path(data_json["train_fold0"], modal, "Tr")[:50]
+        valid_data = self._remap_abs_path(data_json["validation_fold0"], modal, "Tr")[:50]
+        test_data = self._remap_abs_path(data_json["test"], modal, "Ts")[:50]
 
-        if modal == "ct":
-            train_data = train_data[:np.floor(self.super_params.ct_ratio * len(train_data)).astype(int)]
-            target_length = 186  # 0.8 * 232 = 185.6, rounded up to 186
-            while len(train_data) < 186:
-                train_data.extend(train_data[:min(186 - len(train_data), len(train_data))])
+        # if modal == "ct":
+        #     train_data = train_data[:np.floor(self.super_params.ct_ratio * len(train_data)).astype(int)]
+        #     target_length = np.ceil(291 * 0.8).astype(int)
+        #     while len(train_data) < target_length:
+        #         train_data.extend(train_data[:min(target_length - len(train_data), len(train_data))])
 
         if not self.is_training:
             train_ds = None
@@ -287,12 +289,21 @@ class TrainPipeline:
 
     def _prepare_modules(self):
         # initialise the df-predict module
+        # Convert 1D parameter lists to the appropriate dimension based on spatial_dims
+        mr_kernel_size = [(k, k) for k in self.super_params.kernel_size]
+        mr_strides = [(s, s) for s in self.super_params.strides]
+        mr_upsample_kernel_size = [(s, s) for s in self.super_params.strides[1:]]
+        
+        ct_kernel_size = [(k, k, k) for k in self.super_params.kernel_size]
+        ct_strides = [(s, s, s) for s in self.super_params.strides]
+        ct_upsample_kernel_size = [(s, s, s) for s in self.super_params.strides[1:]]
+        
         self.encoder_mr = DynUNet(
             spatial_dims=2, in_channels=1,
             out_channels=self.super_params.num_classes,
-            kernel_size=self.super_params.kernel_size, 
-            strides=self.super_params.strides,
-            upsample_kernel_size=self.super_params.strides[1:], 
+            kernel_size=mr_kernel_size, 
+            strides=mr_strides,
+            upsample_kernel_size=mr_upsample_kernel_size, 
             filters=self.super_params.filters, 
             dropout=False,
             deep_supervision=False,
@@ -301,9 +312,9 @@ class TrainPipeline:
         self.encoder_ct = DynUNet(
             spatial_dims=3, in_channels=1,
             out_channels=self.super_params.num_classes,
-            kernel_size=self.super_params.kernel_size, 
-            strides=self.super_params.strides,
-            upsample_kernel_size=self.super_params.strides[1:], 
+            kernel_size=ct_kernel_size, 
+            strides=ct_strides,
+            upsample_kernel_size=ct_upsample_kernel_size, 
             filters=self.super_params.filters, 
             dropout=False,
             deep_supervision=False,
@@ -330,18 +341,26 @@ class TrainPipeline:
 
 
     def _prepare_optimiser(self):
-        self.dice_loss_fn = DiceCELoss(
+        # Create separate loss functions for CT and MR training to avoid shared state
+        self.dice_loss_fn_ct = DiceCELoss(
             include_background=True,
             to_onehot_y=True,
             softmax=True,
             )
+        
+        self.dice_loss_fn_mr = DiceCELoss(
+            include_background=True,
+            to_onehot_y=True,
+            softmax=True,
+            )
+            
         self.mse_loss_fn = nn.MSELoss()
 
-        self.msk_dice_loss_fn = MaskedDiceLoss(
+        self.msk_dice_loss_fn = DiceCELoss(
             include_background=True,
             to_onehot_y=True,
             softmax=True,
-            )
+        )
         self.l1_loss_fn = nn.L1Loss()
 
         # initialise the optimiser for unet
@@ -396,7 +415,11 @@ class TrainPipeline:
         )
 
         # initialise the gradient scaler
-        self.scaler = torch.cuda.amp.GradScaler()
+        self.scaler_mr_unet = torch.cuda.amp.GradScaler()
+        self.scaler_ct_unet = torch.cuda.amp.GradScaler()
+        self.scaler_resnet = torch.cuda.amp.GradScaler()
+        self.scaler_gsn = torch.cuda.amp.GradScaler()
+        self.scaler_ndf = torch.cuda.amp.GradScaler()
         
         torch.backends.cudnn.enabled = torch.backends.cudnn.is_available()
         torch.backends.cudnn.benchmark = torch.backends.cudnn.is_available()
@@ -451,7 +474,7 @@ class TrainPipeline:
             sin_theta = vector_msh_xz[:, 0] * vector_df_xz[:, 1] - vector_msh_xz[:, 1] * vector_df_xz[:, 0]
 
             # Create rotation matrices
-            R = torch.zeros(vector_msh.shape[0], 3, 3, device=vector_msh.device)
+            R = torch.zeros(vector_msh.shape[0], 3, 3, device=vector_msh.device, dtype=torch.float64)
             R[:, 0, 0] = cos_theta
             R[:, 0, 2] = sin_theta
             R[:, 1, 1] = 1
@@ -462,7 +485,7 @@ class TrainPipeline:
 
         template_mesh = load(self.super_params.template_mesh_dir)
         template_mesh = Meshes(
-            verts=[torch.tensor(template_mesh.vertices, dtype=torch.float32)], 
+            verts=[torch.tensor(template_mesh.vertices, dtype=torch.float64)], 
             faces=[torch.tensor(template_mesh.faces, dtype=torch.int64)]
             ).to(DEVICE).extend(b)
         
@@ -470,18 +493,20 @@ class TrainPipeline:
         # stage 1: smooth global offset
         verts = template_mesh.verts_padded()
         # find the rotation matrix that makes the centroid vector are in the same direction
-        df_c = torch.stack([2 * (torch.nonzero(df <= 1).to(torch.float32).mean(0) / d - 0.5) 
+        df_c = torch.stack([2 * (torch.nonzero(df <= 1).to(torch.float64).mean(0) / d - 0.5) 
                             for df in df_preds[:, 2]])[:, [1, 0, 2]]   # reorder dimensions
-        mesh_c = self.mesh_c[1].unsqueeze(0).expand(b, -1)
+        mesh_c = self.mesh_c[1].unsqueeze(0).expand(b, -1).to(torch.float64)
         R = find_rotation_matrix_xz(mesh_c, df_c)
-        verts = torch.bmm(R, verts.transpose(1, 2)).transpose(1, 2).to(torch.float32)
+        # Ensure verts are in double precision before matrix multiplication
+        verts = verts.to(torch.float64)
+        verts = torch.bmm(R, verts.transpose(1, 2)).transpose(1, 2)
 
         template_mesh = template_mesh.update_padded(verts)
 
         # stage 2: local offset
         verts = template_mesh.verts_padded()
         for i, l in zip([1, 0, 2, 0], [[0], [2], [1], [3]]): # lv-epi, lv, rv, rv-epi
-            df_pred = df_preds[:, i]
+            df_pred = df_preds[:, i].to(torch.float64)
             verts_idx = torch.any(torch.stack([self.vert_label == i for i in l]), dim=0)
 
             # calculate the gradient of the df
@@ -520,56 +545,82 @@ class TrainPipeline:
     def load_pretrained_weight(self, phase):
         # Determine which checkpoint directory to use
         if self.super_params.use_ckpt is None:
-            # Use checkpoints from the current training process
-            ckpt_dir = os.path.join(self.ckpt_dir, "trained_weights")
-            print(f"Using checkpoints from current training: {ckpt_dir}")
+            # Using weights from current training session, no need to load checkpoints
+            print("Using model weights from current training session")
+            return
         else:
-            # Use pretrained checkpoints from the specified directory
-            ckpt_dir = f"{self.super_params.use_ckpt}/trained_weights"
-            print(f"Using pretrained checkpoints from: {ckpt_dir}")
+            # Load pretrained checkpoints from the specified directory
+            ckpt_dir = os.path.join(self.super_params.use_ckpt, "trained_weights")
+            print(f"Loading pretrained checkpoints from: {ckpt_dir}")
+            
+            if phase == "unet" or phase == "all":
+                try:
+                    encoder_mr_path = glob.glob(f"{ckpt_dir}/best_UNet_MR.pth")
+                    encoder_ct_path = glob.glob(f"{ckpt_dir}/best_UNet_CT.pth")
+                    
+                    if encoder_mr_path and encoder_ct_path:
+                        encoder_mr_ckpt = torch.load(encoder_mr_path[0], map_location=DEVICE)
+                        encoder_ct_ckpt = torch.load(encoder_ct_path[0], map_location=DEVICE)
+                        self.encoder_mr.load_state_dict(encoder_mr_ckpt)
+                        self.encoder_ct.load_state_dict(encoder_ct_ckpt)
+                        print("UNet weights loaded successfully.")
+                except Exception as e:
+                    print(f"Note: {e}")
+                    print("Proceeding with current model weights.")
+
+            if phase == "resnet" or phase == "all":
+                try:
+                    decoder_path = glob.glob(f"{ckpt_dir}/best_ResNet.pth")
+                    if decoder_path:
+                        decoder_ckpt = torch.load(decoder_path[0], map_location=DEVICE)
+                        self.decoder.load_state_dict(decoder_ckpt)
+                        print("ResNet weights loaded successfully.")
+                except Exception as e:
+                    print(f"Note: {e}")
+                    print("Proceeding with current model weights.")
+
+            # GSN checkpoint loading is intentionally skipped
+            # The GSN will always use its current weights
+
+
+    def _filter_unlabeled_slices(self, img, seg):
+        """
+        Filter out slices without labels between the first and last labeled slice.
+        Maintains corresponding slices in both halves of the data.
         
-        if phase == "unet" or phase == "all":
-            try:
-                encoder_mr_path = glob.glob(f"{ckpt_dir}/best_UNet_MR.pth")
-                encoder_ct_path = glob.glob(f"{ckpt_dir}/best_UNet_CT.pth")
-                
-                if encoder_mr_path and encoder_ct_path:
-                    encoder_mr_ckpt = torch.load(encoder_mr_path[0], map_location=DEVICE)
-                    encoder_ct_ckpt = torch.load(encoder_ct_path[0], map_location=DEVICE)
-                    self.encoder_mr.load_state_dict(encoder_mr_ckpt)
-                    self.encoder_ct.load_state_dict(encoder_ct_ckpt)
-                    print("Pretrained UNet loaded.")
-                else:
-                    print("Warning: UNet checkpoints not found, using current model weights.")
-            except Exception as e:
-                print(f"Error loading UNet checkpoints: {e}")
-                print("Using current model weights.")
-
-        if phase == "resnet" or phase == "all":
-            try:
-                decoder_path = glob.glob(f"{ckpt_dir}/best_ResNet.pth")
-                if decoder_path:
-                    decoder_ckpt = torch.load(decoder_path[0], map_location=DEVICE)
-                    self.decoder.load_state_dict(decoder_ckpt)
-                    print("Pretrained ResNet loaded.")
-                else:
-                    print("Warning: ResNet checkpoint not found, using current model weights.")
-            except Exception as e:
-                print(f"Error loading ResNet checkpoint: {e}")
-                print("Using current model weights.")
-
-        if phase == "gsn" or phase == "all":
-            try:
-                gsn_path = glob.glob(f"{ckpt_dir}/best_GSN.pth")
-                if gsn_path:
-                    GSN_ckpt = torch.load(gsn_path[0], map_location=DEVICE)
-                    self.GSN.load_state_dict(GSN_ckpt)
-                    print("Pretrained GSN loaded.")
-                else:
-                    print("Warning: GSN checkpoint not found, using current model weights.")
-            except Exception as e:
-                print(f"Error loading GSN checkpoint: {e}")
-                print("Using current model weights.")
+        Args:
+            img: Input image tensor
+            seg: Input segmentation tensor
+            
+        Returns:
+            Filtered image and segmentation tensors
+        """
+        half_size = seg.shape[0]//2
+        mask = seg[:half_size] > 0
+        has_label = mask.any(dim=1).any(dim=1).any(dim=1)
+        
+        if has_label.sum() > 0:  # Only process if at least one slice has a label
+            start_idx = torch.where(has_label)[0].min()
+            end_idx = torch.where(has_label)[0].max()
+            
+            # Create a full mask: keep slices outside [start_idx, end_idx] and labeled slices within range
+            full_mask = torch.ones_like(has_label, device=DEVICE, dtype=torch.bool)
+            full_mask[start_idx:end_idx+1] = has_label[start_idx:end_idx+1]  # Only filter unlabeled slices within range
+            
+            # Get valid indices from first half
+            first_half_indices = torch.where(full_mask)[0]
+            
+            # Create corresponding indices for the second half
+            second_half_indices = first_half_indices + half_size
+            
+            # Combine indices from both halves
+            valid_indices = torch.cat([first_half_indices, second_half_indices])
+            
+            # Apply the mask
+            img = img[valid_indices]
+            seg = seg[valid_indices]
+            
+        return img, seg
 
 
     def train_iter(self, epoch, phase):
@@ -584,6 +635,7 @@ class TrainPipeline:
                     data_ct["ct_image"].as_tensor().to(DEVICE),
                     data_ct["ct_label"].as_tensor().to(DEVICE),
                     )
+                
 
                 self.optimzer_ct_unet.zero_grad()
                 with torch.autocast(device_type=DEVICE):
@@ -595,11 +647,11 @@ class TrainPipeline:
                         overlap=0.5, 
                         mode="gaussian", 
                     ) 
-                    loss = self.dice_loss_fn(seg_pred_ct, seg_true_ct)
+                    loss = self.dice_loss_fn_ct(seg_pred_ct, seg_true_ct)
 
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimzer_ct_unet)
-                self.scaler.update()
+                self.scaler_ct_unet.scale(loss).backward()
+                self.scaler_ct_unet.step(self.optimzer_ct_unet)
+                self.scaler_ct_unet.update()
                 
                 train_loss_epoch["ct"] += loss.item()
             
@@ -614,6 +666,9 @@ class TrainPipeline:
                     data_mr["mr_label"].as_tensor().to(DEVICE),
                     )
 
+                # Filter out slices without labels
+                img_mr, seg_true_mr = self._filter_unlabeled_slices(img_mr, seg_true_mr)
+
                 self.optimzer_mr_unet.zero_grad()
                 with torch.autocast(device_type=DEVICE):
                     seg_pred_mr = sliding_window_inference(
@@ -624,11 +679,11 @@ class TrainPipeline:
                         overlap=0.5,
                         mode="gaussian",
                     )
-                    loss = self.dice_loss_fn(seg_pred_mr, seg_true_mr)
+                    loss = self.dice_loss_fn_mr(seg_pred_mr, seg_true_mr)
 
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimzer_mr_unet)
-                self.scaler.update()
+                self.scaler_mr_unet.scale(loss).backward()
+                self.scaler_mr_unet.step(self.optimzer_mr_unet)
+                self.scaler_mr_unet.update()
                 
                 train_loss_epoch["mr"] += loss.item()
 
@@ -676,14 +731,19 @@ class TrainPipeline:
                     seg_true_ct_ds = F.interpolate(seg_true_ct.as_tensor(),
                                                    scale_factor=1 / self.super_params.pixdim[-1],
                                                    mode="nearest-exact")
-                    mask = (torch.argmax(seg_pred_ct_ds, dim=1, keepdim=True) == 0).detach()
-                    seg_pred_ct_ds = ~mask * seg_pred_ct_ds + mask * self.decoder(seg_pred_ct_ds)
+                    
+                    # Calculate binary mask and compute distance map
+                    binary_mask_pred = torch.argmax(seg_pred_ct_ds, dim=1, keepdim=False) == 0 # Reverted to argmax logic
+                    dist_map_pred = (-distance_transform_edt(binary_mask_pred[:, 0]) + distance_transform_edt(~binary_mask_pred[:, 0])).unsqueeze(1)
+                    mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor).detach() # Use the parameter
+                    
+                    seg_pred_ct_ds = (1-mask) * seg_pred_ct_ds + mask * self.decoder(seg_pred_ct_ds)
 
-                    loss = self.msk_dice_loss_fn(seg_pred_ct_ds, seg_true_ct_ds, mask)
+                    loss = self.msk_dice_loss_fn(seg_pred_ct_ds, seg_true_ct_ds)
 
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer_resnet)
-                self.scaler.update()
+                self.scaler_resnet.scale(loss).backward()
+                self.scaler_resnet.step(self.optimizer_resnet)
+                self.scaler_resnet.update()
                 
                 train_loss_epoch["total"] += loss.item()
                 train_loss_epoch["df"] += loss.item()
@@ -728,9 +788,14 @@ class TrainPipeline:
                     seg_pred_ct_ds = F.interpolate(seg_pred_ct.as_tensor(), 
                                                     scale_factor=1 / self.super_params.pixdim[-1], 
                                                     mode="trilinear")
-                    mask = (torch.argmax(seg_pred_ct_ds, dim=1, keepdim=True) == 0).detach()
-                    seg_pred_ct_ds = ~mask * seg_pred_ct_ds + mask * self.decoder(seg_pred_ct_ds)
+                    
+                    binary_mask_pred = torch.argmax(seg_pred_ct_ds, dim=1, keepdim=False) == 0 # Reverted to argmax logic
+                    dist_map_pred = (-distance_transform_edt(binary_mask_pred[:, 0]) + distance_transform_edt(~binary_mask_pred[:, 0])).unsqueeze(1)
+                    mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor).detach()
+
+                    seg_pred_ct_ds = (1-mask) * seg_pred_ct_ds + mask * self.decoder(seg_pred_ct_ds)
                     seg_pred_ct_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ct_ds])
+                    
                     foreground = (seg_pred_ct_ds > 0)
                     lv = (seg_pred_ct_ds == 1)
                     rv = (seg_pred_ct_ds == 3)
@@ -740,6 +805,10 @@ class TrainPipeline:
                         for i in [foreground, lv, rv, myo]], dim=1)
                     
                     template_mesh = self.warp_template_mesh(df_pred_ct.detach())
+                    
+                    # Convert template mesh to half precision for compatibility with AMP training
+                    template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float16))
+                    
                     level_outs = self.GSN(template_mesh, self.subdivided_faces.faces_levels)
 
                     loss_chmf, loss_smooth = 0.0, 0.0
@@ -756,9 +825,9 @@ class TrainPipeline:
                     loss = self.super_params.lambda_0 * loss_chmf +\
                         self.super_params.lambda_1 * loss_smooth
 
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer_gsn)
-                self.scaler.update()
+                self.scaler_gsn.scale(loss).backward()
+                self.scaler_gsn.step(self.optimizer_gsn)
+                self.scaler_gsn.update()
                 
                 finetune_loss_epoch["total"] += loss.item()
                 finetune_loss_epoch["chmf"] += loss_chmf.item()
@@ -812,7 +881,7 @@ class TrainPipeline:
         #                                                 scale_factor=1 / self.super_params.pixdim[-1], 
         #                                                 mode="trilinear")
         #                 mask = (torch.argmax(seg_pred_mr_ds, dim=1, keepdim=True) == 0)
-        #                 seg_pred_mr_ds = ~mask * seg_pred_mr_ds + mask * self.decoder(seg_pred_mr_ds)
+        #                 seg_pred_mr_ds = (1-mask) * seg_pred_mr_ds + mask * self.decoder(seg_pred_mr_ds)
         #                 seg_pred_mr_ds = torch.stack([self.pred_transform(i) for i in seg_pred_mr_ds])
         #                 foreground = (seg_pred_mr_ds > 0)
         #                 lv = (seg_pred_mr_ds == 1)
@@ -843,9 +912,9 @@ class TrainPipeline:
 
         #                 if loss != loss: continue
 
-        #             self.scaler.scale(loss).backward()
-        #             self.scaler.step(self.optimizer_ndf)
-        #             self.scaler.update()
+        #             self.scaler_ndf.scale(loss).backward()
+        #             self.scaler_ndf.step(self.optimizer_ndf)
+        #             self.scaler_ndf.update()
 
         #             train_loss_epoch["total"] += loss.item()
         #             train_loss_epoch["ndf"] += loss_ndf.item()
@@ -875,15 +944,15 @@ class TrainPipeline:
         # save model
         ckpt_weight_path = os.path.join(self.ckpt_dir, "trained_weights")
         os.makedirs(ckpt_weight_path, exist_ok=True)
-        torch.save(self.encoder_ct.state_dict(), f"{ckpt_weight_path}/{epoch + 1}_UNet_CT.pth")
-        torch.save(self.encoder_mr.state_dict(), f"{ckpt_weight_path}/{epoch + 1}_UNet_MR.pth")
-        torch.save(self.decoder.state_dict(), f"{ckpt_weight_path}/{epoch + 1}_ResNet.pth")
-        torch.save(self.GSN.state_dict(), f"{ckpt_weight_path}/{epoch + 1}_GSN.pth")
+        torch.save(self.encoder_ct.state_dict(), os.path.join(ckpt_weight_path, f"{epoch + 1}_UNet_CT.pth"))
+        torch.save(self.encoder_mr.state_dict(), os.path.join(ckpt_weight_path, f"{epoch + 1}_UNet_MR.pth"))
+        torch.save(self.decoder.state_dict(), os.path.join(ckpt_weight_path, f"{epoch + 1}_ResNet.pth"))
+        torch.save(self.GSN.state_dict(), os.path.join(ckpt_weight_path, f"{epoch + 1}_GSN.pth"))
         if self.super_params._4d:
-            torch.save(self.NDF.state_dict(), f"{ckpt_weight_path}/{epoch + 1}_NDF.pth")
+            torch.save(self.NDF.state_dict(), os.path.join(ckpt_weight_path, f"{epoch + 1}_NDF.pth"))
         # save the subdivided_faces.faces_levels as pth file
         for level, faces in enumerate(self.subdivided_faces.faces_levels):
-            torch.save(faces, f"{ckpt_weight_path}/{epoch+1}_subdivided_faces_l{level}.pth")
+            torch.save(faces, os.path.join(ckpt_weight_path, f"{epoch+1}_subdivided_faces_l{level}.pth"))
         
         # choose the validation loader
         if save_on == "sct":
@@ -930,8 +999,12 @@ class TrainPipeline:
                 seg_pred_ds = F.interpolate(seg_pred.as_tensor(), 
                                                 scale_factor=1 / self.super_params.pixdim[-1], 
                                                 mode="trilinear")
-                mask = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0).detach()
-                seg_pred_ds = ~mask * seg_pred_ds + mask * self.decoder(seg_pred_ds)
+                
+                binary_mask_pred = torch.argmax(seg_pred_ds, dim=1, keepdim=False) == 0 # Reverted to argmax logic
+                dist_map_pred = (-distance_transform_edt(binary_mask_pred[:, 0]) + distance_transform_edt(~binary_mask_pred[:, 0])).unsqueeze(1)
+                mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor).detach()
+
+                seg_pred_ds = (1-mask) * seg_pred_ds + mask * self.decoder(seg_pred_ds)
                 seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
                 foreground = (seg_pred_ds > 0)
                 lv = (seg_pred_ds == 1)
@@ -945,19 +1018,10 @@ class TrainPipeline:
 
                 # evaluate the error between subdivided mesh and the true segmentation
                 template_mesh = self.warp_template_mesh(df_pred)
-                template_mesh_ = template_mesh.clone()
-
-                if save_on == "cap" and self.super_params._4d:
-                    # method 1: NDF applied right after warping the control mesh
-                    ndf_verts = self.NDF(template_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False) 
-                    template_mesh = template_mesh.update_padded(ndf_verts)
-
-                subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
+                # Convert template mesh to half precision for compatibility with AMP training
+                template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float16))
                 
-                # if save_on == "cap" and self.super_params._4d:
-                #     # method 2: NDF applied after the GSN
-                #     ndf_verts = self.NDF(subdiv_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False)
-                #     subdiv_mesh = subdiv_mesh.update_padded(ndf_verts)
+                subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
                 
                 voxeld_mesh = torch.cat([
                     self.rasterizer(
@@ -982,7 +1046,7 @@ class TrainPipeline:
                                                     scale_factor=1 / self.super_params.pixdim[-1], 
                                                     mode="nearest-exact")[0].cpu(),
                         "subdiv_mesh": subdiv_mesh[0].cpu(),
-                        "template_mesh": template_mesh_[0].cpu(),
+                        "template_mesh": template_mesh[0].cpu(),
                     }
 
         # log dice score
@@ -990,71 +1054,154 @@ class TrainPipeline:
         self.eval_msh_score["myo"] = np.append(self.eval_msh_score["myo"], msh_metric_batch_decoder.aggregate().cpu())
         draw_train_loss(
             self.ndf_loss if self.super_params._4d else self.gsn_loss, 
-            self.super_params, task_code="dynamic", phase="train"
+            self.super_params, task_code="dynamic", phase="train",
+            ckpt_dir=self.ckpt_dir
             )
-        draw_eval_score(self.eval_df_score, self.super_params, task_code="dynamic", module="df")
-        draw_eval_score(self.eval_msh_score, self.super_params, task_code="dynamic", module="msh")
+        draw_eval_score(self.eval_df_score, self.super_params, task_code="dynamic", module="df", ckpt_dir=self.ckpt_dir)
+        draw_eval_score(self.eval_msh_score, self.super_params, task_code="dynamic", module="msh", ckpt_dir=self.ckpt_dir)
+        
+        # Calculate evaluation score
+        eval_score_epoch = msh_metric_batch_decoder.aggregate().mean()
+        
+        # Combine all metrics in a single log call
         wandb.log({
             "train_categorised_loss": wandb.Table(
-            columns=[f"train_loss \u2193", f"eval_df_error \u2193", f"eval_msh_score \u2191"],
-            data=[[
-                wandb.Image(f"{self.super_params.ckpt_dir}/dynamic/{self.super_params.run_id}/train_loss.png"),
-                wandb.Image(f"{self.super_params.ckpt_dir}/dynamic/{self.super_params.run_id}/eval_df_score.png"),
-                wandb.Image(f"{self.super_params.ckpt_dir}/dynamic/{self.super_params.run_id}/eval_msh_score.png"),
+                columns=[f"train_loss \u2193", f"eval_df_error \u2193", f"eval_msh_score \u2191"],
+                data=[[
+                    wandb.Image(f"{self.ckpt_dir}/train_loss.png"),
+                    wandb.Image(f"{self.ckpt_dir}/eval_df_score.png"),
+                    wandb.Image(f"{self.ckpt_dir}/eval_msh_score.png"),
                 ]]
-            )},
-            step=epoch + 1
-            )
-        eval_score_epoch = msh_metric_batch_decoder.aggregate().mean()
-        wandb.log({"eval_score": eval_score_epoch}, step=epoch + 1)
-
+            ),
+            "eval_score": eval_score_epoch,
+            "epoch": epoch + 1  # Add epoch as a custom x-axis
+        }, step=epoch + 1)
+        
+        # Update summary for best values (helps in run comparison)
+        if eval_score_epoch > self.best_eval_score:
+            wandb.run.summary["best_eval_score"] = eval_score_epoch
 
         if eval_score_epoch > self.best_eval_score:
             # save the best model
-            torch.save(self.encoder_ct.state_dict(), f"{ckpt_weight_path}/best_UNet_CT.pth")
-            torch.save(self.encoder_mr.state_dict(), f"{ckpt_weight_path}/best_UNet_MR.pth")
-            torch.save(self.decoder.state_dict(), f"{ckpt_weight_path}/best_ResNet.pth")
-            torch.save(self.GSN.state_dict(), f"{ckpt_weight_path}/best_GSN.pth")
+            torch.save(self.encoder_ct.state_dict(), os.path.join(ckpt_weight_path, f"best_UNet_CT.pth"))
+            torch.save(self.encoder_mr.state_dict(), os.path.join(ckpt_weight_path, f"best_UNet_MR.pth"))
+            torch.save(self.decoder.state_dict(), os.path.join(ckpt_weight_path, f"best_ResNet.pth"))
+            torch.save(self.GSN.state_dict(), os.path.join(ckpt_weight_path, f"best_GSN.pth"))
             if self.super_params._4d:
-                torch.save(self.NDF.state_dict(), f"{ckpt_weight_path}/best_NDF.pth")
+                torch.save(self.NDF.state_dict(), os.path.join(ckpt_weight_path, f"best_NDF.pth"))
             # save the subdivided_faces.faces_levels as pth file
             for level, faces in enumerate(self.subdivided_faces.faces_levels):
-                torch.save(faces, f"{ckpt_weight_path}/best_subdivided_faces_l{level}.pth")
+                torch.save(faces, os.path.join(ckpt_weight_path, f"best_subdivided_faces_l{level}.pth"))
             self.best_eval_score = eval_score_epoch
 
             # save visualization when the eval score is the best
+            # Set up visualization directory
+            visualization_dir = f"{self.ckpt_dir}/visualizations"
+            os.makedirs(visualization_dir, exist_ok=True)
+            
+            # Create visualizations - save both HTML and static images
+            draw_plotly(
+                seg_true=cached_data["seg_true"], 
+                mesh_pred=cached_data["subdiv_mesh"],
+                save_html=True,
+                save_dir=visualization_dir,
+                filename="seg_true_vs_mesh_pred.html",
+                export_png_filename=f"seg_true_vs_mesh_pred_epoch{epoch}.png"
+            )
+            
             wandb.log(
                 {
-                    "seg_true vs mesh_pred": wandb.Plotly(draw_plotly(
-                        seg_true=cached_data["seg_true"], 
-                        mesh_pred=cached_data["subdiv_mesh"]
-                        )),
-                    "seg_true vs seg_pred": wandb.Plotly(draw_plotly(
-                        seg_true=cached_data["seg_true"], 
-                        seg_pred=cached_data["seg_pred"]
-                        )),
-                    "seg_true_ds vs seg_pred_ds": wandb.Plotly(draw_plotly(
-                        seg_true=cached_data["seg_true_ds"], 
-                        seg_pred=cached_data["seg_pred_ds"]
-                        )),
-                    "template vs df_pred": wandb.Plotly(draw_plotly(
-                        df_pred=cached_data["df_pred"],
-                        mesh_pred=cached_data["template_mesh"],
-                        mesh_c=self.mesh_c
-                        )),
-                    "seg_true_ds vs df_pred": wandb.Plotly(draw_plotly(
-                        seg_true=cached_data["seg_true_ds"], 
-                        df_pred=cached_data["df_pred"],
-                        )),
-                    "df true vs pred": wandb.Plotly(ff.create_distplot(
-                        [cached_data["df_true"][-1].flatten().cpu().numpy(), 
-                        cached_data["df_pred"][-1].flatten().cpu().numpy()],
-                        group_labels=["df_true", "df_pred"],
-                        colors=["#EF553B", "#3366CC"],
-                        bin_size=0.1
-                    )),
+                    "seg_true vs mesh_pred": wandb.Image(f"{visualization_dir}/seg_true_vs_mesh_pred_epoch{epoch}.png")
                 },
-                step=epoch + 1
+                commit=False
+            )
+            
+            draw_plotly(
+                seg_true=cached_data["seg_true"], 
+                seg_pred=cached_data["seg_pred"],
+                save_html=True,
+                save_dir=visualization_dir,
+                filename="seg_true_vs_seg_pred.html",
+                export_png_filename=f"seg_true_vs_seg_pred_epoch{epoch}.png"
+            )
+            
+            wandb.log(
+                {
+                    "seg_true vs seg_pred": wandb.Image(f"{visualization_dir}/seg_true_vs_seg_pred_epoch{epoch}.png")
+                },
+                commit=False
+            )
+            
+            draw_plotly(
+                seg_true=cached_data["seg_true_ds"], 
+                seg_pred=cached_data["seg_pred_ds"],
+                save_html=True,
+                save_dir=visualization_dir,
+                filename="seg_true_ds_vs_seg_pred_ds.html",
+                export_png_filename=f"seg_true_ds_vs_seg_pred_ds_epoch{epoch}.png"
+            )
+            
+            wandb.log(
+                {
+                    "seg_true_ds vs seg_pred_ds": wandb.Image(f"{visualization_dir}/seg_true_ds_vs_seg_pred_ds_epoch{epoch}.png")
+                },
+                commit=False
+            )
+            
+            draw_plotly(
+                df_pred=cached_data["df_pred"],
+                mesh_pred=cached_data["template_mesh"],
+                mesh_c=self.mesh_c,
+                save_html=True,
+                save_dir=visualization_dir,
+                filename="template_vs_df_pred.html",
+                export_png_filename=f"template_vs_df_pred_epoch{epoch}.png"
+            )
+            
+            wandb.log(
+                {
+                    "template vs df_pred": wandb.Image(f"{visualization_dir}/template_vs_df_pred_epoch{epoch}.png")
+                },
+                commit=False
+            )
+            
+            draw_plotly(
+                seg_true=cached_data["seg_true_ds"], 
+                df_pred=cached_data["df_pred"],
+                save_html=True,
+                save_dir=visualization_dir,
+                filename="seg_true_ds_vs_df_pred.html",
+                export_png_filename=f"seg_true_ds_vs_df_pred_epoch{epoch}.png"
+            )
+            
+            wandb.log(
+                {
+                    "seg_true_ds vs df_pred": wandb.Image(f"{visualization_dir}/seg_true_ds_vs_df_pred_epoch{epoch}.png")
+                },
+                commit=False
+            )
+            
+            # The last log call should have commit=True
+            # For distribution plots, keep using Plotly directly as it works reliably
+            dist_fig = ff.create_distplot(
+                [cached_data["df_true"][-1].flatten().cpu().numpy(), 
+                cached_data["df_pred"][-1].flatten().cpu().numpy()],
+                group_labels=["df_true", "df_pred"],
+                colors=["#EF553B", "#3366CC"],
+                bin_size=0.1
+            )
+            
+            # Save the distribution plot to local filesystem
+            visualization_dir = f"{self.ckpt_dir}/visualizations"
+            os.makedirs(visualization_dir, exist_ok=True)
+            dist_fig.write_image(f"{visualization_dir}/df_true_vs_pred.png")
+            
+            # Log to wandb
+            wandb.log(
+                {
+                    "df true vs pred": wandb.Image(f"{visualization_dir}/df_true_vs_pred.png")
+                },
+                commit=True
             )
          
 
@@ -1127,8 +1274,12 @@ class TrainPipeline:
                 seg_pred_ds = F.interpolate(seg_pred.as_tensor(), 
                                                 scale_factor=1 / self.super_params.pixdim[-1], 
                                                 mode="trilinear")
-                mask = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0).detach()
-                seg_pred_ds = ~mask * seg_pred_ds + mask * self.decoder(seg_pred_ds)
+                
+                binary_mask_pred = torch.argmax(seg_pred_ds, dim=1, keepdim=False) == 0 # Reverted to argmax logic
+                dist_map_pred = (-distance_transform_edt(binary_mask_pred[:, 0]) + distance_transform_edt(~binary_mask_pred[:, 0])).unsqueeze(1)
+                mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor).detach()
+
+                seg_pred_ds = (1-mask) * seg_pred_ds + mask * self.decoder(seg_pred_ds)
                 seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
                 foreground = (seg_pred_ds > 0)
                 lv = (seg_pred_ds == 1)
@@ -1138,14 +1289,10 @@ class TrainPipeline:
                     distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
                     for i in [foreground, lv, rv, myo]], dim=1)
                 
-                template_mesh = self.warp_template_mesh(df_pred) 
-                template_mesh_ = template_mesh.clone()
-
-                # if save_on == "cap" and self.super_params._4d:
-                #     # method 1: NDF applied right after warping the control mesh
-                #     ndf_verts = self.NDF(template_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False) 
-                #     template_mesh = template_mesh.update_padded(ndf_verts)
-
+                template_mesh = self.warp_template_mesh(df_pred)
+                # Convert template mesh to half precision for compatibility with AMP training
+                template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float16))
+                
                 subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
                 
                 voxeld_mesh = torch.cat([
@@ -1160,72 +1307,136 @@ class TrainPipeline:
                 seg_true = (seg_true == 2).to(torch.float32)
                 msh_metric_batch_decoder(voxeld_mesh, seg_true)
 
-                # if subdiv_mesh._N > 2:
-                #     for i in range(subdiv_mesh._N):
-                #         # save each mesh as a time instance
-                #         save_obj(f"{self.out_dir}/{id} - {i:02d}.obj", 
-                #                  subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
-                # elif subdiv_mesh._N == 2:
-                #     phases = ['ED', 'ES']
-                #     for i in range(subdiv_mesh._N):
-                #         # save each mesh as a time instance
-                #         save_obj(f"{self.out_dir}/{id}-{phases[i]}.obj", 
-                #                  subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
-                # else:
-                #     save_obj(
-                #     f"{self.out_dir}/{id}.obj", 
-                #         subdiv_mesh.verts_packed(), subdiv_mesh.faces_packed()
-                #     )
-
                 if step == choice_case:
                     seg_pred = torch.stack([self.pred_transform(i) for i in seg_pred])
                     seg_true_ds = F.interpolate(seg_true,
                                                 scale_factor=1 / self.super_params.pixdim[-1], 
                                                 mode="nearest-exact")[0].cpu()
-                    # save visualization when the eval score is the best
+                    # Save visualization - only static images, no HTML
+                    visualization_dir = f"{self.ckpt_dir}/visualizations"
+                    os.makedirs(visualization_dir, exist_ok=True)
+                    
+                    # Create visualizations - only save static images, no HTML
+                    draw_plotly(
+                        seg_true=seg_true[0].cpu(), 
+                        mesh_pred=subdiv_mesh[0].cpu(),
+                        save_html=False,
+                        save_dir=visualization_dir,
+                        export_static=True,
+                        export_png_filename=f"seg_true_vs_mesh_pred_{id}.png"
+                    )
+                    
                     wandb.log(
                         {
-                            "seg_true vs mesh_pred": wandb.Plotly(draw_plotly(
-                                seg_true=seg_true[0].cpu(), 
-                                mesh_pred=subdiv_mesh[0].cpu()
-                                )),
-                            "seg_true vs seg_pred": wandb.Plotly(draw_plotly(
-                                seg_true=seg_true[0].cpu(), 
-                                seg_pred=seg_pred[0].cpu()
-                                )),
-                            "seg_true_ds vs seg_pred_ds": wandb.Plotly(draw_plotly(
-                                seg_true=seg_true_ds, 
-                                seg_pred=seg_pred_ds[0].cpu()
-                                )),
-                            "template vs df_pred": wandb.Plotly(draw_plotly(
-                                df_pred=df_pred[0].cpu(),
-                                mesh_pred=template_mesh_[0].cpu(),
-                                mesh_c=self.mesh_c
-                                )),
-                            "seg_true_ds vs df_pred": wandb.Plotly(draw_plotly(
-                                seg_true=seg_true_ds, 
-                                df_pred=df_pred[0].cpu(),
-                                )),
-                            "df true vs pred": wandb.Plotly(ff.create_distplot(
-                                [df_true[0, -1].flatten().cpu().numpy(), 
-                                df_pred[0, -1].flatten().cpu().numpy()],
-                                group_labels=["df_true", "df_pred"],
-                                colors=["#EF553B", "#3366CC"],
-                                bin_size=0.1
-                            )),
-                        }
+                            "seg_true vs mesh_pred": wandb.Image(f"{visualization_dir}/seg_true_vs_mesh_pred_{id}.png")
+                        },
+                        commit=False
                     )
+                    
+                    draw_plotly(
+                        seg_true=seg_true[0].cpu(), 
+                        seg_pred=seg_pred[0].cpu(),
+                        save_html=False,
+                        save_dir=visualization_dir,
+                        export_static=True,
+                        export_png_filename=f"seg_true_vs_seg_pred_{id}.png"
+                    )
+                    
+                    wandb.log(
+                        {
+                            "seg_true vs seg_pred": wandb.Image(f"{visualization_dir}/seg_true_vs_seg_pred_{id}.png")
+                        },
+                        commit=False
+                    )
+                    
+                    draw_plotly(
+                        seg_true=seg_true_ds, 
+                        seg_pred=seg_pred_ds[0].cpu(),
+                        save_html=False,
+                        save_dir=visualization_dir,
+                        export_static=True,
+                        export_png_filename=f"seg_true_ds_vs_seg_pred_ds_{id}.png"
+                    )
+                    
+                    wandb.log(
+                        {
+                            "seg_true_ds vs seg_pred_ds": wandb.Image(f"{visualization_dir}/seg_true_ds_vs_seg_pred_ds_{id}.png")
+                        },
+                        commit=False
+                    )
+                    
+                    draw_plotly(
+                        df_pred=df_pred[0].cpu(),
+                        mesh_pred=template_mesh[0].cpu(),
+                        mesh_c=self.mesh_c,
+                        save_html=False,
+                        save_dir=visualization_dir,
+                        export_static=True,
+                        export_png_filename=f"template_vs_df_pred_{id}.png"
+                    )
+                    
+                    wandb.log(
+                        {
+                            "template vs df_pred": wandb.Image(f"{visualization_dir}/template_vs_df_pred_{id}.png")
+                        },
+                        commit=False
+                    )
+                    
+                    draw_plotly(
+                        seg_true=seg_true_ds, 
+                        df_pred=df_pred[0].cpu(),
+                        save_html=False,
+                        save_dir=visualization_dir,
+                        export_static=True,
+                        export_png_filename=f"seg_true_ds_vs_df_pred_{id}.png"
+                    )
+                    
+                    wandb.log(
+                        {
+                            "seg_true_ds vs df_pred": wandb.Image(f"{visualization_dir}/seg_true_ds_vs_df_pred_{id}.png")
+                        },
+                        commit=False
+                    )
+                    
+                    # The last log call should have commit=True
+                    # For distribution plots, keep using Plotly directly as it works reliably
+                    dist_fig = ff.create_distplot(
+                        [df_true[0, -1].flatten().cpu().numpy(), 
+                        df_pred[0, -1].flatten().cpu().numpy()],
+                        group_labels=["df_true", "df_pred"],
+                        colors=["#EF553B", "#3366CC"],
+                        bin_size=0.1
+                    )
+                    
+                    # Save the distribution plot to local filesystem
+                    visualization_dir = f"{self.ckpt_dir}/visualizations"
+                    os.makedirs(visualization_dir, exist_ok=True)
+                    dist_fig.write_image(f"{visualization_dir}/df_true_vs_pred_epoch{epoch}.png")
+                    
+                    # Log to wandb
+                    wandb.log(
+                        {
+                            "df true vs pred": wandb.Plotly(dist_fig),
+                            "df true vs pred image": wandb.Image(f"{visualization_dir}/df_true_vs_pred_epoch{epoch}.png")
+                        },
+                        commit=True
+                    )
+         
 
         size_in_pixel = np.median(np.array(actual_heart_size_in_pixel), axis=0)
-        wandb.log({"actual_heart_size h (pixel)": size_in_pixel[0]})
-        wandb.log({"actual_heart_size w (pixel)": size_in_pixel[1]})
-        wandb.log({"actual_heart_size d (pixel)": size_in_pixel[2]})
-        wandb.log({"test_score": msh_metric_batch_decoder.aggregate().mean()})
+        wandb.log({
+            "actual_heart_size h (pixel)": size_in_pixel[0],
+            "actual_heart_size w (pixel)": size_in_pixel[1],
+            "actual_heart_size d (pixel)": size_in_pixel[2],
+            "test_score": msh_metric_batch_decoder.aggregate().mean()
+        })
+        
+        # Update summary for test score (helps in run comparison)
+        wandb.run.summary["test_score"] = msh_metric_batch_decoder.aggregate().mean()
 
         end_time = time.time()
         inference_time = (end_time - start_time) / len(valid_loader)
         print(f"Inference time: {inference_time} seconds")
-
 
     @torch.no_grad()
     def ablation_study(self, save_on):
@@ -1312,10 +1523,14 @@ class TrainPipeline:
             seg_pred_ds = F.interpolate(seg_pred.as_tensor(), 
                                             scale_factor=1 / self.super_params.pixdim[-1], 
                                             mode="trilinear")
-            mask = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0).detach()
+            
+            binary_mask_pred = torch.argmax(seg_pred_ds, dim=1, keepdim=False) == 0 # Reverted to argmax logic
+            dist_map_pred = (-distance_transform_edt(binary_mask_pred[:, 0]) + distance_transform_edt(~binary_mask_pred[:, 0])).unsqueeze(1)
+            mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor).detach()
+
             seg_pred_ds_before = seg_pred_ds.clone()
             seg_pred_ds_before = torch.stack([self.pred_transform(i) for i in seg_pred_ds_before])
-            seg_pred_ds = ~mask * seg_pred_ds + mask * self.decoder(seg_pred_ds)
+            seg_pred_ds = (1-mask) * seg_pred_ds + mask * self.decoder(seg_pred_ds)
             seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
             seg_true = torch.stack([i["label"] for i in seg_data], dim=0)
             seg_true_ds = F.interpolate(seg_true,
@@ -1387,10 +1602,8 @@ class TrainPipeline:
             # template_mesh = self.warp_template_mesh(df_pred)                             # level 0
             template_mesh = self.warp_template_mesh(df_true)                             # level 0
             
-            # if self.super_params._4d and save_on == "cap":
-            #     # method 1: NDF applied right after warping the control mesh
-            #     ndf_verts = self.NDF(template_mesh.verts_padded()[0], end_time=1, step=batch-1, invert=False) 
-            #     template_mesh = template_mesh.update_padded(ndf_verts)
+            # Convert template mesh to half precision for compatibility with AMP training
+            template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float16))
 
             if not self.super_params._4d and save_on == "sct":
                 save_obj(
