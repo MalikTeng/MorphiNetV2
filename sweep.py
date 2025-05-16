@@ -117,7 +117,7 @@ if __name__ == '__main__':
         },
         'parameters': {
             'save_on': {
-                'value': 'cap'
+                'value': 'sct'
             },
             'ct_ratio': {
                 'value': 1.0
@@ -156,7 +156,7 @@ if __name__ == '__main__':
                 'value': [128, 128, 128]
             },
             'pixdim': {
-                'value': [8, 8, 8]
+                'value': [4, 4, 4]
             },
             'lambda_0': {
                 'distribution': 'uniform',
@@ -187,7 +187,7 @@ if __name__ == '__main__':
                 'value': '/mnt/data/Experiment/MorphiNet/Checkpoint'
             },
             'use_ckpt': {
-                'value': None,
+                'value': 'n',
             },
             'out_dir': {
                 'value': '/mnt/data/Experiment/MorphiNet/Result'
@@ -222,8 +222,8 @@ if __name__ == '__main__':
             'layers': {
                 'values': [
                     [1, 2, 2, 4],
-                    [1, 2, 2, 4, 4],
-                    [1, 2, 2, 4, 4, 4],
+                    [1, 4, 4, 8],
+                    [1, 8, 8, 16],
                 ]
             },
             'subdiv_levels': {
@@ -237,8 +237,11 @@ if __name__ == '__main__':
             },
             'sigmoid_scale_factor': {
                 'distribution': 'uniform',
-                'min': 1.0,
-                'max': 3.0
+                'min': 0.1,
+                'max': 1.0
+            },
+            'mask_threshold': {
+                'value': 0.1
             }
         }
     }
@@ -247,4 +250,4 @@ if __name__ == '__main__':
     sweep_id = wandb.sweep(sweep_params, project="MorphiNet-sweeps")
 
     # run the sweep
-    wandb.agent(sweep_id, function=train, count=5)
+    wandb.agent(sweep_id, function=train, count=20)

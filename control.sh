@@ -27,8 +27,6 @@
 #     --_mr
 
 # ---- Run the training script with both ct & mr data----
-        # --use_ckpt /mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/cap--myo--f0--2025-03-25-2228 \
-
 # CT_RATIO=(0.2 0.4 0.6 0.8)
 CT_RATIO=(1.0)
 for ratio in "${CT_RATIO[@]}"
@@ -39,6 +37,7 @@ do
         --mr_json_dir ./dataset/dataset_task11_f0.json \
         --mr_data_dir /mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX \
         \
+        --use_ckpt n \
         --template_mesh_dir ./template/template_mesh-myo.obj \
         \
         --max_epochs 200 \
@@ -46,11 +45,16 @@ do
         --train_epochs 150 \
         --val_interval 5 \
         \
-        --hidden_features_gsn 8 \
+        --filters 8 16 32 \
+        --kernel_size 3 3 3 \
+        --strides 1 2 2 \
+        --layers 1 4 4 8 \
+        --hidden_features_gsn 16 \
         --pixdim 4 4 4 \
-        --lambda_0 0.51 \
-        --lambda_1 0.64 \
+        --lambda_0 0.90 \
+        --lambda_1 0.95 \
         --iteration 10 \
+        --sigmoid_scale_factor 0.35 \
         \
         --lr 0.001 \
         --batch_size 1 \

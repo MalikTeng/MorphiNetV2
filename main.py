@@ -24,7 +24,7 @@ def config():
     parser.add_argument("--mode", type=str, default="offline", help="choose the mode for wandb, can be 'disabled', 'offline', 'online'")
     parser.add_argument("--_4d", action="store_true", help="toggle to train on 4D image data")
     parser.add_argument("--_mr", action="store_true", help="toggle to ONLY use MR data for training")
-    parser.add_argument("--save_on", type=str, default="sct", help="the dataset for validation, can be 'cap' or 'sct'")
+    parser.add_argument("--save_on", type=str, default="cap", help="the dataset for validation, can be 'cap' or 'sct'")
     parser.add_argument("--template_mesh_dir", type=str,
                         default="./template/template_mesh-myo.obj",
                         help="the path to your initial meshes")
@@ -40,11 +40,12 @@ def config():
     parser.add_argument("--batch_size", type=int, default=1, help="the batch size for training")
     parser.add_argument("--cache_rate", type=float, default=1.0, help="the cache rate for training, see MONAI document for more details")
     parser.add_argument("--crop_window_size", type=int, nargs='+', default=[128, 128, 128], help="the size of the crop window for training")
-    parser.add_argument("--pixdim", type=float, nargs='+', default=[8, 8, 8], help="the pixel dimension of downsampled images")
+    parser.add_argument("--pixdim", type=float, nargs='+', default=[4, 4, 4], help="the pixel dimension of downsampled images")
     parser.add_argument("--lambda_0", type=float, default=1.0, help="the loss coefficients for Chamfer verts distance term")
     parser.add_argument("--lambda_1", type=float, default=0.1, help="the loss coefficients for point to mesh distance term")
     parser.add_argument("--iteration", type=int, default=10, help="the iterations for the distance field warping")
     parser.add_argument("--sigmoid_scale_factor", type=float, default=1.0, help="the scale factor for the sigmoid mask transition")
+    parser.add_argument("--mask_threshold", type=float, default=0.1, help="the threshold for applying the distance map mask")
 
     # data parameters
     parser.add_argument("--ct_ratio", type=float, default=1.0, help="the portion of CT data for training")
@@ -70,18 +71,16 @@ def config():
                         help="the path to your output directory, for saving outputs")
      
     # path to the pretrained modules
-    parser.add_argument("--use_ckpt", type=str, 
-                        default=None,
-                        # default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/cap--myo--f0--2025-03-25-2228", 
-                        help="the path to the pretrained models")
+    parser.add_argument("--use_ckpt", type=lambda x: None if x.lower() == 'n' else x, 
+                        default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2025-05-01-0949", 
+                        help="path to pretrained models ('n' for no checkpoint, or specify a path)")
 
     # structure parameters for df-predict module
     parser.add_argument("--num_classes", type=int, default=4, help="the number of segmentation classes including the background")
-    parser.add_argument("--kernel_size", type=int, default=(3, 3, 3, 3, 3), nargs='+', help="the kernel size of the convolutional layer in the encoder")
-    parser.add_argument("--strides", type=int, default=(1, 2, 2, 2, 2), nargs='+', help="the stride of the convolutional layer in the encoder")
-    parser.add_argument("--filters", type=int, default=(8, 16, 32, 64, 128), nargs='+', help="the number of output channels in each layer of the encoder")
-    parser.add_argument("--layers", type=int, default=(1, 2, 2, 4), nargs='+', help="the number of layers in each residual block of the decoder")
-    parser.add_argument("--block_inplanes", type=int, default=(8, 16, 32, 64), nargs='+', help="the number of intermedium channels in each residual block")
+    parser.add_argument("--kernel_size", type=int, default=(3, 3, 3, 3), nargs='+', help="the kernel size of the convolutional layer in the encoder")
+    parser.add_argument("--strides", type=int, default=(1, 2, 2, 2), nargs='+', help="the stride of the convolutional layer in the encoder")
+    parser.add_argument("--filters", type=int, default=(8, 16, 32, 64), nargs='+', help="the number of output channels in each layer of the encoder")
+    parser.add_argument("--layers", type=int, default=(1, 4, 4, 8), nargs='+', help="the number of layers in each residual block of the decoder")
 
     # structure parameters for subdiv module
     parser.add_argument("--subdiv_levels", type=int, default=2, help="the number of subdivision levels for the mesh (should be an integer larger than 0, where 0 means no subdivision)")
@@ -131,10 +130,10 @@ def train(super_params):
                 ckpt_dir = f"{super_params.use_ckpt}/trained_weights"
                 unet_mr_path = glob.glob(f"{ckpt_dir}/best_UNet_MR.pth")
                 unet_ct_path = glob.glob(f"{ckpt_dir}/best_UNet_CT.pth")
-                resnet_path = glob.glob(f"{ckpt_dir}/best_ResNet.pth")
+                # resnet_path = glob.glob(f"{ckpt_dir}/best_ResNet.pth")
                 
                 has_unet_ckpt = bool(unet_mr_path and unet_ct_path)
-                has_resnet_ckpt = bool(resnet_path)
+                # has_resnet_ckpt = bool(resnet_path)
                 
                 # Load all available checkpoints
                 pipeline.load_pretrained_weight("all")

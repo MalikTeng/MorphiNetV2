@@ -16,6 +16,7 @@ from monai.transforms import (
     Resized,
     ResizeWithPadOrCropd,
     ScaleIntensityd,
+    ScaleIntensityRangePercentilesd,
     Spacingd,
     SpatialPadd,
     EnsureTyped
@@ -128,10 +129,9 @@ def pre_transform(
                     prob=0.15,
                 ),
                 RandAdjustContrastd(keys[0], gamma=(0.65, 1.5), prob=0.15),
-                # RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
+                RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
                 # normalize the image intensity to 0-1
-                AdjustContrastd(keys[0], gamma=1.5),
-                ScaleIntensityd(keys[0], minv=0, maxv=1),
+                ScaleIntensityRangePercentilesd(keys[0], lower=1, upper=99, b_min=0.0, b_max=1.0, clip=True, allow_missing_keys=True),
 
                 # ensure the data type
                 EnsureTyped([*keys, f"{keys[0][:2]}_df"], data_type="tensor", dtype=torch.float32),
@@ -158,10 +158,9 @@ def pre_transform(
                     prob=0.15,
                 ),
                 RandAdjustContrastd(keys[0], gamma=(0.65, 1.5), prob=0.15),
-                # RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
+                RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
                 # normalize the image intensity to 0-1
-                AdjustContrastd(keys[0], gamma=1.5),
-                ScaleIntensityd(keys[0], minv=0, maxv=1),
+                ScaleIntensityRangePercentilesd(keys[0], lower=1, upper=99, b_min=0.0, b_max=1.0, clip=True, allow_missing_keys=True),
 
                 # ensure the data type
                 EnsureTyped([*keys, f"{keys[0][:2]}_df"], data_type="tensor", dtype=torch.float32),
@@ -169,10 +168,9 @@ def pre_transform(
     else:
         transforms.extend([
             # normalize the image intensity to 0-1
-            AdjustContrastd(keys[0], gamma=1.5),
-            ScaleIntensityd(keys[0], minv=0, maxv=1),
+            ScaleIntensityRangePercentilesd(keys[0], lower=1, upper=99, b_min=0.0, b_max=1.0, clip=True, allow_missing_keys=True),
 
-            EnsureTyped([*keys, f"{keys[0][:2]}_df"], 
+            EnsureTyped([*keys, f"{keys[0][:2]}_df"],
                         data_type="tensor", dtype=torch.float32, allow_missing_keys=True)
             ])
 

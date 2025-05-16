@@ -69,6 +69,7 @@ class TrainPipeline:
         self.is_training = is_training
         self.target = kwargs.get("target")
         self.sigmoid_scale_factor = super_params.sigmoid_scale_factor # Store the new parameter
+        self.mask_threshold = super_params.mask_threshold # Store the mask threshold
         set_determinism(seed=self.seed)
 
         if is_training:
@@ -227,9 +228,9 @@ class TrainPipeline:
         
 
     def _prepare_dataset(self, data_json, modal, train_transform, valid_transform):
-        train_data = self._remap_abs_path(data_json["train_fold0"], modal, "Tr")[:50]
-        valid_data = self._remap_abs_path(data_json["validation_fold0"], modal, "Tr")[:50]
-        test_data = self._remap_abs_path(data_json["test"], modal, "Ts")[:50]
+        train_data = self._remap_abs_path(data_json["train_fold0"], modal, "Tr")
+        valid_data = self._remap_abs_path(data_json["validation_fold0"], modal, "Tr")
+        test_data = self._remap_abs_path(data_json["test"], modal, "Ts")
 
         # if modal == "ct":
         #     train_data = train_data[:np.floor(self.super_params.ct_ratio * len(train_data)).astype(int)]
@@ -321,6 +322,8 @@ class TrainPipeline:
             res_block=True
         ).to(DEVICE)
         self.decoder = SegResNet(
+            act=("leakyrelu", {"inplace": True, "negative_slope": 0.1}),
+            norm=("INSTANCE", {"affine": True}),
             in_channels=self.super_params.num_classes,
             out_channels=self.super_params.num_classes,
             blocks_down=self.super_params.layers,
@@ -697,7 +700,10 @@ class TrainPipeline:
                 self.unet_loss[k] = np.append(self.unet_loss[k], train_loss_epoch[k])
 
             wandb.log(
-                {f"{phase}_loss": train_loss_epoch["total"]},
+                {
+                    "unet_loss_ct": train_loss_epoch["ct"],
+                    "unet_loss_mr": train_loss_epoch["mr"]
+                },
                 step=epoch + 1
             )
             
@@ -733,11 +739,14 @@ class TrainPipeline:
                                                    mode="nearest-exact")
                     
                     # Calculate binary mask and compute distance map
-                    binary_mask_pred = torch.argmax(seg_pred_ct_ds, dim=1, keepdim=False) == 0 # Reverted to argmax logic
-                    dist_map_pred = (-distance_transform_edt(binary_mask_pred[:, 0]) + distance_transform_edt(~binary_mask_pred[:, 0])).unsqueeze(1)
-                    mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor).detach() # Use the parameter
+                    binary_mask_pred = (torch.argmax(seg_pred_ct_ds, dim=1, keepdim=True) == 0)
+                    dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
+                    mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor).detach()
+                    # Apply binary mask and threshold in one step
+                    mask = mask * binary_mask_pred
+                    mask[mask < self.mask_threshold] = 0
                     
-                    seg_pred_ct_ds = (1-mask) * seg_pred_ct_ds + mask * self.decoder(seg_pred_ct_ds)
+                    seg_pred_ct_ds = seg_pred_ct_ds + mask * self.decoder(seg_pred_ct_ds)
 
                     loss = self.msk_dice_loss_fn(seg_pred_ct_ds, seg_true_ct_ds)
 
@@ -789,11 +798,13 @@ class TrainPipeline:
                                                     scale_factor=1 / self.super_params.pixdim[-1], 
                                                     mode="trilinear")
                     
-                    binary_mask_pred = torch.argmax(seg_pred_ct_ds, dim=1, keepdim=False) == 0 # Reverted to argmax logic
-                    dist_map_pred = (-distance_transform_edt(binary_mask_pred[:, 0]) + distance_transform_edt(~binary_mask_pred[:, 0])).unsqueeze(1)
+                    binary_mask_pred = (torch.argmax(seg_pred_ct_ds, dim=1, keepdim=True) == 0)
+                    dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
                     mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor).detach()
+                    mask = mask * binary_mask_pred
+                    mask[mask < self.mask_threshold] = 0
 
-                    seg_pred_ct_ds = (1-mask) * seg_pred_ct_ds + mask * self.decoder(seg_pred_ct_ds)
+                    seg_pred_ct_ds = seg_pred_ct_ds + mask * self.decoder(seg_pred_ct_ds)
                     seg_pred_ct_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ct_ds])
                     
                     foreground = (seg_pred_ct_ds > 0)
@@ -881,7 +892,7 @@ class TrainPipeline:
         #                                                 scale_factor=1 / self.super_params.pixdim[-1], 
         #                                                 mode="trilinear")
         #                 mask = (torch.argmax(seg_pred_mr_ds, dim=1, keepdim=True) == 0)
-        #                 seg_pred_mr_ds = (1-mask) * seg_pred_mr_ds + mask * self.decoder(seg_pred_mr_ds)
+        #                 seg_pred_mr_ds = seg_pred_mr_ds + mask * self.decoder(seg_pred_mr_ds)
         #                 seg_pred_mr_ds = torch.stack([self.pred_transform(i) for i in seg_pred_mr_ds])
         #                 foreground = (seg_pred_mr_ds > 0)
         #                 lv = (seg_pred_mr_ds == 1)
@@ -1000,11 +1011,13 @@ class TrainPipeline:
                                                 scale_factor=1 / self.super_params.pixdim[-1], 
                                                 mode="trilinear")
                 
-                binary_mask_pred = torch.argmax(seg_pred_ds, dim=1, keepdim=False) == 0 # Reverted to argmax logic
-                dist_map_pred = (-distance_transform_edt(binary_mask_pred[:, 0]) + distance_transform_edt(~binary_mask_pred[:, 0])).unsqueeze(1)
+                binary_mask_pred = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0)
+                dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
                 mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor).detach()
+                mask = mask * binary_mask_pred
+                mask[mask < self.mask_threshold] = 0
 
-                seg_pred_ds = (1-mask) * seg_pred_ds + mask * self.decoder(seg_pred_ds)
+                seg_pred_ds = seg_pred_ds + mask * self.decoder(seg_pred_ds)
                 seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
                 foreground = (seg_pred_ds > 0)
                 lv = (seg_pred_ds == 1)
@@ -1275,11 +1288,13 @@ class TrainPipeline:
                                                 scale_factor=1 / self.super_params.pixdim[-1], 
                                                 mode="trilinear")
                 
-                binary_mask_pred = torch.argmax(seg_pred_ds, dim=1, keepdim=False) == 0 # Reverted to argmax logic
-                dist_map_pred = (-distance_transform_edt(binary_mask_pred[:, 0]) + distance_transform_edt(~binary_mask_pred[:, 0])).unsqueeze(1)
+                binary_mask_pred = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0)
+                dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
                 mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor).detach()
+                mask = mask * binary_mask_pred
+                mask[mask < self.mask_threshold] = 0
 
-                seg_pred_ds = (1-mask) * seg_pred_ds + mask * self.decoder(seg_pred_ds)
+                seg_pred_ds = seg_pred_ds + mask * self.decoder(seg_pred_ds)
                 seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
                 foreground = (seg_pred_ds > 0)
                 lv = (seg_pred_ds == 1)
@@ -1524,13 +1539,15 @@ class TrainPipeline:
                                             scale_factor=1 / self.super_params.pixdim[-1], 
                                             mode="trilinear")
             
-            binary_mask_pred = torch.argmax(seg_pred_ds, dim=1, keepdim=False) == 0 # Reverted to argmax logic
-            dist_map_pred = (-distance_transform_edt(binary_mask_pred[:, 0]) + distance_transform_edt(~binary_mask_pred[:, 0])).unsqueeze(1)
+            binary_mask_pred = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0)
+            dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
             mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor).detach()
+            mask = mask * binary_mask_pred
+            mask[mask < self.mask_threshold] = 0
 
             seg_pred_ds_before = seg_pred_ds.clone()
             seg_pred_ds_before = torch.stack([self.pred_transform(i) for i in seg_pred_ds_before])
-            seg_pred_ds = (1-mask) * seg_pred_ds + mask * self.decoder(seg_pred_ds)
+            seg_pred_ds = seg_pred_ds + mask * self.decoder(seg_pred_ds)
             seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
             seg_true = torch.stack([i["label"] for i in seg_data], dim=0)
             seg_true_ds = F.interpolate(seg_true,
