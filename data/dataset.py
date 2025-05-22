@@ -24,7 +24,7 @@ from pytorch3d.structures import Meshes, Pointclouds
 
 import torch
 
-__all__ = ["Dataset", "collate_4D_batch"]
+__all__ = ["collate_4D_batch"]
 
 
 def collate_4D_batch(data: List[Dict[str, Union[torch.Tensor, np.ndarray]]]) -> Dict[str, torch.Tensor]:
@@ -39,45 +39,9 @@ def collate_4D_batch(data: List[Dict[str, Union[torch.Tensor, np.ndarray]]]) -> 
                 if batch[key].dim() == 4:
                     batch[key] = batch[key].unsqueeze(1)
             else:
-                batch[f"{key[:2]}_batch"] = torch.tensor(
-                    [d[key].shape[0] for d in data], 
-                    dtype=torch.int8, device=data[0][key].device)
                 batch[key] = torch.concat([d[key] for d in data], dim=1)
                 batch[key] = batch[key].flatten(0, 1).unsqueeze(1)
         else:
             batch[key] = np.stack([d[key] for d in data], axis=0)
     return batch
-
-
-class Dataset(Randomizable, CacheDataset):
-    """
-        :params 
-            data: list of dictionary -- {'label': label_path, 'image': image_path}
-            transform: composed MONAI transforms to execute operations on input data.
-            seed: random seed to randomly shuffle the datalist before splitting into training and validation, default is 0. note to set same seed for `training` and `validation` sections.
-            cache_num: number of items to be cached. Default is `sys.maxsize`. will take the minimum of (cache_num, data_length x cache_rate, data_length).
-            cache_rate: percentage of cached data in total, default is 1.0 (cache all). will take the minimum of (cache_num, data_length x cache_rate, data_length).
-            num_workers: the number of worker threads to use. if 0 a single thread will be used. Default is 0.
-    """
-    def __init__(
-            self,
-            data: list,
-            transform: Union[Sequence[Callable], Callable] = (),
-            seed: int = 0,
-            cache_num: int = sys.maxsize,
-            cache_rate: float = 1.0,
-            num_workers: int = 0,
-            ):
-        self.set_random_state(seed=seed)
-        self.indices: np.ndarray = np.array([])
-        
-        CacheDataset.__init__(
-            self, data, transform, cache_num=cache_num, cache_rate=cache_rate, num_workers=num_workers,
-            )
-
-    def get_indices(self) -> np.ndarray:
-        """
-        Get the indices of datalist used in this dataset.
-        """
-        return self.indices
 

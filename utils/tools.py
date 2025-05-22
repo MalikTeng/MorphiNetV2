@@ -124,6 +124,9 @@ def draw_plotly(
     
     if seg_pred is not None:
         num_classes = len(torch.unique(seg_pred))
+        # # Save seg_pred as nifti file
+        # seg_pred_nii = nib.Nifti1Image(seg_pred[0].cpu().numpy(), np.eye(4))
+        # nib.save(seg_pred_nii, 'seg_pred.nii.gz')
         if num_classes == 2:
             mesh = matrix_to_marching_cubes(seg_pred[0].cpu().numpy())
             y, x, z = mesh.vertices.T

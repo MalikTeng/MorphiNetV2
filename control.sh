@@ -27,7 +27,6 @@
 #     --_mr
 
 # ---- Run the training script with both ct & mr data----
-# CT_RATIO=(0.2 0.4 0.6 0.8)
 CT_RATIO=(1.0)
 for ratio in "${CT_RATIO[@]}"
 do
@@ -45,16 +44,17 @@ do
         --train_epochs 150 \
         --val_interval 5 \
         \
-        --filters 8 16 32 \
-        --kernel_size 3 3 3 \
-        --strides 1 2 2 \
-        --layers 1 4 4 8 \
-        --hidden_features_gsn 16 \
         --pixdim 4 4 4 \
-        --lambda_0 0.90 \
-        --lambda_1 0.95 \
+        --filters 8 16 32 64 128 \
+        --kernel_size 3 3 3 3 3 \
+        --strides 1 2 2 2 2 \
+        --lambda_0 0.17 \
+        --layers 1 2 2 4 \
+        --lambda_1 0.65 \
+        \
+        --hidden_features_gsn 8 \
         --iteration 10 \
-        --sigmoid_scale_factor 0.35 \
+        --sigmoid_scale_factor 0.44 \
         \
         --lr 0.001 \
         --batch_size 1 \
@@ -62,7 +62,7 @@ do
         --ct_ratio "$ratio"
 done
 
-# # ---- Run the training script with both mr data for 4D creation----
+# # ---- Run the training script with both mr and ct data for 4D creation----
 
 # python main.py \
 #     --save_on cap \

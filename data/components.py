@@ -63,11 +63,7 @@ class Adjustd(MapTransform):
             try:
                 pixel_array = data[key].get_array().copy()
 
-                if "label" in key:
-                    # combine label index 2 and 4 as ventricular myocardium
-                    pixel_array[pixel_array == 4] = 2
-
-                if len(pixel_array.shape) == 4:
+                if 'mr' in key and len(pixel_array.shape) == 4:
                     affine = data[key].affine.clone()
                     # update the affine matrix
                     m = torch.eye(4)
@@ -77,10 +73,14 @@ class Adjustd(MapTransform):
                     m[:3, -1] = affine[:3, -1]
                     data[key] = MetaTensor(pixel_array, affine=m)
 
-                elif len(pixel_array.shape) == 3:
-                    # insert a new axis for the channel (first axis)
-                    pixel_array = pixel_array[None]
-                    data[key] = MetaTensor(pixel_array, affine=data[key].affine)
+                # elif len(pixel_array.shape) == 3:
+                #     # insert a new axis for the channel (first axis)
+                #     pixel_array = pixel_array[None]
+                #     data[key] = MetaTensor(pixel_array, affine=data[key].affine)
+
+                if "label" in key:
+                    # combine label index 2 and 4 as ventricular myocardium
+                    data[key][data[key] == 4] = 2
 
             except KeyError:
                 print(f"Error: {key} is not in the data dictionary.")
@@ -173,8 +173,8 @@ class DFConvertd(MapTransform):
 
         data[f"{self.modal}_df"] = df
 
-        # remove the original label
-        data.pop(self.key)
+        # # remove the original label
+        # data.pop(self.key)
 
         return data
 
