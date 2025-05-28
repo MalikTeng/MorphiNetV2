@@ -45,16 +45,16 @@ do
         --val_interval 5 \
         \
         --pixdim 4 4 4 \
-        --filters 8 16 32 64 128 \
-        --kernel_size 3 3 3 3 3 \
-        --strides 1 2 2 2 2 \
-        --lambda_0 0.17 \
+        --filters 8 16 32 \
+        --kernel_size 3 3 3 \
+        --strides 1 2 2 \
+        --lambda_0 0.24 \
         --layers 1 2 2 4 \
-        --lambda_1 0.65 \
+        --lambda_1 0.63 \
         \
         --hidden_features_gsn 8 \
         --iteration 10 \
-        --sigmoid_scale_factor 0.44 \
+        --sigmoid_scale_factor 0.55 \
         \
         --lr 0.001 \
         --batch_size 1 \

@@ -247,7 +247,7 @@ class TrainPipeline:
                     )
                 # Only prepare training dataset and dataloader
                 data_json = json.load(f)
-                train_data = self._remap_abs_path(data_json["train_fold0"], "mr", "Tr")[:20]
+                train_data = self._remap_abs_path(data_json["train_fold0"], "mr", "Tr")
                 self.mr_train_ds = Dataset(
                     data=train_data, transform=mr_train_transform,
                     cache_rate=self.super_params.cache_rate, num_workers=self.num_workers
@@ -272,7 +272,7 @@ class TrainPipeline:
                     )
                 # Only prepare training dataset and dataloader
                 data_json = json.load(f)
-                train_data = self._remap_abs_path(data_json["train_fold0"], "ct", "Tr")[:20]
+                train_data = self._remap_abs_path(data_json["train_fold0"], "ct", "Tr")
                 self.ct_train_ds = Dataset(
                     data=train_data, transform=ct_train_transform,
                     cache_rate=self.super_params.cache_rate, num_workers=self.num_workers
@@ -1306,7 +1306,7 @@ class TrainPipeline:
         encoder.eval()
 
         msh_metric_batch_decoder = DiceMetric(include_background=False, reduction="none")
-        actual_heart_size_in_pixel = []
+        # actual_heart_size_in_pixel = []
 
         total_inference_time = 0.0  # Track total inference time
         choice_case = np.random.choice(len(valid_loader), 1)[0]
@@ -1350,8 +1350,9 @@ class TrainPipeline:
                     seg_pred = seg_pred.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
                 # For CT, seg_pred is assumed to be (B, NumClasses, D, H, W)
                 
-                seg_pred_ds = torch.stack([self.post_transform({"pred": i, "modal": modal})["pred"] 
-                                               for i in seg_pred], dim=0)
+                seg_pred_ds = torch.stack([
+                    self.post_transform({"pred": i, "label": j, "modal": modal})["pred"] 
+                    for i, j in zip(seg_pred, seg_true)], dim=0)
                 
                 binary_mask_pred = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0)
                 dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
@@ -1398,24 +1399,25 @@ class TrainPipeline:
                 except Exception as e:
                     print(f"ERROR: Failed to save subdiv_mesh for id: {id}: {e}")
 
-                # Non-timed operations
-                actual_heart_size_in_pixel.append(list(seg_true_ds.applied_operations[3 if self.super_params.target == "acdc" else 4]["orig_size"]))
+                # # Non-timed operations
+                # actual_heart_size_in_pixel.append(list(data[f"{modal}_label_ds"].applied_operations[3 if self.super_params.target == "acdc" else 4]["orig_size"]))
 
                 seg_true_ds = (seg_true_ds == 2).to(torch.float32)
                 msh_metric_batch_decoder(voxeld_mesh, seg_true_ds)
 
                 # Store visualization data for later processing
                 if step == choice_case:
-                    seg_pred = torch.stack([self.pred_transform(i) for i in seg_pred])
-                    seg_true_ds = F.interpolate(seg_true,
-                                                scale_factor=1 / self.super_params.pixdim[-1], 
-                                                mode="nearest-exact")[0].cpu()
+                    # seg_pred = torch.stack([self.pred_transform(i) for i in seg_pred])
+                    # seg_true_ds = F.interpolate(seg_true,
+                    #                             scale_factor=1 / self.super_params.pixdim[-1], 
+                    #                             mode="nearest-exact")[0].cpu()
                     # Store data for visualization after the loop
                     visualization_data = {
                         "id": id,
-                        "seg_true": seg_true[0].cpu(),
-                        "seg_pred": seg_pred[0].cpu(),
-                        "seg_true_ds": seg_true_ds,
+                        # "seg_true": seg_true[0].cpu(),
+                        # "seg_pred": seg_pred[0].cpu(),
+                        # "seg_true_ds": seg_true_ds,
+                        "seg_true_ds": seg_true_ds[0].cpu(),
                         "seg_pred_ds": seg_pred_ds[0].cpu(),
                         "df_true": df_true[0].cpu(),
                         "df_pred": df_pred[0].cpu(),
@@ -1450,41 +1452,22 @@ class TrainPipeline:
                 
                 try:
                     draw_plotly(
-                        seg_true=visualization_data["seg_true"], 
+                        seg_true=visualization_data["seg_true_ds"], 
                         mesh_pred=visualization_data["subdiv_mesh"],
                         save_html=True,
                         save_dir=visualization_dir,
                         export_static=True,
-                        export_png_filename=f"seg_true_vs_mesh_pred_{id}.png"
+                        export_png_filename=f"seg_true_ds_vs_mesh_pred_{id}.png"
                     )
                     
                     wandb.log(
                         {
-                            "seg_true vs mesh_pred": wandb.Image(f"{visualization_dir}/seg_true_vs_mesh_pred_{id}.png")
+                            "seg_true_ds vs mesh_pred": wandb.Image(f"{visualization_dir}/seg_true_ds_vs_mesh_pred_{id}.png")
                         },
                         commit=False
                     )
                 except Exception as e:
                     print(f"ERROR: Failed to generate seg_true vs mesh_pred plot: {e}")
-                
-                try:
-                    draw_plotly(
-                        seg_true=visualization_data["seg_true"], 
-                        seg_pred=visualization_data["seg_pred"],
-                        save_html=True,
-                        save_dir=visualization_dir,
-                        export_static=True,
-                        export_png_filename=f"seg_true_vs_seg_pred_{id}.png"
-                    )
-                    
-                    wandb.log(
-                        {
-                            "seg_true vs seg_pred": wandb.Image(f"{visualization_dir}/seg_true_vs_seg_pred_{id}.png")
-                        },
-                        commit=False
-                    )
-                except Exception as e:
-                    print(f"ERROR: Failed to generate seg_true vs seg_pred plot: {e}")
                 
                 try:
                     draw_plotly(
@@ -1573,11 +1556,11 @@ class TrainPipeline:
                 print(f"ERROR: Visualization process failed: {e}")
                 print("Continuing with evaluation metrics")
 
-        size_in_pixel = np.median(np.array(actual_heart_size_in_pixel), axis=0)
+        # size_in_pixel = np.median(np.array(actual_heart_size_in_pixel), axis=0)
         wandb.log({
-            "actual_heart_size h (pixel)": size_in_pixel[0],
-            "actual_heart_size w (pixel)": size_in_pixel[1],
-            "actual_heart_size d (pixel)": size_in_pixel[2],
+            # "actual_heart_size h (pixel)": size_in_pixel[0],
+            # "actual_heart_size w (pixel)": size_in_pixel[1],
+            # "actual_heart_size d (pixel)": size_in_pixel[2],
             "test_score": msh_metric_batch_decoder.aggregate().mean(),
             "average_inference_time": average_inference_time
         })

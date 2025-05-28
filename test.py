@@ -139,9 +139,9 @@ if __name__ == '__main__':
         from run import *
     
     # Network architecture parameters
-    super_params.filters = (8, 16, 32, 64, 128)
-    super_params.kernel_size = (3, 3, 3, 3, 3)
-    super_params.strides = (1, 2, 2, 2, 2)
+    super_params.filters = (8, 16, 32)
+    super_params.kernel_size = (3, 3, 3)
+    super_params.strides = (1, 2, 2)
     super_params.layers = (1, 2, 2, 4)
     super_params.hidden_features_gsn = 8
     super_params.pixdim = [4, 4, 4]
@@ -151,10 +151,10 @@ if __name__ == '__main__':
     super_params.pretrain_epochs = 100
     super_params.train_epochs = 150
     super_params.val_interval = 5
-    super_params.lambda_0 = 0.17
-    super_params.lambda_1 = 0.65
+    super_params.lambda_0 = 0.24
+    super_params.lambda_1 = 0.63
     super_params.iteration = 10
-    super_params.sigmoid_scale_factor = 0.44
+    super_params.sigmoid_scale_factor = 0.55
     super_params.lr = 0.001
     super_params.batch_size = 1
     super_params.ct_ratio = 1.0
@@ -168,7 +168,7 @@ if __name__ == '__main__':
     super_params.template_mesh_dir = f"./template/template_mesh-myo.obj"
 
     # Test-specific settings
-    ckpt = "sct--myo--f0--2025-05-18-0305"
+    ckpt = "sct--myo--f0--2025-05-22-0848"
     super_params.best_epoch = "best"
     super_params.target = "mmwhs"
     super_params.ct_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task22_f0.json"

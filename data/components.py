@@ -32,7 +32,7 @@ class Maskd(MapTransform):
                 if data["modal"] == "ct" and "pred" in key:
                     # mask the CTA images near the basal and apex plane
                     mask = np.zeros_like(array).astype(bool)
-                    mask[:, 12:-12] = True
+                    mask[:, 6:-6] = True
                     array[~mask] = array.min()
 
                     data[key] = MetaTensor(array, affine=data[key].affine, 
@@ -40,10 +40,10 @@ class Maskd(MapTransform):
                 
                 elif data["modal"] == "mr":
                     # pad slices on the top and bottom of the image
-                    array = np.pad(array, ((0, 0), (12, 12), (0, 0), (0, 0)), mode="constant", constant_values=array.min())
+                    array = np.pad(array, ((0, 0), (6, 6), (0, 0), (0, 0)), mode="constant", constant_values=array.min())
                     # update the affine
                     affine = data[key].affine.clone()
-                    affine[:3, -1] -= 12 * data[key].pixdim[0]
+                    affine[:3, -1] -= 6 * data[key].pixdim[0]
                     data[key] = MetaTensor(array, affine=affine,
                                            applied_operations=data[key].applied_operations)
 
@@ -55,15 +55,16 @@ class Adjustd(MapTransform):
     """
     process the input data to be compatible with the rest transforms.
     """
-    def __init__(self, keys: KeysCollection, allow_missing_keys: bool = False) -> None:
+    def __init__(self, keys: KeysCollection, allow_missing_keys: bool = False, target: str = None) -> None:
         super().__init__(keys, allow_missing_keys)
+        self.target = target
 
     def __call__(self, data):
         for key in self.keys:
             try:
                 pixel_array = data[key].get_array().copy()
 
-                if 'mr' in key and len(pixel_array.shape) == 4:
+                if 'mr' in key and len(pixel_array.shape) == 4 and self.target != 'acdc':
                     affine = data[key].affine.clone()
                     # update the affine matrix
                     m = torch.eye(4)
@@ -72,11 +73,6 @@ class Adjustd(MapTransform):
                     m[:3, 2] = affine[3, :3]
                     m[:3, -1] = affine[:3, -1]
                     data[key] = MetaTensor(pixel_array, affine=m)
-
-                # elif len(pixel_array.shape) == 3:
-                #     # insert a new axis for the channel (first axis)
-                #     pixel_array = pixel_array[None]
-                #     data[key] = MetaTensor(pixel_array, affine=data[key].affine)
 
                 if "label" in key:
                     # combine label index 2 and 4 as ventricular myocardium

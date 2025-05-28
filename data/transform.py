@@ -43,7 +43,7 @@ def pre_transform(
         keys: designated items for pre-transformation (image and label).
         modal: modality of data the pre-transformation applied to.
         section: identifier of either train, valid or test set.
-        rotation: whether to apply rotation augmentation.
+        rotation: whether to apply rotation augmentation. @deprecated
         crop_window_size: image and label will be cropped to match the size of network input.
         pixdim: the spatial distance of the downsampled images and labels.
         spacing: target spacing for isotropic resampling.
@@ -54,7 +54,7 @@ def pre_transform(
     
     # data loading
     transforms = [
-        LoadImaged(keys, ensure_channel_first=False if modal == "mr" else True, image_only=True, allow_missing_keys=True),
+        LoadImaged(keys, ensure_channel_first=False if modal == "mr" and target != 'acdc' else True, image_only=True, allow_missing_keys=True),
     ]
 
     # pre-transformation
@@ -62,7 +62,7 @@ def pre_transform(
         # ACDC data is with different orientation
         transforms.extend([
             # isotropic resampling
-            Adjustd(keys, allow_missing_keys=True),
+            Adjustd(keys, allow_missing_keys=True, target="acdc"),
             Spacingd(keys, [-1, spacing, spacing],
                      mode=("bilinear", "nearest"), 
                      allow_missing_keys=True),
