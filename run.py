@@ -142,10 +142,10 @@ class TrainPipeline:
 
         # import control mesh (NDC space, [-1, 1]) to compute the subdivision matrix
         template_mesh = load(super_params.template_mesh_dir)
-        centroid = template_mesh.bounds.mean(axis=0)
-        extent = template_mesh.bounds.ptp(axis=0)
-        template_mesh.apply_translation(-centroid)
-        template_mesh.apply_scale(2 / extent)
+        # centroid = template_mesh.bounds.mean(axis=0)
+        # extent = template_mesh.bounds.ptp(axis=0)
+        # template_mesh.apply_translation(-centroid)
+        # template_mesh.apply_scale(2 / extent)
         self._mesh_label(template_mesh)
         self.template_mesh = Meshes(
             verts=[torch.tensor(template_mesh.vertices, dtype=torch.float32)], 
@@ -195,9 +195,9 @@ class TrainPipeline:
         vert_label = np.where(vert_label <= 85, 0, 1)
         vert_label = np.array([COLOR_MAPPING[tuple(c)] for c in vert_label])
         self.vert_label = torch.tensor(vert_label, dtype=torch.long, device=DEVICE)
-        mesh_lv = convex_hull(mesh.vertices[np.any(np.stack([vert_label == i for i in [0]]), axis=0)])
-        mesh_rv = convex_hull(mesh.vertices[np.any(np.stack([vert_label == i for i in [1]]), axis=0)])
-        self.mesh_c = torch.tensor([mesh_lv.center_mass, mesh_rv.center_mass], device=DEVICE)
+        mesh_lv = convex_hull(mesh.vertices[np.any(np.stack([vert_label == i for i in [0, 2]]), axis=0)])  # LV-ENDO and LV-EPI
+        # Only use LV center for LV-only template mesh
+        self.mesh_c = torch.tensor([mesh_lv.center_mass], device=DEVICE)
 
 
     def _clear_dataloader(self, modal, type_):
@@ -558,7 +558,8 @@ class TrainPipeline:
             return:
                 surface mesh with vertices and faces in NDC space [-1, 1].
         """
-        seg_true_multi = [torch.any(torch.stack([seg_true == i for i in seg_idx]), dim=0) for seg_idx in [[1], [3], [2]]]   # lv, rv, myo
+        # For GSN phase: extract only LV and MYO surfaces as originally designed
+        seg_true_multi = [torch.any(torch.stack([seg_true == i for i in seg_idx]), dim=0) for seg_idx in [[1], [2]]]   # lv, myo
 
         mesh_true = []
         for seg_true_ in seg_true_multi:
@@ -619,8 +620,8 @@ class TrainPipeline:
         verts = template_mesh.verts_padded()
         # find the rotation matrix that makes the centroid vector are in the same direction
         df_c = torch.stack([2 * (torch.nonzero(df <= 1).to(torch.float64).mean(0) / d - 0.5) 
-                            for df in df_preds[:, 2]])[:, [1, 0, 2]]   # reorder dimensions
-        mesh_c = self.mesh_c[1].unsqueeze(0).expand(b, -1).to(torch.float64)
+                            for df in df_preds[:, -1]])[:, [1, 0, 2]]   # reorder dimensions
+        mesh_c = self.mesh_c[0].unsqueeze(0).expand(b, -1).to(torch.float64)
         R = find_rotation_matrix_xz(mesh_c, df_c)
         # Ensure verts are in double precision before matrix multiplication
         verts = verts.to(torch.float64)
@@ -628,9 +629,9 @@ class TrainPipeline:
 
         template_mesh = template_mesh.update_padded(verts)
 
-        # stage 2: local offset
+        # stage 2: local offset - only process LV-related vertices for LV-only template mesh
         verts = template_mesh.verts_padded()
-        for i, l in zip([1, 0, 2, 0], [[0], [2], [1], [3]]): # lv-endo, lv-epi, rv-endo, rv-epi
+        for i, l in zip([1, 0], [[0], [2]]): # lv-endo, lv-epi
             df_pred = df_preds[:, i].to(torch.float64)
             verts_idx = torch.any(torch.stack([self.vert_label == i for i in l]), dim=0)
 
@@ -903,10 +904,6 @@ class TrainPipeline:
                     data_ct["ct_label"].to(DEVICE),
                     data_ct["ct_label_ds"].to(DEVICE),
                 )
-
-                # Apply unflatten operations similar to valid method
-                # seg_true_ct = seg_true_ct.unflatten(0, (1, -1)).swapaxes(1, 2) # Removed for 3D CT
-                # seg_true_ct_ds = seg_true_ct_ds.unflatten(0, (1, -1)).swapaxes(1, 2) # Removed for 3D CT
                 
                 self.optimizer_resnet.zero_grad()
                 with torch.autocast(device_type=DEVICE):
@@ -918,15 +915,12 @@ class TrainPipeline:
                         overlap=0.5,
                         mode="gaussian",
                     )
-                    # Apply unflatten to predictions
-                    # seg_pred_ct = seg_pred_ct.unflatten(0, (1, -1)).swapaxes(1, 2)
                     seg_pred_ct_ds = torch.stack([self.post_transform({"pred": i, "label": j, "modal": "ct"})["pred"] for i, j in zip(seg_pred_ct, seg_true_ct)], dim=0)
                     
                     # Calculate binary mask and compute distance map
                     binary_mask_pred = (torch.argmax(seg_pred_ct_ds, dim=1, keepdim=True) == 0)
                     dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
                     mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor + 1).detach()
-                    # Apply binary mask and threshold in one step
                     mask = mask * binary_mask_pred
                     mask[mask < self.mask_threshold] = 0
                     
@@ -964,9 +958,6 @@ class TrainPipeline:
                     data_ct["ct_label"].to(DEVICE)
                 )
                 
-                # Apply unflatten operations similar to valid method
-                # seg_true_ct = seg_true_ct.unflatten(0, (1, -1)).swapaxes(1, 2) # Removed for 3D CT
-                
                 seg_true_ct_ = torch.stack([self.post_transform({"label": i, "modal": "ct"})["label"] for i in seg_true_ct], dim=0)
                 mesh_true_ct = self.surface_extractor(seg_true_ct_)
 
@@ -980,8 +971,6 @@ class TrainPipeline:
                         overlap=0.5,
                         mode="gaussian",
                     )
-                    # Apply unflatten to predictions
-                    # seg_pred_ct = seg_pred_ct.unflatten(0, (1, -1)).swapaxes(1, 2)
                     seg_pred_ct_ds = torch.stack([self.post_transform({"pred": i, "label": j, "modal": "ct"})["pred"] for i, j in zip(seg_pred_ct, seg_true_ct)], dim=0)
                     
                     binary_mask_pred = (torch.argmax(seg_pred_ct_ds, dim=1, keepdim=True) == 0)
@@ -995,11 +984,10 @@ class TrainPipeline:
                     
                     foreground = (seg_pred_ct_ds > 0)
                     lv = (seg_pred_ct_ds == 1)
-                    rv = (seg_pred_ct_ds == 3)
                     myo = (seg_pred_ct_ds == 2)
                     df_pred_ct = torch.stack([
                         distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
-                        for i in [foreground, lv, rv, myo]], dim=1)
+                        for i in [foreground, lv, myo]], dim=1)
                     
                     template_mesh = self.warp_template_mesh(df_pred_ct.detach())
                     
@@ -1011,7 +999,7 @@ class TrainPipeline:
                     loss_chmf, loss_smooth = 0.0, 0.0
                     for l, subdiv_mesh in enumerate(level_outs):
                         verts_label = self.subdivided_faces.labels_levels[l]
-                        for msh_idx, subdiv_idx in enumerate([[0], [1], [2, 3]]):  # lv, rv, myo
+                        for msh_idx, subdiv_idx in enumerate([[0], [2]]):  # lv, myo (removed rv for LV-only template)
                             loss_chmf += chamfer_distance(
                                 subdiv_mesh.verts_padded()[:, torch.any(torch.stack([verts_label == i for i in subdiv_idx]), dim=0)], 
                                 mesh_true_ct[msh_idx].verts_padded(),
@@ -1124,11 +1112,11 @@ class TrainPipeline:
                 seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
                 foreground = (seg_pred_ds > 0)
                 lv = (seg_pred_ds == 1)
-                rv = (seg_pred_ds == 3)
+                # rv = (seg_pred_ds == 3)
                 myo = (seg_pred_ds == 2)
                 df_pred = torch.stack([
                     distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
-                    for i in [foreground, lv, rv, myo]], dim=1)
+                    for i in [foreground, lv, myo]], dim=1)
                 
                 df_metric_batch_decoder(df_pred, df_true)
 
@@ -1364,11 +1352,11 @@ class TrainPipeline:
                 seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
                 foreground = (seg_pred_ds > 0)
                 lv = (seg_pred_ds == 1)
-                rv = (seg_pred_ds == 3)
+                # rv = (seg_pred_ds == 3)
                 myo = (seg_pred_ds == 2)
                 df_pred = torch.stack([
                     distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
-                    for i in [foreground, lv, rv, myo]], dim=1)
+                    for i in [foreground, lv, myo]], dim=1)
                 
                 template_mesh = self.warp_template_mesh(df_pred)
                 template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float16))
@@ -1684,11 +1672,11 @@ class TrainPipeline:
             # ****** Distance Field Prediction ******
             foreground = (seg_pred_ds > 0)
             lv = (seg_pred_ds == 1)
-            rv = (seg_pred_ds == 3)
+            # rv = (seg_pred_ds == 3)  # Removed RV for LV-only template mesh
             myo = (seg_pred_ds == 2)
             df_pred = torch.stack([
                 distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
-                for i in [foreground, lv, rv, myo]], dim=1)
+                for i in [foreground, lv, myo]], dim=1)  # Only 3 channels: foreground, lv, myo
 
             # if not self.super_params._4d:
             # Save the seg_pred_ds (before and after self.decoder) and seg_true_ds as nib files

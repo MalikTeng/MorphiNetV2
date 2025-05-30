@@ -75,8 +75,9 @@ class Adjustd(MapTransform):
                     data[key] = MetaTensor(pixel_array, affine=m)
 
                 if "label" in key:
-                    # combine label index 2 and 4 as ventricular myocardium
-                    data[key][data[key] == 4] = 2
+                    # remove foreground classes except for left ventricle
+                    # data[key][data[key] > 2] = 0  # Commented out to keep all labels
+                    pass  # Keep all labels without filtering
 
             except KeyError:
                 print(f"Error: {key} is not in the data dictionary.")
@@ -154,14 +155,14 @@ class DFConvertd(MapTransform):
         label = data[self.key]
         label = label.as_tensor().clone()
 
-        # four classes (background: 0, left ventricle: 1, myocardium: 2, right ventricle: 3)
+        # Three channels for GSN phase: (foreground, left ventricle, myocardium)
+        # Even though UNet/ResNet handle all classes, GSN uses only these 3 channels
         foreground = label > 0
         lv = label == 1
         myo = label == 2
-        rv = label == 3
 
         df = []
-        for c in [foreground, lv, rv, myo]:
+        for c in [foreground, lv, myo]:  # Only compute DF for foreground, lv, myo
             df_class = distance_transform_edt(c) + distance_transform_edt(~c)
             df.append(df_class[:, None])
 

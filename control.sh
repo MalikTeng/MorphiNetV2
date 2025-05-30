@@ -37,7 +37,7 @@ do
         --mr_data_dir /mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX \
         \
         --use_ckpt n \
-        --template_mesh_dir ./template/template_mesh-myo.obj \
+        --template_mesh_dir ./template/template_mesh-lv_myo.obj \
         \
         --max_epochs 200 \
         --pretrain_epochs 100 \
