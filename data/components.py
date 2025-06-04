@@ -113,7 +113,8 @@ class FlexResized(MapTransform):
 
         data_shape = data[tag_label].get_array().shape[1:]
         self.size = np.where(self.size == -1, data_shape, self.size)
-        rescale_ratio = max([s / d for s, d in zip(self.size, data_shape)])
+        # Calculate rescale ratio based on the second dimension (index 1)
+        rescale_ratio = self.size[1] / data_shape[1]
         new_shape = [np.ceil(d * rescale_ratio).astype(np.uint8) for d in data_shape]
 
         assert new_shape[1] == self.size[1], f"new shape: {new_shape}, crop window size: {self.size}"
@@ -157,7 +158,7 @@ class DFConvertd(MapTransform):
 
         # Three channels for GSN phase: (foreground, left ventricle, myocardium)
         # Even though UNet/ResNet handle all classes, GSN uses only these 3 channels
-        foreground = label > 0
+        foreground = (label == 1) | (label == 2)
         lv = label == 1
         myo = label == 2
 

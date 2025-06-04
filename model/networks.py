@@ -15,6 +15,7 @@
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from collections.abc import Callable
 from functools import partial
@@ -29,7 +30,7 @@ from monai.transforms.utils import distance_transform_edt
 
 from .parts import ResNetBlock, ResNetBottleneck
 
-__all__ = ["GSN", "Subdivision", "NODEBlock"]
+__all__ = ["GSN", "Subdivision", "NODEBlock", "LocalMeshWarper"]
 
 
 class AutoEncoder(nn.Module):
@@ -433,16 +434,94 @@ class GSNLayer(MessagePassing):
         return norm.view(-1, 1) * f if norm is not None else f
 
 
+class LocalMeshWarper(nn.Module):
+    """
+    Network component for applying local offset warping to mesh vertices based on distance fields.
+    This implements the local offset stage from the mesh warping pipeline.
+    """
+    def __init__(self, num_iterations: int = 30):
+        super().__init__()
+        self.num_iterations = num_iterations
+        
+    def forward(self, meshes, df_preds, vert_labels):
+        """
+        Apply local offset warping to mesh vertices based on distance fields.
+        
+        Args:
+            meshes: PyTorch3D Meshes object containing the meshes to warp
+            df_preds: Distance field predictions of shape (B, C, D, H, W)
+            vert_labels: Vertex labels tensor for the current mesh subdivision level
+            
+        Returns:
+            Warped meshes with updated vertices
+        """
+        b, *_, d = df_preds.shape
+        verts = meshes.verts_padded()
+        
+        # Use the same precision as the mesh vertices (AMP compatible)
+        verts_dtype = verts.dtype
+        device = verts.device
+        
+        # Process LV-related vertices for LV-only template mesh
+        for i, l in zip([1, 0], [[0], [2]]):  # lv-endo, lv-epi
+            df_pred = df_preds[:, i].to(dtype=verts_dtype, device=device)
+            verts_idx = torch.any(torch.stack([vert_labels == j for j in l]), dim=0)
+
+            # Skip if no vertices match the current label
+            if not verts_idx.any():
+                continue
+
+            # Calculate the gradient of the distance field
+            direction = torch.gradient(-df_pred, dim=(1, 2, 3), edge_order=1)
+            direction = torch.stack(direction, dim=1)
+            
+            # Calculate the norm of each direction vector
+            direction_norm = torch.norm(direction, dim=1, keepdim=True)
+            
+            # Only normalize vectors with norm > 1, keep vectors with norm <= 1 unchanged
+            mask = (direction_norm > 1.0)
+            direction = torch.where(mask, direction / (direction_norm + 1e-16), direction)
+            
+            # Handle any invalid values
+            direction[torch.isnan(direction)] = 0
+            direction[torch.isinf(direction)] = 0
+            
+            # Apply iterative offset
+            for _ in range(self.num_iterations):
+                # Ensure consistent dtypes for grid_sample
+                direction_input = direction.permute(0, 1, 4, 2, 3).to(dtype=verts_dtype)
+                grid_input = verts[:, verts_idx].unsqueeze(1).unsqueeze(1).to(dtype=verts_dtype)
+                
+                offset = F.grid_sample(
+                    direction_input, 
+                    grid_input,
+                    align_corners=False, padding_mode="zeros"
+                ).view(b, 3, -1).transpose(-1, -2)[..., [1, 0, 2]]
+
+                # Transform from NDC space to pixel space
+                verts = d * (verts / 2 + 0.5)
+                verts[:, verts_idx] += offset
+                # Transform verts back to NDC space
+                verts = 2 * (verts / d - 0.5)
+
+        # Update meshes with warped vertices
+        meshes = meshes.update_padded(verts)
+        return meshes
+
+
 class GSN(nn.Module):
-    def __init__(self, hidden_features: int, num_layers: int = 2):
+    def __init__(self, hidden_features: int, num_layers: int = 2, num_iterations: int = 30):
         super().__init__()
 
         self.gcn_layers = ModuleList([
             GSNLayer(3, 3, bias=False, hidden_features=hidden_features)
             for _ in range(num_layers)
         ])
+        
+        # Initialize mesh warper
+        self.mesh_warper = LocalMeshWarper(num_iterations)
 
-    def forward(self, meshes: Meshes, subdivided_faces: list[torch.LongTensor]):
+    def forward(self, meshes: Meshes, subdivided_faces: list[torch.LongTensor], df_preds: torch.Tensor = None, labels_levels: list[torch.LongTensor] = None):
         # Ensure all vertices are in the correct data type for AMP compatibility
         verts_precision = next(self.parameters()).dtype
         if meshes.verts_padded().dtype != verts_precision:
@@ -470,6 +549,10 @@ class GSN(nn.Module):
                 meshes.verts_packed(), meshes.edges_packed().t().contiguous()
                 )
             meshes = meshes.offset_verts(offsets)
+            
+            # 3.5. Apply local mesh warping if distance field is provided and labels are available
+            if df_preds is not None and labels_levels is not None and l < len(labels_levels):
+                meshes = self.mesh_warper(meshes, df_preds, labels_levels[l])
 
             # 4. output the new mesh
             level_outs.append(meshes)

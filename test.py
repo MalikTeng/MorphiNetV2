@@ -21,7 +21,7 @@ def config():
     """
     parser = argparse.ArgumentParser()
     # mode parameters
-    parser.add_argument("--mode", type=str, default="online", help="choose the mode for wandb, can be 'disabled', 'offline', 'online'")
+    parser.add_argument("--mode", type=str, default="offline", help="choose the mode for wandb, can be 'disabled', 'offline', 'online'")
     parser.add_argument("--save_on", type=str, default="sct", help="the dataset for validation, can be 'cap' or 'sct'")
     parser.add_argument("--target", type=str, default=None, help="the target dataset for test, particularly for a different process on acdc data")
     parser.add_argument("--template_mesh_dir", type=str,
@@ -71,11 +71,12 @@ def config():
      
     # path to the pretrained modules
     parser.add_argument("--use_ckpt", type=lambda x: None if x.lower() == 'n' else x, 
-                        default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2025-05-01-0949", 
+                        default=None, 
+                        # default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2025-05-01-0949", 
                         help="path to pretrained models ('n' for no checkpoint, or specify a path)")
 
     # structure parameters for df-predict module
-    parser.add_argument("--num_classes", type=int, default=3, help="the number of segmentation classes for LV-only template (background, LV, MYO)")
+    parser.add_argument("--num_classes", type=int, default=5, help="the number of segmentation classes for LV-only template (background, LV, LV-MYO, RV, RV-MYO)")
     parser.add_argument("--kernel_size", type=int, default=(3, 3, 3), nargs='+', help="the kernel size of the convolutional layer in the encoder")
     parser.add_argument("--strides", type=int, default=(1, 2, 2), nargs='+', help="the stride of the convolutional layer in the encoder")
     parser.add_argument("--filters", type=int, default=(8, 16, 32), nargs='+', help="the number of output channels in each layer of the encoder")
@@ -110,6 +111,13 @@ def test(super_params):
     )
     pipeline.prepare_test_specific_dataloaders(rotation=False)
     pipeline.test(super_params.save_on)
+
+    # Note: The test() method now includes post-processing of subdiv_mesh
+    # The post_process_subdiv_mesh() method:
+    # 1) Selects LV-MYO (label 2) and LV-ENDO (label 0) nodes from the subdivided mesh
+    # 2) Creates convex hulls from each group of nodes individually  
+    # 3) Subtracts LV-ENDO convex hull from LV-MYO convex hull to create refined LV-MYO mesh
+    # This results in a more anatomically accurate representation of the left ventricular myocardium
 
 
 def ablation(super_params):
@@ -164,7 +172,7 @@ if __name__ == '__main__':
     super_params.template_mesh_dir = f"./template/template_mesh-lv_myo.obj"
 
     # Test-specific settings
-    ckpt = "sct--lv_myo--f0--2025-05-29-0336"
+    ckpt = "sct--lv_myo--f0--2025-05-31-1321"
     super_params.best_epoch = "best"
     super_params.target = "sct"
     super_params.ct_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task20_f0.json"

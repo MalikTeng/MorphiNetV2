@@ -70,8 +70,8 @@ def config():
      
     # path to the pretrained modules
     parser.add_argument("--use_ckpt", type=lambda x: None if x.lower() == 'n' else x, 
-                        default=None, 
-                        # default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--lv_myo--f0--2025-05-29-0336", 
+                        # default=None, 
+                        default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--lv_myo--f0--2025-06-02-0521", 
                         help="path to pretrained models ('n' for no checkpoint, or specify a path)")
 
     # structure parameters for df-predict module
