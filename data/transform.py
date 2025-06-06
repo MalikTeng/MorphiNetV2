@@ -107,9 +107,9 @@ def pre_transform(
             DFConvertd(f"{keys[1]}_ds"),
         ])
 
-    keys_to_ensure = list(keys)
-    if load_full_data:
-        keys_to_ensure.extend([f"{keys[0][:2]}_df", f"{keys[1]}_ds"])
+    # keys_to_ensure = list(keys)
+    # if load_full_data:
+    #     keys_to_ensure.extend([f"{keys[0][:2]}_df", f"{keys[1]}_ds"])
 
     if section == "train":
         # if rotation:

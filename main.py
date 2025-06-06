@@ -28,11 +28,11 @@ def config():
                         help="the path to your initial meshes")
 
     # training parameters
-    parser.add_argument("--max_epochs", type=int, default=10, help="the maximum number of epochs for training")
-    parser.add_argument("--pretrain_epochs", type=int, default=3, help="the number of epochs to train the segmentation UNet")
-    parser.add_argument("--train_epochs", type=int, default=6, help="the number of epochs to train the distance field prediction ResNet")
+    parser.add_argument("--max_epochs", type=int, default=20, help="the maximum number of epochs for training")
+    parser.add_argument("--pretrain_epochs", type=int, default=15, help="the number of epochs to train the segmentation UNet")
+    parser.add_argument("--train_epochs", type=int, default=10, help="the number of epochs to train the distance field prediction ResNet")
     parser.add_argument("--reduce_count_down", type=int, default=-1, help="the count down for reduce the mesh face numbers.")
-    parser.add_argument("--val_interval", type=int, default=5, help="the interval of validation")
+    parser.add_argument("--val_interval", type=int, default=1, help="the interval of validation")
 
     parser.add_argument("--lr", type=float, default=1e-3, help="the learning rate for training")
     parser.add_argument("--batch_size", type=int, default=1, help="the batch size for training")
@@ -70,16 +70,16 @@ def config():
      
     # path to the pretrained modules
     parser.add_argument("--use_ckpt", type=lambda x: None if x.lower() == 'n' else x, 
-                        # default=None, 
-                        default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--lv_myo--f0--2025-06-02-0521", 
+                        default=None, 
+                        # default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--lv_myo--f0--2025-06-02-0521", 
                         help="path to pretrained models ('n' for no checkpoint, or specify a path)")
 
     # structure parameters for df-predict module
     parser.add_argument("--num_classes", type=int, default=5, help="the number of segmentation classes (background + 4 anatomical structures: LV, LV-MYO, RV, RV-MYO)")
-    parser.add_argument("--filters", type=int, default=(8, 16, 32), nargs='+', help="the number of output channels in each layer of the encoder")
-    parser.add_argument("--kernel_size", type=int, default=(3, 3, 3), nargs='+', help="the kernel size of the convolutional layer in the encoder")
-    parser.add_argument("--strides", type=int, default=(1, 2, 2), nargs='+', help="the stride of the convolutional layer in the encoder")
-    parser.add_argument("--layers", type=int, default=(1, 2, 2, 4), nargs='+', help="the number of layers in each residual block of the decoder")
+    parser.add_argument("--filters", type=int, default=(8, 16, 32, 64, 128), nargs='+', help="the number of output channels in each layer of the encoder")
+    parser.add_argument("--kernel_size", type=int, default=(3, 3, 3, 3, 3), nargs='+', help="the kernel size of the convolutional layer in the encoder")
+    parser.add_argument("--strides", type=int, default=(1, 2, 2, 2, 2), nargs='+', help="the stride of the convolutional layer in the encoder")
+    parser.add_argument("--layers", type=int, default=(1, 8, 8, 16), nargs='+', help="the number of layers in each residual block of the decoder")
 
     # structure parameters for subdiv module
     parser.add_argument("--subdiv_levels", type=int, default=2, help="the number of subdivision levels for the mesh (should be an integer larger than 0, where 0 means no subdivision)")

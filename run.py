@@ -112,7 +112,33 @@ class TrainPipeline:
             # RemoveSmallObjects(min_size=8),
             KeepLargestConnectedComponent(independent=True, connectivity=3),
         ])
+        # CPU-optimized post_transform pipeline for memory efficiency
         self.post_transform = Compose([
+            Spacingd(["pred", "label"], [2.0, 2.0, 2.0], mode=("bilinear", "nearest"), allow_missing_keys=True),
+            CropForegroundd(["pred", "label"], source_key="label", margin=10, allow_missing_keys=True),
+            Maskd(["pred", "label", "modal"], allow_missing_keys=True),
+            FlexResized(
+                ["pred", "label"], 
+                (-1, self.super_params.crop_window_size[0], -1), 
+                allow_missing_keys=True
+                ),
+            Resized(
+                ["pred", "label"], 
+                int(self.super_params.crop_window_size[0] // self.super_params.pixdim[0]), 
+                size_mode="longest", mode=("bilinear", "nearest-exact"), 
+                allow_missing_keys=True
+                ),
+            ResizeWithPadOrCropd(
+                ["pred", "label"],
+                int(self.super_params.crop_window_size[0] // self.super_params.pixdim[0]), 
+                mode="constant", value=0,
+                allow_missing_keys=True
+                ),
+            EnsureTyped(["pred", "label"], device="cpu", allow_missing_keys=True),  # Keep on CPU
+        ])
+        
+        # GPU version for when we specifically need GPU output
+        self.post_transform_gpu = Compose([
             Spacingd(["pred", "label"], [2.0, 2.0, 2.0], mode=("bilinear", "nearest"), allow_missing_keys=True),
             CropForegroundd(["pred", "label"], source_key="label", margin=10, allow_missing_keys=True),
             Maskd(["pred", "label", "modal"], allow_missing_keys=True),
@@ -156,6 +182,42 @@ class TrainPipeline:
         self._prepare_optimiser()
 
         self.rasterizer = Rasterize([int(i // self.super_params.pixdim[0]) for i in self.super_params.crop_window_size]) # tool for rasterizing mesh
+
+    def _memory_efficient_post_transform(self, seg_pred_list, seg_true_list, modal, to_gpu=True):
+        """
+        Memory-efficient post-transform processing that handles tensors individually
+        and optionally keeps processing on CPU to save GPU memory.
+        """
+        processed_preds = []
+        
+        # Process each tensor individually to avoid large batch processing
+        for i, (pred, true) in enumerate(zip(seg_pred_list, seg_true_list)):
+            # Move to CPU if not already there
+            if pred.is_cuda:
+                pred = pred.cpu()
+            if true.is_cuda:
+                true = true.cpu()
+            
+            # Apply post-transform on CPU
+            result = self.post_transform({"pred": pred, "label": true, "modal": modal})
+            processed_pred = result["pred"]
+            
+            # Move to GPU only when needed and one at a time
+            if to_gpu:
+                processed_pred = processed_pred.to(DEVICE)
+            
+            processed_preds.append(processed_pred)
+            
+            # Clear intermediate results to free memory
+            del pred, true, result
+            if DEVICE == "cuda":
+                torch.cuda.empty_cache()
+        
+        # Stack on GPU
+        if to_gpu:
+            return torch.stack(processed_preds, dim=0)
+        else:
+            return processed_preds
 
     def _prepare_slice_for_wandb(self, slice_tensor, is_segmentation, num_classes=None):
         """
@@ -247,7 +309,7 @@ class TrainPipeline:
                     )
                 # Only prepare training dataset and dataloader
                 data_json = json.load(f)
-                train_data = self._remap_abs_path(data_json["train_fold0"], "mr", "Tr")[:25]
+                train_data = self._remap_abs_path(data_json["train_fold0"], "mr", "Tr")
                 self.mr_train_ds = Dataset(
                     data=train_data, transform=mr_train_transform,
                     cache_rate=self.super_params.cache_rate, num_workers=self.num_workers
@@ -272,7 +334,7 @@ class TrainPipeline:
                     )
                 # Only prepare training dataset and dataloader
                 data_json = json.load(f)
-                train_data = self._remap_abs_path(data_json["train_fold0"], "ct", "Tr")[:25]
+                train_data = self._remap_abs_path(data_json["train_fold0"], "ct", "Tr")
                 self.ct_train_ds = Dataset(
                     data=train_data, transform=ct_train_transform,
                     cache_rate=self.super_params.cache_rate, num_workers=self.num_workers
@@ -614,6 +676,8 @@ class TrainPipeline:
             return R
 
         template_mesh = load(self.super_params.template_mesh_dir)
+        # extent = template_mesh.bounds.ptp(axis=0)
+        # template_mesh.apply_scale(2 / extent)
         template_mesh = Meshes(
             verts=[torch.tensor(template_mesh.vertices, dtype=torch.float64)], 
             faces=[torch.tensor(template_mesh.faces, dtype=torch.int64)]
@@ -695,7 +759,16 @@ class TrainPipeline:
                         lv_myo_mesh = max(lv_myo_mesh.bodies, key=lambda x: x.volume)
                     
                     # Validate result and convert back to CUDA tensors
-                    if lv_myo_mesh.is_valid and len(lv_myo_mesh.vertices) > 0:
+                    # Check if the mesh is valid using available attributes
+                    is_valid_mesh = (
+                        hasattr(lv_myo_mesh, 'vertices') and 
+                        hasattr(lv_myo_mesh, 'faces') and
+                        len(lv_myo_mesh.vertices) > 0 and 
+                        len(lv_myo_mesh.faces) > 0 and
+                        (not hasattr(lv_myo_mesh, 'is_valid') or lv_myo_mesh.is_valid)
+                    )
+                    
+                    if is_valid_mesh:
                         processed_verts = torch.tensor(lv_myo_mesh.vertices, dtype=torch.float32, device=DEVICE)
                         processed_faces = torch.tensor(lv_myo_mesh.faces, dtype=torch.long, device=DEVICE)
                     else:
@@ -827,9 +900,12 @@ class TrainPipeline:
                         sw_batch_size=8, 
                         predictor=self.encoder_ct,
                         overlap=0.5, 
-                        mode="gaussian", 
+                        mode="gaussian",
+                        device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                        buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                        buffer_dim=-1,   # Buffer along last spatial dimension
                     ) 
-                    loss = self.dice_loss_fn_ct(seg_pred_ct, seg_true_ct)
+                    loss = self.dice_loss_fn_ct(seg_pred_ct.to(DEVICE), seg_true_ct)
 
                 self.scaler_ct_unet.scale(loss).backward()
                 self.scaler_ct_unet.step(self.optimzer_ct_unet)
@@ -857,8 +933,8 @@ class TrainPipeline:
                         gt_slice_ct_viz = self._prepare_slice_for_wandb(gt_slice_ct, is_segmentation=True, num_classes=self.super_params.num_classes)
                         h_gt_ct, w_gt_ct = gt_slice_ct_viz.shape[:2]
 
-                        # Prepare predicted segmentation slice
-                        pred_slice_ct = torch.argmax(seg_pred_ct[0, :, depth_slice_idx_ct, :, :], dim=0)
+                        # Prepare predicted segmentation slice (move to GPU first for argmax)
+                        pred_slice_ct = torch.argmax(seg_pred_ct[0, :, depth_slice_idx_ct, :, :].to(DEVICE), dim=0)
                         pred_slice_ct_viz = self._prepare_slice_for_wandb(pred_slice_ct, is_segmentation=True, num_classes=self.super_params.num_classes)
                         h_pred_ct, w_pred_ct = pred_slice_ct_viz.shape[:2]
                         
@@ -892,8 +968,11 @@ class TrainPipeline:
                         predictor=self.encoder_mr,
                         overlap=0.5,
                         mode="gaussian",
+                        device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                        buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                        buffer_dim=-1,   # Buffer along last spatial dimension
                     )
-                    loss = self.dice_loss_fn_mr(seg_pred_mr, seg_true_mr)
+                    loss = self.dice_loss_fn_mr(seg_pred_mr.to(DEVICE), seg_true_mr)
 
                 self.scaler_mr_unet.scale(loss).backward()
                 self.scaler_mr_unet.step(self.optimzer_mr_unet)
@@ -919,8 +998,8 @@ class TrainPipeline:
                     gt_slice_mr_viz = self._prepare_slice_for_wandb(gt_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
                     h_gt_mr, w_gt_mr = gt_slice_mr_viz.shape[:2]
 
-                    # Prepare predicted segmentation slice
-                    pred_slice_mr = torch.argmax(seg_pred_mr[slice_idx_mr], dim=0)
+                    # Prepare predicted segmentation slice (move to GPU first for argmax)
+                    pred_slice_mr = torch.argmax(seg_pred_mr[slice_idx_mr].to(DEVICE), dim=0)
                     pred_slice_mr_viz = self._prepare_slice_for_wandb(pred_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
                     h_pred_mr, w_pred_mr = pred_slice_mr_viz.shape[:2]
 
@@ -968,8 +1047,12 @@ class TrainPipeline:
                         predictor=self.encoder_ct,
                         overlap=0.5,
                         mode="gaussian",
+                        device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                        buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                        buffer_dim=-1,   # Buffer along last spatial dimension
                     )
-                    seg_pred_ct_ds = torch.stack([self.post_transform({"pred": i, "label": j, "modal": "ct"})["pred"] for i, j in zip(seg_pred_ct, seg_true_ct)], dim=0)
+                    # Use memory-efficient post-transform processing for resnet phase
+                    seg_pred_ct_ds = self._memory_efficient_post_transform(seg_pred_ct, seg_true_ct, "ct", to_gpu=True)
                     
                     # Calculate binary mask and compute distance map
                     binary_mask_pred = (torch.argmax(seg_pred_ct_ds, dim=1, keepdim=True) == 0)
@@ -1013,19 +1096,23 @@ class TrainPipeline:
                 )
                 
                 seg_true_ct_ = torch.stack([self.post_transform({"label": i, "modal": "ct"})["label"] for i in seg_true_ct], dim=0)
-                mesh_true_ct = self.surface_extractor(seg_true_ct_)
+                mesh_true_ct = self.surface_extractor(seg_true_ct_.to(DEVICE))
 
                 self.optimizer_gsn.zero_grad()
                 with torch.autocast(device_type=DEVICE):
                     seg_pred_ct = sliding_window_inference(
                         img_ct,
                         roi_size=self.super_params.crop_window_size, # Use full 3D roi_size for CT
-                        sw_batch_size=4,
+                        sw_batch_size=8,
                         predictor=self.encoder_ct,
                         overlap=0.5,
                         mode="gaussian",
+                        device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                        buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                        buffer_dim=-1,   # Buffer along last spatial dimension
                     )
-                    seg_pred_ct_ds = torch.stack([self.post_transform({"pred": i, "label": j, "modal": "ct"})["pred"] for i, j in zip(seg_pred_ct, seg_true_ct)], dim=0)
+                    # Use memory-efficient post-transform processing
+                    seg_pred_ct_ds = self._memory_efficient_post_transform(seg_pred_ct, seg_true_ct, "ct", to_gpu=True)
                     
                     binary_mask_pred = (torch.argmax(seg_pred_ct_ds, dim=1, keepdim=True) == 0)
                     dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
@@ -1143,18 +1230,21 @@ class TrainPipeline:
                 seg_pred = sliding_window_inference(
                     img, 
                     roi_size=roi_size, 
-                    sw_batch_size=4, 
+                    sw_batch_size=8, 
                     predictor=encoder,
                     overlap=0.5, 
-                    mode="gaussian", 
+                    mode="gaussian",
+                    device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                    buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                    buffer_dim=-1,   # Buffer along last spatial dimension
                 )
                 # Apply unflatten only for MR
                 if modal == 'mr':
                     seg_pred = seg_pred.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
                 # For CT, seg_pred is assumed to be (B, NumClasses, D, H, W)
                 
-                seg_pred_ds = torch.stack([self.post_transform({"pred": i, "label": j, "modal": modal})["pred"] 
-                                               for i, j in zip(seg_pred, seg_true)], dim=0)
+                # Use memory-efficient post-transform processing
+                seg_pred_ds = self._memory_efficient_post_transform(seg_pred, seg_true, modal, to_gpu=True)
                 
                 binary_mask_pred = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0)
                 dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
@@ -1180,12 +1270,12 @@ class TrainPipeline:
                 subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
                 
                 # Apply post-processing to create LV-MYO as difference between LV-EPI and LV-ENDO convex hulls
-                subdiv_mesh = self.post_process_subdiv_mesh(subdiv_mesh)
+                subdiv_mesh_post = self.post_process_subdiv_mesh(subdiv_mesh)
                 
                 voxeld_mesh = torch.cat([
                     self.rasterizer(
                         pred_mesh.verts_padded(), pred_mesh.faces_padded())
-                    for pred_mesh in subdiv_mesh
+                    for pred_mesh in subdiv_mesh_post
                     ], dim=0)
                 
                 msh_metric_batch_decoder(voxeld_mesh, (seg_true_ds == 2).to(torch.float32))
@@ -1383,10 +1473,13 @@ class TrainPipeline:
                 seg_pred = sliding_window_inference(
                     img, 
                     roi_size=roi_size,
-                    sw_batch_size=4, 
+                    sw_batch_size=8, 
                     predictor=encoder,
                     overlap=0.5, 
-                    mode="gaussian", 
+                    mode="gaussian",
+                    device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                    buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                    buffer_dim=-1,   # Buffer along last spatial dimension
                 )
                 
                 # Apply unflatten only for MR
@@ -1394,9 +1487,8 @@ class TrainPipeline:
                     seg_pred = seg_pred.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
                 # For CT, seg_pred is assumed to be (B, NumClasses, D, H, W)
                 
-                seg_pred_ds = torch.stack([
-                    self.post_transform({"pred": i, "label": j, "modal": modal})["pred"] 
-                    for i, j in zip(seg_pred, seg_true)], dim=0)
+                # Use memory-efficient post-transform processing for test function
+                seg_pred_ds = self._memory_efficient_post_transform(seg_pred, seg_true, modal, to_gpu=True)
                 
                 binary_mask_pred = (torch.argmax(seg_pred_ds, dim=1, keepdim=True) == 0)
                 dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
@@ -1695,10 +1787,13 @@ class TrainPipeline:
             seg_pred = sliding_window_inference(
                 img, 
                 roi_size=roi_size, 
-                sw_batch_size=4, 
+                sw_batch_size=8, 
                 predictor=encoder,
                 overlap=0.5, 
-                mode="gaussian", 
+                mode="gaussian",
+                device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                buffer_dim=-1,   # Buffer along last spatial dimension
             )
             
             # Apply unflatten only for MR
@@ -1706,9 +1801,22 @@ class TrainPipeline:
                 seg_pred = seg_pred.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
             # For CT, seg_pred is assumed to be (B, NumClasses, D, H, W)
             
-            seg_data = [self.post_transform({"pred": i, "label": j, "modal": modal}) for i, j in zip(seg_pred, seg_true)]
+            # Use memory-efficient post-transform processing for ablation_study function
+            seg_data = []
+            for i, (pred, true) in enumerate(zip(seg_pred, seg_true)):
+                # Process individually to save memory
+                if pred.is_cuda:
+                    pred = pred.cpu()
+                if true.is_cuda:
+                    true = true.cpu()
+                result = self.post_transform({"pred": pred, "label": true, "modal": modal})
+                seg_data.append(result)
+                # Clean up intermediate tensors
+                del pred, true, result
+                if DEVICE == "cuda":
+                    torch.cuda.empty_cache()
             seg_pred = torch.stack([i["pred"] for i in seg_data], dim=0)
-            seg_pred_ds = F.interpolate(seg_pred.as_tensor(), 
+            seg_pred_ds = F.interpolate(seg_pred.as_tensor().to(DEVICE), 
                                             scale_factor=1 / self.super_params.pixdim[-1], 
                                             mode="trilinear")
             
@@ -1723,7 +1831,7 @@ class TrainPipeline:
             seg_pred_ds = seg_pred_ds + mask * self.decoder(seg_pred_ds)
             seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
             seg_true = torch.stack([i["label"] for i in seg_data], dim=0)
-            seg_true_ds = F.interpolate(seg_true,
+            seg_true_ds = F.interpolate(seg_true.to(DEVICE),
                                         scale_factor=1 / self.super_params.pixdim[-1], 
                                         mode="nearest-exact")
 

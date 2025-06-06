@@ -118,7 +118,7 @@ if __name__ == '__main__':
             'save_on': {'value': 'sct'},
             'ct_ratio': {'value': 1.0},
             '_mr': {'value': False},
-            'template_mesh_dir': {'value': '/home/yd21/Documents/MorphiNet/template/template_mesh-lv_myo.obj'},
+            'template_mesh_dir': {'value': './template/template_mesh-lv_myo.obj'},
             'max_epochs': {'value': 200},
             'pretrain_epochs': {'value': 100},
             'train_epochs': {'value': 150},
@@ -129,8 +129,8 @@ if __name__ == '__main__':
             'crop_window_size': {'value': [128, 128, 128]},
             'pixdim': {'value': [4, 4, 4]},
             'iteration': {'value': 10},
-            'ct_json_dir': {'value': '/home/yd21/Documents/MorphiNet/dataset/dataset_task20_f0.json'},
-            'mr_json_dir': {'value': '/home/yd21/Documents/MorphiNet/dataset/dataset_task11_f0.json'},
+            'ct_json_dir': {'value': './dataset/dataset_task20_f0.json'},
+            'mr_json_dir': {'value': './dataset/dataset_task11_f0.json'},
             'ct_data_dir': {'value': '/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset020_SCOTHEART'},
             'mr_data_dir': {'value': '/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX'},
             'ckpt_dir': {'value': '/mnt/data/Experiment/MorphiNet/Checkpoint'},
@@ -158,4 +158,4 @@ if __name__ == '__main__':
     }
 
     sweep_id = wandb.sweep(sweep_config, project="MorphiNet-sweeps")
-    wandb.agent(sweep_id, function=train, count=10)
+    wandb.agent(sweep_id, function=train, count=20)

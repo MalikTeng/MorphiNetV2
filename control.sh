@@ -36,7 +36,7 @@ do
         --mr_json_dir ./dataset/dataset_task11_f0.json \
         --mr_data_dir /mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX \
         \
-        --use_ckpt n \
+        --use_ckpt /mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--lv_myo--f0--2025-06-06-0200 \
         --template_mesh_dir ./template/template_mesh-lv_myo.obj \
         \
         --max_epochs 200 \
@@ -45,16 +45,16 @@ do
         --val_interval 5 \
         \
         --pixdim 4 4 4 \
-        --filters 8 16 32 \
-        --kernel_size 3 3 3 \
-        --strides 1 2 2 \
-        --lambda_0 0.24 \
+        --filters 8 16 32 64 128 \
+        --kernel_size 3 3 3 3 3 \
+        --strides 1 2 2 2 2 \
+        --lambda_0 0.86 \
         --layers 1 2 2 4 \
-        --lambda_1 0.63 \
+        --lambda_1 0.75 \
         \
-        --hidden_features_gsn 8 \
-        --iteration 10 \
-        --sigmoid_scale_factor 0.55 \
+        --hidden_features_gsn 64 \
+        --iteration 20 \
+        --sigmoid_scale_factor 0.19 \
         \
         --lr 0.001 \
         --batch_size 1 \

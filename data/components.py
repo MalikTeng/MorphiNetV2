@@ -27,6 +27,10 @@ class Maskd(MapTransform):
             except KeyError:
                 continue
             else:
+                # Ensure we work with CPU arrays to avoid GPU memory issues
+                if hasattr(array, 'is_cuda') and array.is_cuda:
+                    array = array.cpu()
+                
                 array = array.get_array()
 
                 if data["modal"] == "ct" and "pred" in key:

@@ -55,6 +55,10 @@ pip install torchdiffeq
 echo "Installing seaborn..."
 pip install seaborn
 
+# Install manifold3d for trimesh boolean operations
+echo "Installing manifold3d for mesh boolean operations..."
+pip install manifold3d
+
 # Verify installations
 echo "Verifying installations..."
 python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA version: {torch.version.cuda}')"
@@ -69,6 +73,7 @@ python -c "import seaborn; print(f'Seaborn version: {seaborn.__version__}')"
 python -c "import IPython; print(f'IPython version: {IPython.__version__}')"
 python -c "import SimpleITK; print(f'SimpleITK version: {SimpleITK.__version__}')" || echo "WARNING: SimpleITK not installed correctly"
 python -c "import nrrd; print(f'pynrrd version: {nrrd.__version__}')" || echo "WARNING: pynrrd not installed correctly"
+python -c "import manifold3d; print('manifold3d imported successfully')" || echo "WARNING: manifold3d not installed correctly"
 
 # Verify Ninja in a way that PyTorch's cpp_extension will find it
 echo "Verifying Ninja installation..."

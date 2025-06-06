@@ -30,6 +30,7 @@ dependencies:
       - tqdm
       - pyvista
       - trimesh
+      - manifold3d
       - nptyping
       - natsort
       - rtree
