@@ -21,4 +21,5 @@ update_json_4d.py
 *.txt
 *.json
 *.html
+*.log
 
