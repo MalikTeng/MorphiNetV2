@@ -543,10 +543,6 @@ class GSN(nn.Module):
 
             # 2. create new meshes with the same topology as the original mesh.
             meshes = Meshes(verts=new_verts, faces=new_faces)
-
-            # 2.5. Apply local mesh warping if distance field is provided and labels are available
-            if df_preds is not None and labels_levels is not None and l < len(labels_levels):
-                meshes = self.mesh_warper(meshes, df_preds, labels_levels[l])
             
             # 3. update the vertices with learnt offsets.
             offsets = gcn_layer(
