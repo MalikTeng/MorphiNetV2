@@ -553,6 +553,17 @@ class GSN(nn.Module):
             # 4. output the new mesh
             level_outs.append(meshes)
 
+        # Apply local mesh warping to all levels after the training loop
+        if df_preds is not None and labels_levels is not None:
+            warped_level_outs = []
+            for l, mesh_level in enumerate(level_outs):
+                if l < len(labels_levels):
+                    warped_mesh = self.mesh_warper(mesh_level, df_preds, labels_levels[l])
+                    warped_level_outs.append(warped_mesh)
+                else:
+                    warped_level_outs.append(mesh_level)
+            return warped_level_outs
+
         return level_outs
 
 

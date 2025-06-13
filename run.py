@@ -115,7 +115,7 @@ class TrainPipeline:
         # CPU-optimized post_transform pipeline for memory efficiency
         self.post_transform = Compose([
             Spacingd(["pred", "label"], [2.0, 2.0, 2.0], mode=("bilinear", "nearest"), allow_missing_keys=True),
-            CropForegroundd(["pred", "label"], source_key="label", margin=10, allow_missing_keys=True),
+            CropForegroundd(["pred", "label"], source_key="label", allow_missing_keys=True),
             Maskd(["pred", "label", "modal"], allow_missing_keys=True),
             FlexResized(
                 ["pred", "label"], 
@@ -140,7 +140,7 @@ class TrainPipeline:
         # GPU version for when we specifically need GPU output
         self.post_transform_gpu = Compose([
             Spacingd(["pred", "label"], [2.0, 2.0, 2.0], mode=("bilinear", "nearest"), allow_missing_keys=True),
-            CropForegroundd(["pred", "label"], source_key="label", margin=10, allow_missing_keys=True),
+            CropForegroundd(["pred", "label"], source_key="label", allow_missing_keys=True),
             Maskd(["pred", "label", "modal"], allow_missing_keys=True),
             FlexResized(
                 ["pred", "label"], 
@@ -616,16 +616,39 @@ class TrainPipeline:
         torch.backends.cudnn.benchmark = torch.backends.cudnn.is_available()
 
 
-    def surface_extractor(self, seg_true):
+    def surface_extractor(self, seg_true, labels=None):
         """
             WARNING: this operation is non-differentiable.
             input:
                 seg_true: ground truth segmentation.
+                labels: integer or list of integers/lists specifying which labels to extract.
+                       If None, uses default [[1], [1, 2]] for backwards compatibility.
+                       If integer, extracts only that label.
+                       If list, each element can be an integer or list of integers to combine.
             return:
                 surface mesh with vertices and faces in NDC space [-1, 1].
         """
-        # For GSN phase: extract only LV and MYO surfaces as originally designed
-        seg_true_multi = [torch.any(torch.stack([seg_true == i for i in seg_idx]), dim=0) for seg_idx in [[1], [1, 2]]]   # lv-endo, lv-endo+lv-epi
+        # Handle labels parameter
+        if labels is None:
+            # For GSN phase: extract only LV and MYO surfaces as originally designed
+            seg_idx_list = [[1], [1, 2]]   # lv-endo, foreground
+        elif isinstance(labels, int):
+            # Single label
+            seg_idx_list = [[labels]]
+        elif isinstance(labels, list):
+            # List of labels or lists of labels
+            seg_idx_list = []
+            for label_group in labels:
+                if isinstance(label_group, int):
+                    seg_idx_list.append([label_group])
+                elif isinstance(label_group, list):
+                    seg_idx_list.append(label_group)
+                else:
+                    raise ValueError(f"Invalid label type in labels list: {type(label_group)}")
+        else:
+            raise ValueError(f"Invalid labels type: {type(labels)}. Must be None, int, or list.")
+        
+        seg_true_multi = [torch.any(torch.stack([seg_true == i for i in seg_idx]), dim=0) for seg_idx in seg_idx_list]
 
         mesh_true = []
         for seg_true_ in seg_true_multi:
@@ -688,7 +711,7 @@ class TrainPipeline:
         verts = template_mesh.verts_padded()
         # find the rotation matrix that makes the centroid vector are in the same direction
         df_c = torch.stack([2 * (torch.nonzero(df <= 1).to(torch.float64).mean(0) / d - 0.5) 
-                            for df in df_preds[:, -1]])[:, [1, 0, 2]]   # reorder dimensions
+                            for df in df_preds[:, 0]])[:, [1, 0, 2]]   # reorder dimensions
         mesh_c = self.mesh_c[0].unsqueeze(0).expand(b, -1).to(torch.float64)
         R = find_rotation_matrix_xz(mesh_c, df_c)
         # Ensure verts are in double precision before matrix multiplication
@@ -901,9 +924,9 @@ class TrainPipeline:
                         predictor=self.encoder_ct,
                         overlap=0.5, 
                         mode="gaussian",
-                        device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                        buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                        buffer_dim=-1,   # Buffer along last spatial dimension
+                        # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                        # buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                        # buffer_dim=-1,   # Buffer along last spatial dimension
                     ) 
                     loss = self.dice_loss_fn_ct(seg_pred_ct.to(DEVICE), seg_true_ct)
 
@@ -968,9 +991,9 @@ class TrainPipeline:
                         predictor=self.encoder_mr,
                         overlap=0.5,
                         mode="gaussian",
-                        device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                        buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                        buffer_dim=-1,   # Buffer along last spatial dimension
+                        # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                        # buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                        # buffer_dim=-1,   # Buffer along last spatial dimension
                     )
                     loss = self.dice_loss_fn_mr(seg_pred_mr.to(DEVICE), seg_true_mr)
 
@@ -1047,9 +1070,9 @@ class TrainPipeline:
                         predictor=self.encoder_ct,
                         overlap=0.5,
                         mode="gaussian",
-                        device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                        buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                        buffer_dim=-1,   # Buffer along last spatial dimension
+                        # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                        # buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                        # buffer_dim=-1,   # Buffer along last spatial dimension
                     )
                     # Use memory-efficient post-transform processing for resnet phase
                     seg_pred_ct_ds = self._memory_efficient_post_transform(seg_pred_ct, seg_true_ct, "ct", to_gpu=True)
@@ -1107,9 +1130,9 @@ class TrainPipeline:
                         predictor=self.encoder_ct,
                         overlap=0.5,
                         mode="gaussian",
-                        device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                        buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                        buffer_dim=-1,   # Buffer along last spatial dimension
+                        # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                        # buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                        # buffer_dim=-1,   # Buffer along last spatial dimension
                     )
                     # Use memory-efficient post-transform processing
                     seg_pred_ct_ds = self._memory_efficient_post_transform(seg_pred_ct, seg_true_ct, "ct", to_gpu=True)
@@ -1135,7 +1158,7 @@ class TrainPipeline:
                     # Convert template mesh to half precision for compatibility with AMP training
                     template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float16))
                     
-                    level_outs = self.GSN(template_mesh, self.subdivided_faces.faces_levels, df_pred_ct.detach(), self.subdivided_faces.labels_levels)
+                    level_outs = self.GSN(template_mesh, self.subdivided_faces.faces_levels)
 
                     loss_chmf, loss_smooth = 0.0, 0.0
                     for l, subdiv_mesh in enumerate(level_outs):
@@ -1146,7 +1169,7 @@ class TrainPipeline:
                                 mesh_true_ct[msh_idx].verts_padded(),
                                 point_reduction="mean", batch_reduction="mean"
                                 )[0] 
-                        loss_smooth += mesh_laplacian_smoothing(subdiv_mesh, method="cotcurv")
+                        loss_smooth += mesh_laplacian_smoothing(subdiv_mesh, method="cot")
                     
                     loss = self.super_params.lambda_0 * loss_chmf +\
                         self.super_params.lambda_1 * loss_smooth
@@ -1234,9 +1257,9 @@ class TrainPipeline:
                     predictor=encoder,
                     overlap=0.5, 
                     mode="gaussian",
-                    device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                    buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                    buffer_dim=-1,   # Buffer along last spatial dimension
+                    # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                    # buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                    # buffer_dim=-1,   # Buffer along last spatial dimension
                 )
                 # Apply unflatten only for MR
                 if modal == 'mr':
@@ -1477,9 +1500,9 @@ class TrainPipeline:
                     predictor=encoder,
                     overlap=0.5, 
                     mode="gaussian",
-                    device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                    buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                    buffer_dim=-1,   # Buffer along last spatial dimension
+                    # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                    # buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                    # buffer_dim=-1,   # Buffer along last spatial dimension
                 )
                 
                 # Apply unflatten only for MR
@@ -1791,9 +1814,9 @@ class TrainPipeline:
                 predictor=encoder,
                 overlap=0.5, 
                 mode="gaussian",
-                device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                buffer_dim=-1,   # Buffer along last spatial dimension
+                # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                # buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                # buffer_dim=-1,   # Buffer along last spatial dimension
             )
             
             # Apply unflatten only for MR
