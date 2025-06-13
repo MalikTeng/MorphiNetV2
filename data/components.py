@@ -79,9 +79,12 @@ class Adjustd(MapTransform):
                     data[key] = MetaTensor(pixel_array, affine=m)
 
                 if "label" in key:
-                    # remove foreground classes except for left ventricle
-                    # data[key][data[key] > 2] = 0  # Commented out to keep all labels
-                    pass  # Keep all labels without filtering
+                    # Combine RV-MYO (label 4) with LV-MYO (label 2) into a single MYO label
+                    pixel_array[pixel_array == 4] = 2
+                    # Keep all other labels as they are: background(0), LV(1), combined MYO(2), RV(3)
+                    # Update the data with the modified pixel array
+                    data[key] = MetaTensor(pixel_array, affine=data[key].affine, 
+                                           applied_operations=data[key].applied_operations)
 
             except KeyError:
                 print(f"Error: {key} is not in the data dictionary.")
@@ -160,14 +163,15 @@ class DFConvertd(MapTransform):
         label = data[self.key]
         label = label.as_tensor().clone()
 
-        # Three channels for GSN phase: (foreground, left ventricle, myocardium)
-        # Even though UNet/ResNet handle all classes, GSN uses only these 3 channels
-        foreground = (label == 1) | (label == 2)
+        # Four channels for GSN phase: (foreground, left ventricle, right ventricle, myocardium)
+        # Labels are preprocessed to combine LV-MYO and RV-MYO into label 2
+        foreground = label > 0
         lv = label == 1
-        myo = label == 2
+        rv = label == 3  # RV label
+        myo = label == 2  # Combined LV-MYO and RV-MYO (preprocessed)
 
         df = []
-        for c in [foreground, lv, myo]:  # Only compute DF for foreground, lv, myo
+        for c in [foreground, lv, rv, myo]:  # Compute DF for foreground, lv, rv, myo
             df_class = distance_transform_edt(c) + distance_transform_edt(~c)
             df.append(df_class[:, None])
 

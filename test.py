@@ -76,7 +76,7 @@ def config():
                         help="path to pretrained models ('n' for no checkpoint, or specify a path)")
 
     # structure parameters for df-predict module
-    parser.add_argument("--num_classes", type=int, default=5, help="the number of segmentation classes for LV-only template (background, LV, LV-MYO, RV, RV-MYO)")
+    parser.add_argument("--num_classes", type=int, default=4, help="the number of segmentation classes for LV-only template (background, LV, LV/RV-MYO, RV)")
     parser.add_argument("--kernel_size", type=int, default=(3, 3, 3), nargs='+', help="the kernel size of the convolutional layer in the encoder")
     parser.add_argument("--strides", type=int, default=(1, 2, 2), nargs='+', help="the stride of the convolutional layer in the encoder")
     parser.add_argument("--filters", type=int, default=(8, 16, 32), nargs='+', help="the number of output channels in each layer of the encoder")
@@ -143,11 +143,11 @@ if __name__ == '__main__':
     from run import *
     
     # Network architecture parameters
-    super_params.filters = (8, 16, 32)
-    super_params.kernel_size = (3, 3, 3)
-    super_params.strides = (1, 2, 2)
+    super_params.filters = (8, 16, 32, 64, 128)
+    super_params.kernel_size = (3, 3, 3, 3, 3)
+    super_params.strides = (1, 2, 2, 2, 2)
     super_params.layers = (1, 2, 2, 4)
-    super_params.hidden_features_gsn = 8
+    super_params.hidden_features_gsn = 64
     super_params.pixdim = [4, 4, 4]
     
     # Training parameters
@@ -155,10 +155,10 @@ if __name__ == '__main__':
     super_params.pretrain_epochs = 100
     super_params.train_epochs = 150
     super_params.val_interval = 5
-    super_params.lambda_0 = 0.24
-    super_params.lambda_1 = 0.63
-    super_params.iteration = 10
-    super_params.sigmoid_scale_factor = 0.55
+    super_params.lambda_0 = 0.86
+    super_params.lambda_1 = 0.75
+    super_params.iteration = 20
+    super_params.sigmoid_scale_factor = 0.19
     super_params.lr = 0.001
     super_params.batch_size = 1
     super_params.ct_ratio = 1.0
@@ -169,10 +169,10 @@ if __name__ == '__main__':
     # Data paths
     super_params.mr_json_dir = f"./dataset/dataset_task11_f0.json"
     super_params.mr_data_dir = f"/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX"
-    super_params.template_mesh_dir = f"./template/template_mesh-lv_myo.obj"
+    super_params.template_mesh_dir = f"./template/template_mesh-myo.obj"
 
     # Test-specific settings
-    ckpt = "sct--lv_myo--f0--2025-05-31-1321"
+    ckpt = "sct--myo--f0--2025-06-08-0420"
     super_params.best_epoch = "best"
     super_params.target = "sct"
     super_params.ct_json_dir = f"/home/yd21/Documents/MorphiNet/dataset/dataset_task20_f0.json"
@@ -181,7 +181,7 @@ if __name__ == '__main__':
     # Output paths
     super_params.run_id = ckpt
     super_params.ckpt_dir = f"/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/{ckpt}/trained_weights"
-    super_params.out_dir = f"/mnt/data/Experiment/TMI_2025-lv_myo/{super_params.target}/MorphiNet/myo/f0/"
+    super_params.out_dir = f"/mnt/data/Experiment/TMI_2025/{super_params.target}/MorphiNet/myo/f0/"
     test(super_params)
 
     # super_params.out_dir = f"/mnt/data/Experiment/TMI_2025/{super_params.target}/"

@@ -462,8 +462,10 @@ class LocalMeshWarper(nn.Module):
         verts_dtype = verts.dtype
         device = verts.device
         
-        # Process LV-related vertices for LV-only template mesh
-        for i, l in zip([1, 0], [[0], [2]]):  # lv-endo, lv-epi
+        # Process both LV and RV related vertices for LV+RV template mesh
+        # LV processing: lv-endo (label 0), lv-epi (label 2)
+        # RV processing: rv-endo (label 1), rv-epi (label 3)
+        for i, l in zip([1, 0, 2, 0], [[0], [2], [1], [3]]):  # lv-endo, lv-epi, rv-endo, rv-epi
             df_pred = df_preds[:, i].to(dtype=verts_dtype, device=device)
             verts_idx = torch.any(torch.stack([vert_labels == j for j in l]), dim=0)
 
@@ -552,6 +554,17 @@ class GSN(nn.Module):
 
             # 4. output the new mesh
             level_outs.append(meshes)
+
+        # Apply local mesh warping to all levels if df_preds and labels_levels are provided
+        if df_preds is not None and labels_levels is not None:
+            warped_level_outs = []
+            for l, level_mesh in enumerate(level_outs):
+                if l < len(labels_levels):
+                    warped_mesh = self.mesh_warper(level_mesh, df_preds, labels_levels[l])
+                    warped_level_outs.append(warped_mesh)
+                else:
+                    warped_level_outs.append(level_mesh)
+            return warped_level_outs
 
         return level_outs
 

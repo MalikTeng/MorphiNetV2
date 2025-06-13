@@ -115,7 +115,7 @@ class TrainPipeline:
         # CPU-optimized post_transform pipeline for memory efficiency
         self.post_transform = Compose([
             Spacingd(["pred", "label"], [2.0, 2.0, 2.0], mode=("bilinear", "nearest"), allow_missing_keys=True),
-            CropForegroundd(["pred", "label"], source_key="label", margin=10, allow_missing_keys=True),
+            CropForegroundd(["pred", "label"], source_key="label", allow_missing_keys=True),
             Maskd(["pred", "label", "modal"], allow_missing_keys=True),
             FlexResized(
                 ["pred", "label"], 
@@ -140,7 +140,7 @@ class TrainPipeline:
         # GPU version for when we specifically need GPU output
         self.post_transform_gpu = Compose([
             Spacingd(["pred", "label"], [2.0, 2.0, 2.0], mode=("bilinear", "nearest"), allow_missing_keys=True),
-            CropForegroundd(["pred", "label"], source_key="label", margin=10, allow_missing_keys=True),
+            CropForegroundd(["pred", "label"], source_key="label", allow_missing_keys=True),
             Maskd(["pred", "label", "modal"], allow_missing_keys=True),
             FlexResized(
                 ["pred", "label"], 
@@ -258,8 +258,9 @@ class TrainPipeline:
         vert_label = np.array([COLOR_MAPPING[tuple(c)] for c in vert_label])
         self.vert_label = torch.tensor(vert_label, dtype=torch.long, device=DEVICE)
         mesh_lv = convex_hull(mesh.vertices[np.any(np.stack([vert_label == i for i in [0, 2]]), axis=0)])  # LV-ENDO and LV-EPI
-        # Only use LV center for LV-only template mesh
-        self.mesh_c = torch.tensor([mesh_lv.center_mass], device=DEVICE)
+        mesh_rv = convex_hull(mesh.vertices[np.any(np.stack([vert_label == i for i in [1, 3]]), axis=0)])  # RV-ENDO and RV-EPI
+        # Stack centers of both LV and RV
+        self.mesh_c = torch.tensor([mesh_lv.center_mass, mesh_rv.center_mass], device=DEVICE)
 
 
     def _clear_dataloader(self, modal, type_):
@@ -616,16 +617,39 @@ class TrainPipeline:
         torch.backends.cudnn.benchmark = torch.backends.cudnn.is_available()
 
 
-    def surface_extractor(self, seg_true):
+    def surface_extractor(self, seg_true, labels=None):
         """
             WARNING: this operation is non-differentiable.
             input:
                 seg_true: ground truth segmentation.
+                labels: integer or list of integers/lists specifying which labels to extract.
+                       If None, uses default [[1], [1, 2, 3]] for backwards compatibility.
+                       If integer, extracts only that label.
+                       If list, each element can be an integer or list of integers to combine.
             return:
                 surface mesh with vertices and faces in NDC space [-1, 1].
         """
-        # For GSN phase: extract only LV and MYO surfaces as originally designed
-        seg_true_multi = [torch.any(torch.stack([seg_true == i for i in seg_idx]), dim=0) for seg_idx in [[1], [1, 2]]]   # lv-endo, lv-endo+lv-epi
+        # Handle labels parameter
+        if labels is None:
+            # For GSN phase: extract only LV and MYO surfaces as originally designed
+            seg_idx_list = [[1], [1, 2, 3]]   # lv-endo, foreground
+        elif isinstance(labels, int):
+            # Single label
+            seg_idx_list = [[labels]]
+        elif isinstance(labels, list):
+            # List of labels or lists of labels
+            seg_idx_list = []
+            for label_group in labels:
+                if isinstance(label_group, int):
+                    seg_idx_list.append([label_group])
+                elif isinstance(label_group, list):
+                    seg_idx_list.append(label_group)
+                else:
+                    raise ValueError(f"Invalid label type in labels list: {type(label_group)}")
+        else:
+            raise ValueError(f"Invalid labels type: {type(labels)}. Must be None, int, or list.")
+        
+        seg_true_multi = [torch.any(torch.stack([seg_true == i for i in seg_idx]), dim=0) for seg_idx in seg_idx_list]
 
         mesh_true = []
         for seg_true_ in seg_true_multi:
@@ -687,9 +711,11 @@ class TrainPipeline:
         # stage 1: smooth global offset
         verts = template_mesh.verts_padded()
         # find the rotation matrix that makes the centroid vector are in the same direction
+        # Use RV distance field (channel 2) for RV center calculation
         df_c = torch.stack([2 * (torch.nonzero(df <= 1).to(torch.float64).mean(0) / d - 0.5) 
-                            for df in df_preds[:, -1]])[:, [1, 0, 2]]   # reorder dimensions
-        mesh_c = self.mesh_c[0].unsqueeze(0).expand(b, -1).to(torch.float64)
+                            for df in df_preds[:, 2]])[:, [1, 0, 2]]   # reorder dimensions, using RV channel
+        # Use only the RV center as the reference center
+        mesh_c = self.mesh_c[1].unsqueeze(0).expand(b, -1).to(torch.float64)
         R = find_rotation_matrix_xz(mesh_c, df_c)
         # Ensure verts are in double precision before matrix multiplication
         verts = verts.to(torch.float64)
@@ -705,14 +731,15 @@ class TrainPipeline:
 
     def post_process_subdiv_mesh(self, subdiv_mesh, subdiv_level=-1):
         """
-        Post-process the subdivided mesh by creating LV-MYO shell from LV-EPI and LV-ENDO convex hulls.
+        Post-process the subdivided mesh by creating LV+RV-MYO shell from combined myocardium 
+        convex hull minus LV-ENDO and RV-ENDO convex hulls.
         
         Args:
             subdiv_mesh: The subdivided mesh from GSN (can be a list of meshes or single mesh)
             subdiv_level: Which subdivision level to process (-1 for the last level)
             
         Returns:
-            Modified mesh with LV-MYO shell or original mesh if processing fails
+            Modified mesh with combined myocardium shell or original mesh if processing fails
         """
         
         # Handle case where subdiv_mesh is a list of meshes
@@ -739,38 +766,76 @@ class TrainPipeline:
             verts = target_mesh.verts_padded()[batch_idx]
             faces = target_mesh.faces_padded()[batch_idx]
             
-            # Select LV-ENDO and LV-EPI vertices
-            lv_endo_verts = verts[vert_labels == 0]
-            lv_epi_verts = verts[vert_labels == 2]
+            # Select vertices based on labels:
+            # 0: LV-ENDO, 1: RV-ENDO, 2: LV-EPI, 3: RV-EPI
+            lv_endo_verts = verts[vert_labels == 0]  # LV-ENDO
+            rv_endo_verts = verts[vert_labels == 1]  # RV-ENDO
+            lv_epi_verts = verts[vert_labels == 2]   # LV-EPI
+            rv_epi_verts = verts[vert_labels == 3]   # RV-EPI
             
-            if lv_endo_verts.shape[0] > 3 and lv_epi_verts.shape[0] > 3:
+            # Check if we have sufficient vertices for each component
+            if (lv_endo_verts.shape[0] > 3 and rv_endo_verts.shape[0] > 3 and 
+                lv_epi_verts.shape[0] > 3 and rv_epi_verts.shape[0] > 3):
                 try:
                     # Convert to numpy for trimesh operations
                     lv_endo_verts_np = lv_endo_verts.cpu().numpy()
+                    rv_endo_verts_np = rv_endo_verts.cpu().numpy()
                     lv_epi_verts_np = lv_epi_verts.cpu().numpy()
+                    rv_epi_verts_np = rv_epi_verts.cpu().numpy()
                     
-                    # Create convex hulls and subtract to get LV-MYO shell
+                    # Create convex hulls
                     lv_endo_hull = convex_hull(lv_endo_verts_np)
-                    lv_epi_hull = convex_hull(lv_epi_verts_np)
-                    lv_myo_mesh = lv_epi_hull.difference(lv_endo_hull)
+                    rv_endo_hull = convex_hull(rv_endo_verts_np)
+                    
+                    # Combine LV-EPI and RV-EPI vertices for myocardium convex hull
+                    myo_verts_np = np.vstack([lv_epi_verts_np, rv_epi_verts_np])
+                    myo_hull = convex_hull(myo_verts_np)
+                    
+                    # # Export convex hulls for debugging (only for first batch item to avoid spam)
+                    # if batch_idx == 0:
+                    #     try:
+                    #         debug_dir = os.path.join(os.getcwd(), "debug_convex_hulls")
+                    #         os.makedirs(debug_dir, exist_ok=True)
+                            
+                    #         # Export each convex hull
+                    #         lv_endo_hull.export(os.path.join(debug_dir, f"lv_endo_hull_batch{batch_idx}.obj"))
+                    #         rv_endo_hull.export(os.path.join(debug_dir, f"rv_endo_hull_batch{batch_idx}.obj"))
+                    #         myo_hull.export(os.path.join(debug_dir, f"myo_hull_batch{batch_idx}.obj"))
+                            
+                    #         print(f"Debug: Exported convex hulls to {debug_dir}")
+                    #     except Exception as debug_e:
+                    #         print(f"Debug export failed: {debug_e}")
+                    
+                    # Subtract both endocardium hulls from myocardium hull
+                    myo_mesh = myo_hull.difference(lv_endo_hull)
+                    myo_mesh = myo_mesh.difference(rv_endo_hull)
                     
                     # Handle multiple bodies (take largest)
-                    if hasattr(lv_myo_mesh, 'bodies') and len(lv_myo_mesh.bodies) > 0:
-                        lv_myo_mesh = max(lv_myo_mesh.bodies, key=lambda x: x.volume)
+                    if hasattr(myo_mesh, 'bodies') and len(myo_mesh.bodies) > 0:
+                        myo_mesh = max(myo_mesh.bodies, key=lambda x: x.volume)
                     
                     # Validate result and convert back to CUDA tensors
                     # Check if the mesh is valid using available attributes
                     is_valid_mesh = (
-                        hasattr(lv_myo_mesh, 'vertices') and 
-                        hasattr(lv_myo_mesh, 'faces') and
-                        len(lv_myo_mesh.vertices) > 0 and 
-                        len(lv_myo_mesh.faces) > 0 and
-                        (not hasattr(lv_myo_mesh, 'is_valid') or lv_myo_mesh.is_valid)
+                        hasattr(myo_mesh, 'vertices') and 
+                        hasattr(myo_mesh, 'faces') and
+                        len(myo_mesh.vertices) > 0 and 
+                        len(myo_mesh.faces) > 0 and
+                        (not hasattr(myo_mesh, 'is_valid') or myo_mesh.is_valid)
                     )
                     
                     if is_valid_mesh:
-                        processed_verts = torch.tensor(lv_myo_mesh.vertices, dtype=torch.float32, device=DEVICE)
-                        processed_faces = torch.tensor(lv_myo_mesh.faces, dtype=torch.long, device=DEVICE)
+                        processed_verts = torch.tensor(myo_mesh.vertices, dtype=torch.float32, device=DEVICE)
+                        processed_faces = torch.tensor(myo_mesh.faces, dtype=torch.long, device=DEVICE)
+                        
+                        # # Export final processed myocardium mesh for debugging (only for first batch item)
+                        # if batch_idx == 0:
+                        #     try:
+                        #         debug_dir = os.path.join(os.getcwd(), "debug_convex_hulls")
+                        #         myo_mesh.export(os.path.join(debug_dir, f"final_myo_mesh_batch{batch_idx}.obj"))
+                        #         print(f"Debug: Exported final myocardium mesh to {debug_dir}")
+                        #     except Exception as debug_e:
+                        #         print(f"Debug export of final mesh failed: {debug_e}")
                     else:
                         # Fallback to original mesh
                         processed_verts = verts.clone()
@@ -783,6 +848,10 @@ class TrainPipeline:
                     processed_faces = faces.clone()
             else:
                 # Insufficient vertices, use original mesh
+                if batch_idx == 0:  # Only print once to avoid spam
+                    print(f"Warning: Insufficient vertices for post-processing (LV-ENDO: {lv_endo_verts.shape[0]}, "
+                          f"RV-ENDO: {rv_endo_verts.shape[0]}, LV-EPI: {lv_epi_verts.shape[0]}, "
+                          f"RV-EPI: {rv_epi_verts.shape[0]}), using original mesh")
                 processed_verts = verts.clone()
                 processed_faces = faces.clone()
             
@@ -901,9 +970,9 @@ class TrainPipeline:
                         predictor=self.encoder_ct,
                         overlap=0.5, 
                         mode="gaussian",
-                        device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                        buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                        buffer_dim=-1,   # Buffer along last spatial dimension
+                        # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                        # buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                        # buffer_dim=-1,   # Buffer along last spatial dimension
                     ) 
                     loss = self.dice_loss_fn_ct(seg_pred_ct.to(DEVICE), seg_true_ct)
 
@@ -968,9 +1037,9 @@ class TrainPipeline:
                         predictor=self.encoder_mr,
                         overlap=0.5,
                         mode="gaussian",
-                        device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                        buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                        buffer_dim=-1,   # Buffer along last spatial dimension
+                        # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                        # buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                        # buffer_dim=-1,   # Buffer along last spatial dimension
                     )
                     loss = self.dice_loss_fn_mr(seg_pred_mr.to(DEVICE), seg_true_mr)
 
@@ -1047,9 +1116,9 @@ class TrainPipeline:
                         predictor=self.encoder_ct,
                         overlap=0.5,
                         mode="gaussian",
-                        device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                        buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                        buffer_dim=-1,   # Buffer along last spatial dimension
+                        # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                        # buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                        # buffer_dim=-1,   # Buffer along last spatial dimension
                     )
                     # Use memory-efficient post-transform processing for resnet phase
                     seg_pred_ct_ds = self._memory_efficient_post_transform(seg_pred_ct, seg_true_ct, "ct", to_gpu=True)
@@ -1096,7 +1165,8 @@ class TrainPipeline:
                 )
                 
                 seg_true_ct_ = torch.stack([self.post_transform({"label": i, "modal": "ct"})["label"] for i in seg_true_ct], dim=0)
-                mesh_true_ct = self.surface_extractor(seg_true_ct_.to(DEVICE))
+                # Generate ground truth mesh for myocardium only (label=2)
+                mesh_true_ct = self.surface_extractor(seg_true_ct_.to(DEVICE), labels=2)
 
                 self.optimizer_gsn.zero_grad()
                 with torch.autocast(device_type=DEVICE):
@@ -1123,30 +1193,35 @@ class TrainPipeline:
                     seg_pred_ct_ds = seg_pred_ct_ds + mask * self.decoder(seg_pred_ct_ds)
                     seg_pred_ct_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ct_ds])
                     
-                    foreground = (seg_pred_ct_ds == 1) | (seg_pred_ct_ds == 2)
+                    foreground = seg_pred_ct_ds > 0  # Include RV in foreground
                     lv = (seg_pred_ct_ds == 1)
-                    myo = (seg_pred_ct_ds == 2)
+                    rv = (seg_pred_ct_ds == 3)
+                    myo = (seg_pred_ct_ds == 2)  # Now contains combined LV-MYO + RV-MYO
                     df_pred_ct = torch.stack([
                         distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
-                        for i in [foreground, lv, myo]], dim=1)
+                        for i in [foreground, lv, rv, myo]], dim=1)
                     
                     template_mesh = self.warp_template_mesh(df_pred_ct.detach())
                     
                     # Convert template mesh to half precision for compatibility with AMP training
                     template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float16))
                     
-                    level_outs = self.GSN(template_mesh, self.subdivided_faces.faces_levels, df_pred_ct.detach(), self.subdivided_faces.labels_levels)
+                    level_outs = self.GSN(template_mesh, self.subdivided_faces.faces_levels)
 
                     loss_chmf, loss_smooth = 0.0, 0.0
                     for l, subdiv_mesh in enumerate(level_outs):
                         verts_label = self.subdivided_faces.labels_levels[l]
-                        for msh_idx, subdiv_idx in enumerate([[0], [2]]):  # lv, myo (removed rv for LV-only template)
-                            loss_chmf += chamfer_distance(
-                                subdiv_mesh.verts_padded()[:, torch.any(torch.stack([verts_label == i for i in subdiv_idx]), dim=0)], 
-                                mesh_true_ct[msh_idx].verts_padded(),
-                                point_reduction="mean", batch_reduction="mean"
-                                )[0] 
-                        loss_smooth += mesh_laplacian_smoothing(subdiv_mesh, method="cotcurv")
+                        # Filter to only surface nodes: LV-ENDO (0), RV-ENDO (1), LV-EPI (2), RV-EPI (3)
+                        surface_mask = torch.any(torch.stack([verts_label == i for i in [0, 1, 2, 3]]), dim=0)
+                        surface_verts = subdiv_mesh.verts_padded()[:, surface_mask]
+                        
+                        # Calculate chamfer loss between surface vertices and myocardium ground truth
+                        loss_chmf += chamfer_distance(
+                            surface_verts, 
+                            mesh_true_ct[0].verts_padded(),
+                            point_reduction="mean", batch_reduction="mean"
+                            )[0] 
+                        loss_smooth += mesh_laplacian_smoothing(subdiv_mesh, method="cot")
                     
                     loss = self.super_params.lambda_0 * loss_chmf +\
                         self.super_params.lambda_1 * loss_smooth
@@ -1254,12 +1329,13 @@ class TrainPipeline:
 
                 seg_pred_ds = seg_pred_ds + mask * self.decoder(seg_pred_ds)
                 seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
-                foreground = (seg_pred_ds == 1) | (seg_pred_ds == 2)
+                foreground = seg_pred_ds > 0  # Include RV in foreground
                 lv = (seg_pred_ds == 1)
-                myo = (seg_pred_ds == 2)
+                rv = (seg_pred_ds == 3)
+                myo = (seg_pred_ds == 2)  # Now contains combined LV-MYO + RV-MYO
                 df_pred = torch.stack([
                     distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
-                    for i in [foreground, lv, myo]], dim=1)
+                    for i in [foreground, lv, rv, myo]], dim=1)
                 
                 df_metric_batch_decoder(df_pred, df_true)
 
@@ -1267,15 +1343,15 @@ class TrainPipeline:
                 template_mesh = self.warp_template_mesh(df_pred)
                 template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float16))
                 
-                subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
+                subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels, df_pred, self.subdivided_faces.labels_levels)[-1]
                 
-                # Apply post-processing to create LV-MYO as difference between LV-EPI and LV-ENDO convex hulls
-                subdiv_mesh_post = self.post_process_subdiv_mesh(subdiv_mesh)
+                # # Apply post-processing to create LV-MYO as difference between LV-EPI and LV-ENDO convex hulls
+                # subdiv_mesh_post = self.post_process_subdiv_mesh(subdiv_mesh)
                 
                 voxeld_mesh = torch.cat([
                     self.rasterizer(
                         pred_mesh.verts_padded(), pred_mesh.faces_padded())
-                    for pred_mesh in subdiv_mesh_post
+                    for pred_mesh in subdiv_mesh
                     ], dim=0)
                 
                 msh_metric_batch_decoder(voxeld_mesh, (seg_true_ds == 2).to(torch.float32))
@@ -1498,30 +1574,35 @@ class TrainPipeline:
 
                 seg_pred_ds = seg_pred_ds + mask * self.decoder(seg_pred_ds)
                 seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
-                foreground = (seg_pred_ds == 1) | (seg_pred_ds == 2)
+                foreground = seg_pred_ds > 0  # Include RV in foreground
                 lv = (seg_pred_ds == 1)
-                myo = (seg_pred_ds == 2)
+                rv = (seg_pred_ds == 3)
+                myo = (seg_pred_ds == 2)  # Now contains combined LV-MYO + RV-MYO
                 df_pred = torch.stack([
                     distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
-                    for i in [foreground, lv, myo]], dim=1)
+                    for i in [foreground, lv, rv, myo]], dim=1)
                 
                 template_mesh = self.warp_template_mesh(df_pred)
                 template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float16))
                 
-                subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
-                
-                # Apply post-processing to create LV-MYO as difference between LV-EPI and LV-ENDO convex hulls
-                subdiv_mesh_post = self.post_process_subdiv_mesh(subdiv_mesh)
+                subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels, df_pred, self.subdivided_faces.labels_levels)[-1]
                 
                 voxeld_mesh = torch.cat([
                     self.rasterizer(
                         pred_mesh.verts_padded(), pred_mesh.faces_padded())
-                    for pred_mesh in subdiv_mesh_post
+                    for pred_mesh in subdiv_mesh
                     ], dim=0)
                 
                 # End timing inference
                 end_time = time.time()
                 total_inference_time += (end_time - start_time)
+
+                # Generate ground truth mesh using surface_extractor
+                try:
+                    mesh_true_gt = self.surface_extractor(seg_true_ds, labels=2)  # Only extract myocardium (label 2)
+                except Exception as e:
+                    print(f"ERROR: Failed to generate ground truth mesh for id: {id}: {e}")
+                    mesh_true_gt = None
 
                 # Save every subdiv_mesh to the output directory
                 try:
@@ -1536,6 +1617,25 @@ class TrainPipeline:
                         save_obj(save_obj_path, current_mesh_to_save.verts_packed(), current_mesh_to_save.faces_packed())
                 except Exception as e:
                     print(f"ERROR: Failed to save subdiv_mesh for id: {id}: {e}")
+
+                # Save ground truth mesh to the output directory
+                if mesh_true_gt is not None:
+                    try:
+                        if self.super_params.save_on == 'cap':
+                            for i, phase in zip(range(len(mesh_true_gt)), ['ED', 'ES']):
+                                # Now only extracting myocardium, so save only one mesh per phase
+                                if i < len(mesh_true_gt):
+                                    gt_mesh_to_save = mesh_true_gt[0].cpu()  # Only one mesh (myocardium)
+                                    save_obj_path = os.path.join(self.out_dir, f"{id}-{phase}_gt_myo.obj")
+                                    save_obj(save_obj_path, gt_mesh_to_save.verts_packed(), gt_mesh_to_save.faces_packed())
+                        else:
+                            # Now only extracting myocardium, so save only one mesh
+                            if len(mesh_true_gt) > 0:
+                                gt_mesh_to_save = mesh_true_gt[0].cpu()  # Only one mesh (myocardium)
+                                save_obj_path = os.path.join(self.out_dir, f"{id}_gt_myo.obj")
+                                save_obj(save_obj_path, gt_mesh_to_save.verts_packed(), gt_mesh_to_save.faces_packed())
+                    except Exception as e:
+                        print(f"ERROR: Failed to save ground truth mesh for id: {id}: {e}")
 
                 # # Non-timed operations
                 # actual_heart_size_in_pixel.append(list(data[f"{modal}_label_ds"].applied_operations[3 if self.super_params.target == "acdc" else 4]["orig_size"]))
@@ -1836,13 +1936,13 @@ class TrainPipeline:
                                         mode="nearest-exact")
 
             # ****** Distance Field Prediction ******
-            foreground = (seg_pred_ds == 1) | (seg_pred_ds == 2)
+            foreground = seg_pred_ds > 0  # Include RV in foreground
             lv = (seg_pred_ds == 1)
-            # rv = (seg_pred_ds == 3)  # Removed RV for LV-only template mesh
-            myo = (seg_pred_ds == 2)
+            rv = (seg_pred_ds == 3)  # RV for LV+RV template mesh
+            myo = (seg_pred_ds == 2)  # Now contains combined LV-MYO + RV-MYO
             df_pred = torch.stack([
                 distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
-                for i in [foreground, lv, myo]], dim=1)  # Only 3 channels: foreground, lv, myo
+                for i in [foreground, lv, rv, myo]], dim=1)  # 4 channels: foreground, lv, rv, myo
 
             # if not self.super_params._4d:
             # Save the seg_pred_ds (before and after self.decoder) and seg_true_ds as nib files
@@ -1866,7 +1966,7 @@ class TrainPipeline:
             if save_on == "sct":
                 # warped + adaptive
                 template_mesh = self.warp_template_mesh(df_pred)  
-                subdiv_mesh_adaptive = self.GSN(template_mesh, self.subdivided_faces.faces_levels)[-1]
+                subdiv_mesh_adaptive = self.GSN(template_mesh, self.subdivided_faces.faces_levels, df_pred, self.subdivided_faces.labels_levels)[-1]
                 save_obj(
                 f"{self.out_dir}/adaptive/myo/f0/{id}.obj", 
                     subdiv_mesh_adaptive.verts_packed(), subdiv_mesh_adaptive.faces_packed()
@@ -1910,7 +2010,7 @@ class TrainPipeline:
                     template_mesh.verts_packed(), template_mesh.faces_packed()
                 )
 
-            subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels)   # level 1 & 2: [Meshes, Meshes]
+            subdiv_mesh = self.GSN(template_mesh, self.subdivided_faces.faces_levels, df_pred, self.subdivided_faces.labels_levels)   # level 1 & 2: [Meshes, Meshes]
 
             # if not self.super_params._4d and save_on == "sct":
             if save_on == "sct":

@@ -23,8 +23,7 @@ def config():
     parser.add_argument("--mode", type=str, default="offline", help="choose the mode for wandb, can be 'disabled', 'offline', 'online'")
     parser.add_argument("--save_on", type=str, default="sct", help="the dataset for validation, can be 'cap' or 'sct'")
     parser.add_argument("--template_mesh_dir", type=str,
-                        # default="./template/template_mesh-myo.obj",
-                        default="./template/template_mesh-lv_myo.obj",
+                        default="./template/template_mesh-myo.obj",
                         help="the path to your initial meshes")
 
     # training parameters
@@ -39,10 +38,10 @@ def config():
     parser.add_argument("--cache_rate", type=float, default=1.0, help="the cache rate for training, see MONAI document for more details")
     parser.add_argument("--crop_window_size", type=int, nargs='+', default=[128, 128, 128], help="the size of the crop window for training")
     parser.add_argument("--pixdim", type=float, nargs='+', default=[4, 4, 4], help="the pixel dimension of downsampled images")
-    parser.add_argument("--lambda_0", type=float, default=0.24, help="the loss coefficients for Chamfer verts distance term")
-    parser.add_argument("--lambda_1", type=float, default=0.63, help="the loss coefficients for point to mesh distance term")
-    parser.add_argument("--iteration", type=int, default=10, help="the iterations for the distance field warping")
-    parser.add_argument("--sigmoid_scale_factor", type=float, default=0.55, help="the scale factor for the sigmoid mask transition")
+    parser.add_argument("--lambda_0", type=float, default=0.86, help="the loss coefficients for Chamfer verts distance term")
+    parser.add_argument("--lambda_1", type=float, default=0.75, help="the loss coefficients for point to mesh distance term")
+    parser.add_argument("--iteration", type=int, default=20, help="the iterations for the distance field warping")
+    parser.add_argument("--sigmoid_scale_factor", type=float, default=0.19, help="the scale factor for the sigmoid mask transition")
     parser.add_argument("--mask_threshold", type=float, default=0.1, help="the threshold for applying the distance map mask")
 
     # data parameters
@@ -70,20 +69,20 @@ def config():
      
     # path to the pretrained modules
     parser.add_argument("--use_ckpt", type=lambda x: None if x.lower() == 'n' else x, 
-                        default=None, 
-                        # default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--lv_myo--f0--2025-06-02-0521", 
+                        # default=None, 
+                        default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2025-06-08-0420", 
                         help="path to pretrained models ('n' for no checkpoint, or specify a path)")
 
     # structure parameters for df-predict module
-    parser.add_argument("--num_classes", type=int, default=5, help="the number of segmentation classes (background + 4 anatomical structures: LV, LV-MYO, RV, RV-MYO)")
+    parser.add_argument("--num_classes", type=int, default=4, help="the number of segmentation classes (background + 4 anatomical structures: LV, LV/RV-MYO, RV)")
     parser.add_argument("--filters", type=int, default=(8, 16, 32, 64, 128), nargs='+', help="the number of output channels in each layer of the encoder")
     parser.add_argument("--kernel_size", type=int, default=(3, 3, 3, 3, 3), nargs='+', help="the kernel size of the convolutional layer in the encoder")
     parser.add_argument("--strides", type=int, default=(1, 2, 2, 2, 2), nargs='+', help="the stride of the convolutional layer in the encoder")
-    parser.add_argument("--layers", type=int, default=(1, 8, 8, 16), nargs='+', help="the number of layers in each residual block of the decoder")
+    parser.add_argument("--layers", type=int, default=(1, 2, 2, 4), nargs='+', help="the number of layers in each residual block of the decoder")
 
     # structure parameters for subdiv module
     parser.add_argument("--subdiv_levels", type=int, default=2, help="the number of subdivision levels for the mesh (should be an integer larger than 0, where 0 means no subdivision)")
-    parser.add_argument("--hidden_features_gsn", type=int, default=8, help="the number of hidden features for the graph subdivide network")
+    parser.add_argument("--hidden_features_gsn", type=int, default=64, help="the number of hidden features for the graph subdivide network")
 
     # run_id for wandb, will create automatically if not specified for training
     parser.add_argument("--run_id", type=str, default=None, help="the run name for wandb and local machine")

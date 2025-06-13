@@ -118,7 +118,7 @@ if __name__ == '__main__':
             'save_on': {'value': 'sct'},
             'ct_ratio': {'value': 1.0},
             '_mr': {'value': False},
-            'template_mesh_dir': {'value': './template/template_mesh-lv_myo.obj'},
+            'template_mesh_dir': {'value': './template/template_mesh-myo.obj'},
             'max_epochs': {'value': 200},
             'pretrain_epochs': {'value': 100},
             'train_epochs': {'value': 150},
