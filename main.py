@@ -27,9 +27,9 @@ def config():
                         help="the path to your initial meshes")
 
     # training parameters
-    parser.add_argument("--max_epochs", type=int, default=20, help="the maximum number of epochs for training")
-    parser.add_argument("--pretrain_epochs", type=int, default=15, help="the number of epochs to train the segmentation UNet")
-    parser.add_argument("--train_epochs", type=int, default=10, help="the number of epochs to train the distance field prediction ResNet")
+    parser.add_argument("--max_epochs", type=int, default=4, help="the maximum number of epochs for training")
+    parser.add_argument("--pretrain_epochs", type=int, default=3, help="the number of epochs to train the segmentation UNet")
+    parser.add_argument("--train_epochs", type=int, default=2, help="the number of epochs to train the distance field prediction ResNet")
     parser.add_argument("--reduce_count_down", type=int, default=-1, help="the count down for reduce the mesh face numbers.")
     parser.add_argument("--val_interval", type=int, default=1, help="the interval of validation")
 
@@ -37,7 +37,7 @@ def config():
     parser.add_argument("--batch_size", type=int, default=1, help="the batch size for training")
     parser.add_argument("--cache_rate", type=float, default=1.0, help="the cache rate for training, see MONAI document for more details")
     parser.add_argument("--crop_window_size", type=int, nargs='+', default=[128, 128, 128], help="the size of the crop window for training")
-    parser.add_argument("--pixdim", type=float, nargs='+', default=[4, 4, 4], help="the pixel dimension of downsampled images")
+    parser.add_argument("--pixdim", type=float, nargs='+', default=[8, 8, 8], help="the pixel dimension of downsampled images")
     parser.add_argument("--lambda_0", type=float, default=0.86, help="the loss coefficients for Chamfer verts distance term")
     parser.add_argument("--lambda_1", type=float, default=0.75, help="the loss coefficients for point to mesh distance term")
     parser.add_argument("--iteration", type=int, default=20, help="the iterations for the distance field warping")
