@@ -269,7 +269,6 @@ def draw_plotly(
         file_name = filename or "plotly_figure.html"
         html_path = os.path.join(save_dir, file_name)
         fig.write_html(html_path)
-        print(f"Figure saved to: {html_path}")
         
         # Also export as static image for wandb compatibility
         if export_static:
@@ -279,7 +278,6 @@ def draw_plotly(
             try:
                 # Try to export as static image using plotly's built-in functionality
                 fig.write_image(img_path, scale=2)
-                print(f"Static image saved to: {img_path}")
             except Exception as e:
                 print(f"Failed to save static image: {e}")
                 # Fallback to matplotlib if plotly export fails
@@ -311,7 +309,6 @@ def draw_plotly(
                     
                     plt.savefig(img_path, dpi=200, bbox_inches='tight')
                     plt.close()
-                    print(f"Fallback image saved to: {img_path}")
                 except Exception as e2:
                     print(f"Failed to save fallback image: {e2}")
         

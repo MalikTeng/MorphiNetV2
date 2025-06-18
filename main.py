@@ -2,6 +2,7 @@ import os, sys
 import time
 import glob
 import argparse
+import gc
 import torch
 import wandb
 
@@ -27,9 +28,9 @@ def config():
                         help="the path to your initial meshes")
 
     # training parameters
-    parser.add_argument("--max_epochs", type=int, default=4, help="the maximum number of epochs for training")
-    parser.add_argument("--pretrain_epochs", type=int, default=3, help="the number of epochs to train the segmentation UNet")
-    parser.add_argument("--train_epochs", type=int, default=2, help="the number of epochs to train the distance field prediction ResNet")
+    parser.add_argument("--max_epochs", type=int, default=5, help="the maximum number of epochs for training")
+    parser.add_argument("--pretrain_epochs", type=int, default=2, help="the number of epochs to train the segmentation UNet")
+    parser.add_argument("--train_epochs", type=int, default=3, help="the number of epochs to train the distance field prediction ResNet")
     parser.add_argument("--reduce_count_down", type=int, default=-1, help="the count down for reduce the mesh face numbers.")
     parser.add_argument("--val_interval", type=int, default=1, help="the interval of validation")
 
@@ -37,7 +38,7 @@ def config():
     parser.add_argument("--batch_size", type=int, default=1, help="the batch size for training")
     parser.add_argument("--cache_rate", type=float, default=1.0, help="the cache rate for training, see MONAI document for more details")
     parser.add_argument("--crop_window_size", type=int, nargs='+', default=[128, 128, 128], help="the size of the crop window for training")
-    parser.add_argument("--pixdim", type=float, nargs='+', default=[8, 8, 8], help="the pixel dimension of downsampled images")
+    parser.add_argument("--pixdim", type=float, nargs='+', default=[4, 4, 4], help="the pixel dimension of downsampled images")
     parser.add_argument("--lambda_0", type=float, default=0.86, help="the loss coefficients for Chamfer verts distance term")
     parser.add_argument("--lambda_1", type=float, default=0.75, help="the loss coefficients for point to mesh distance term")
     parser.add_argument("--iteration", type=int, default=20, help="the iterations for the distance field warping")
@@ -69,8 +70,8 @@ def config():
      
     # path to the pretrained modules
     parser.add_argument("--use_ckpt", type=lambda x: None if x.lower() == 'n' else x, 
-                        # default=None, 
-                        default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2025-06-08-0420", 
+                        default=None, 
+                        # default="/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2025-06-08-0420", 
                         help="path to pretrained models ('n' for no checkpoint, or specify a path)")
 
     # structure parameters for df-predict module
@@ -104,12 +105,9 @@ def train(super_params):
     with wandb.init(config=super_params, mode=super_params.mode, project="MorphiNet", name=super_params.run_id, resume="allow"):
         pipeline = TrainPipeline(
             super_params=super_params,
-            seed=8, num_workers=0,
+            seed=8, num_workers=16,
             is_training=True
             )
-
-        current_training_phase = "unet"
-        pipeline._data_warper(rotation=False, training_phase=current_training_phase)
 
         has_unet_ckpt = False
         has_resnet_ckpt = False
@@ -135,27 +133,54 @@ def train(super_params):
                 has_resnet_ckpt = bool(resnet_path)
             
             pipeline.load_pretrained_weight("all")
+
+        current_training_phase = None
         
         for epoch in range(super_params.max_epochs):
             torch.cuda.empty_cache()
             
             if epoch < super_params.pretrain_epochs:
                 new_phase = "unet"
+                will_validate_this_epoch = epoch % super_params.val_interval == 0
+                
                 if not has_unet_ckpt:
                     if current_training_phase != new_phase:
                         current_training_phase = new_phase
-                        pipeline._data_warper(rotation=False, training_phase=current_training_phase)
-                    pipeline.train_iter(epoch, "unet")
+                        # Load both MR and CT training data for UNet phase
+                        pipeline.prepare_all_dataloaders(data_types=["train"], training_phase=current_training_phase)
+                    # UNet training - commit=False if validation follows, commit=True if no validation
+                    pipeline.train_iter(epoch, "unet", commit_log=not will_validate_this_epoch)
+                
+                    # Validate segmentation after UNet training (both CT and MR encoders)
+                    if will_validate_this_epoch:
+                        # Prepare both CT and MR validation dataloaders for UNet phase
+                        pipeline.prepare_all_dataloaders(data_types=["valid"], validation_phase="unet")
+                        # This is the last log call for UNet phase, so commit=True
+                        pipeline.validate_segmentation(epoch, super_params.save_on, commit=True)
+                        # Clear both CT and MR validation dataloaders
+                        pipeline._clear_dataloader("ct", "valid")
+                        pipeline._clear_dataloader("mr", "valid")
                 else:
                     print(f"Skipping UNet training (epoch {epoch}) - using checkpoint")
             
             elif epoch < super_params.train_epochs:
                 new_phase = "resnet"
+                will_validate_this_epoch = epoch % super_params.val_interval == 0
+                
                 if not has_resnet_ckpt:
                     if current_training_phase != new_phase:
                         current_training_phase = new_phase
-                        pipeline._data_warper(rotation=False, training_phase=current_training_phase)
-                    pipeline.train_iter(epoch, "resnet")
+                        # Load only CT training data for ResNet phase (clears MR data to save memory)
+                        pipeline.prepare_all_dataloaders(data_types=["train"], training_phase=current_training_phase)
+                    # ResNet training - commit=False if validation follows, commit=True if no validation
+                    pipeline.train_iter(epoch, "resnet", commit_log=not will_validate_this_epoch)
+                    
+                    # Validate segmentation after ResNet training
+                    if will_validate_this_epoch:
+                        pipeline.prepare_all_dataloaders(data_types=["valid"], validation_phase="resnet")
+                        # This is the last log call for ResNet phase, so commit=True
+                        pipeline.validate_segmentation(epoch, super_params.save_on, commit=True)
+                        pipeline._clear_dataloader("ct" if super_params.save_on == "sct" else "mr", "valid")
                 else:
                     print(f"Skipping ResNet training (epoch {epoch}) - using checkpoint")
             
@@ -163,7 +188,11 @@ def train(super_params):
                 new_phase = "gsn"
                 if current_training_phase != new_phase:
                     current_training_phase = new_phase
-                    pipeline._data_warper(rotation=False, training_phase=current_training_phase)
+                    # Aggressive memory cleanup before GSN phase
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    # Load only CT training data for GSN phase (clears MR data to save memory)
+                    pipeline.prepare_all_dataloaders(data_types=["train"], training_phase=current_training_phase)
                 
                 will_validate_this_epoch = (epoch - super_params.train_epochs) % super_params.val_interval == 0
                 pipeline.train_iter(epoch, "gsn", commit_log=not will_validate_this_epoch)
@@ -172,7 +201,8 @@ def train(super_params):
                     pipeline.update_precomputed_faces()
                 
                 if will_validate_this_epoch:
-                    pipeline.prepare_validation_specific_dataloaders(rotation=False) # Prepare val_loaders with full transforms
+                    pipeline.prepare_all_dataloaders(data_types=["valid"], validation_phase="gsn") # Prepare val_loaders with full transforms
+                    # valid is the last call, so commit=True (already set in valid method)
                     pipeline.valid(epoch, super_params.save_on)
                     pipeline._clear_dataloader("ct" if super_params.save_on == "sct" else "mr", "valid")
 

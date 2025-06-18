@@ -29,7 +29,7 @@ __all__ = ["pre_transform"]
 
 
 def pre_transform(
-        keys: tuple, modal: str, section: str, rotation: bool,
+        keys: tuple, modal: str, section: str,
         crop_window_size: list, pixdim: list, spacing: float = 2.0,
         phase: str = "validation",  # "unet", "resnet", "gsn", "ndf", "validation"
         **kwargs
@@ -43,14 +43,16 @@ def pre_transform(
         keys: designated items for pre-transformation (image and label).
         modal: modality of data the pre-transformation applied to.
         section: identifier of either train, valid or test set.
-        rotation: whether to apply rotation augmentation. @deprecated
         crop_window_size: image and label will be cropped to match the size of network input.
         pixdim: the spatial distance of the downsampled images and labels.
         spacing: target spacing for isotropic resampling.
         phase: current processing phase, determining which keys are generated.
     """
-    target = kwargs.get("target")
+    target = kwargs.get("target")   # this flag is used for ACDC dataset specifically, because of its unique data configuration
     target = target.lower() if target is not None else None
+    
+    # Get stride configuration for DynUNet padding
+    strides = kwargs.get("strides", (1, 2, 2, 2, 2))  # Default stride configuration
     
     # data loading
     transforms = [
@@ -66,6 +68,8 @@ def pre_transform(
             Spacingd(keys, [-1, spacing, spacing],
                      mode=("bilinear", "nearest"), 
                      allow_missing_keys=True),
+            # Add DynUNet padding after spacing for ACDC (3D) - only for main image and label
+            DynUNetPaddingd([keys[0], keys[1]], strides=strides, spatial_dims=3, allow_missing_keys=True),
         ])
     else:
         transforms.extend([
@@ -75,6 +79,11 @@ def pre_transform(
                     mode=("bilinear", "nearest"), 
                     allow_missing_keys=True),
             Orientationd(keys, axcodes="RAS", allow_missing_keys=True),     # (D, W, H)
+            # Add DynUNet padding after spacing and orientation - only for main image and label
+            # CT uses 3D DynUNet, MR uses 2D DynUNet
+            DynUNetPaddingd([keys[0], keys[1]], strides=strides, 
+                           spatial_dims=3 if modal == "ct" else 2, 
+                           allow_missing_keys=True),
         ])
 
     # Determine if full data (including _ds and _df keys) is needed
@@ -110,39 +119,6 @@ def pre_transform(
     #     keys_to_ensure.extend([f"{keys[0][:2]}_df", f"{keys[1]}_ds"])
 
     if section == "train":
-        # if rotation:
-        #     transforms.extend([
-        #         # spatial augmentation
-        #         RandRotate90d(keys, prob=0.5, spatial_axes=(1, 2), lazy=True),
-        #         RandFlipd(keys, prob=0.5, spatial_axis=[1], lazy=True),
-        #         RandFlipd(keys, prob=0.5, spatial_axis=[2], lazy=True),
-        #         RandZoomd(
-        #             keys,
-        #             min_zoom=0.7 if modal == "ct" else [1.0, 0.7, 0.7], 
-        #             max_zoom=1.4 if modal == "ct" else [1.0, 1.4, 1.4],
-        #             mode=("trilinear", "nearest-exact"),
-        #             align_corners=(True, None), prob=0.15, lazy=True,
-        #         ),
-        #         RandGaussianNoised(keys[0], std=0.01, prob=0.15),
-        #         RandGaussianSmoothd(
-        #             keys[0], sigma_x=(0.5, 1.15), sigma_y=(0.5, 1.15),
-        #             sigma_z=(0.5, 1.15), prob=0.15,
-        #         ),
-        #         RandAdjustContrastd(keys[0], gamma=(0.65, 1.5), prob=0.15),
-        #         RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
-        #         # normalize the image intensity to 0-1
-        #         ScaleIntensityRangePercentilesd(keys[0], lower=1, upper=99, b_min=0.0, b_max=1.0, clip=True, allow_missing_keys=True),
-        #     ])
-        #     float_keys_train_rot = [keys[0]]
-        #     int_keys_train_rot = [keys[1]]
-        #     if load_full_data:
-        #         float_keys_train_rot.append(f"{keys[0][:2]}_df")
-        #         int_keys_train_rot.append(f"{keys[1]}_ds")
-        #     transforms.extend([
-        #         EnsureTyped(float_keys_train_rot, data_type="tensor", dtype=torch.float32, allow_missing_keys=True),
-        #         EnsureTyped(int_keys_train_rot, data_type="tensor", dtype=torch.int8, allow_missing_keys=True),
-        #     ])
-        # else:
         transforms.extend([
             # spatial augmentation
             RandZoomd(

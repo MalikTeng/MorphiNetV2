@@ -38,6 +38,7 @@ from monai.utils import set_determinism
 import wandb
 import plotly.figure_factory as ff
 import gc # Import garbage collector
+from scipy.ndimage import binary_dilation
 
 from data.transform import pre_transform
 from data.components import Maskd, FlexResized
@@ -262,7 +263,6 @@ class TrainPipeline:
         # Stack centers of both LV and RV
         self.mesh_c = torch.tensor([mesh_lv.center_mass, mesh_rv.center_mass], device=DEVICE)
 
-
     def _clear_dataloader(self, modal, type_):
         """Clear specific dataloaders and datasets."""
         if modal == "mr":
@@ -296,168 +296,198 @@ class TrainPipeline:
         if DEVICE == "cuda":
             torch.cuda.empty_cache()
 
-
-    def _data_warper(self, rotation:bool, training_phase:str):
+    def prepare_all_dataloaders(self, data_types=["train"], training_phase="unet", validation_phase="network", include_test=False):
+        """
+        Unified function to prepare training, validation, and/or test dataloaders.
         
-        if self.is_training or self.super_params.save_on == "cap":
-            self._clear_dataloader("mr", "train")
-            # Keep valid/test loaders if not re-preparing them here with training_phase
-            # Validation loaders will be specifically handled by prepare_validation_specific_dataloaders
-            print(f"Preparing MR training data {'with' if rotation else 'without'} rotation for training phase {training_phase}...")
-            with open(self.super_params.mr_json_dir, "r") as f:
-                mr_train_transform, _ = self._prepare_transform( # We only need train_transform here
-                    ["mr_image", "mr_label"], "mr", rotation, target=self.target, training_phase=training_phase
-                    )
-                # Only prepare training dataset and dataloader
-                data_json = json.load(f)
-                train_data = self._remap_abs_path(data_json["train_fold0"], "mr", "Tr")
-                self.mr_train_ds = Dataset(
-                    data=train_data, transform=mr_train_transform,
-                    cache_rate=self.super_params.cache_rate, num_workers=self.num_workers
-                )
-                if self.mr_train_ds.__len__() > 0:
-                    self.mr_train_loader = DataLoader(
-                        self.mr_train_ds, batch_size=self.super_params.batch_size,
-                        shuffle=True, num_workers=self.num_workers,
-                        collate_fn=collate_4D_batch,
-                    )
-                else:
-                    self.mr_train_loader = None
-
-
-        if self.is_training or self.super_params.save_on == "sct":
-            self._clear_dataloader("ct", "train")
-            # Keep valid/test loaders if not re-preparing them here
-            print(f"Preparing CT training data {'with' if rotation else 'without'} rotation for training phase {training_phase}...")
-            with open(self.super_params.ct_json_dir, "r") as f:
-                ct_train_transform, _ = self._prepare_transform( # We only need train_transform here
-                    ["ct_image", "ct_label"], "ct", rotation, training_phase=training_phase
-                    )
-                # Only prepare training dataset and dataloader
-                data_json = json.load(f)
-                train_data = self._remap_abs_path(data_json["train_fold0"], "ct", "Tr")
-                self.ct_train_ds = Dataset(
-                    data=train_data, transform=ct_train_transform,
-                    cache_rate=self.super_params.cache_rate, num_workers=self.num_workers
-                )
-                if self.ct_train_ds.__len__() > 0:
-                    self.ct_train_loader = DataLoader(
-                        self.ct_train_ds, batch_size=self.super_params.batch_size,
-                        shuffle=True, num_workers=self.num_workers,
-                        collate_fn=collate_4D_batch,
-                    )
-                else:
-                    self.ct_train_loader = None
-
-
-    def prepare_validation_specific_dataloaders(self, rotation: bool = False):
-        print("Preparing validation specific dataloaders with phase='validation'...")
-        if self.super_params.save_on == "cap": # MR validation
-            # self._clear_dataloader("mr", "valid")
-            with open(self.super_params.mr_json_dir, "r") as f:
-                _, mr_valid_transform = self._prepare_transform( # Get valid_transform with phase='validation'
-                    ["mr_image", "mr_label"], "mr", rotation, target=self.target, training_phase="validation" # Force validation phase
-                )
-                data_json = json.load(f)
-                valid_data = self._remap_abs_path(data_json["validation_fold0"], "mr", "Tr")
-                self.mr_valid_ds = Dataset(
-                    data=valid_data, transform=mr_valid_transform,
-                    cache_rate=self.super_params.cache_rate, num_workers=self.num_workers
-                )
-                if self.mr_valid_ds.__len__() > 0:
-                    self.mr_valid_loader = DataLoader(
-                        self.mr_valid_ds, batch_size=1, shuffle=False, num_workers=self.num_workers, collate_fn=collate_4D_batch
-                    )
-                else:
-                    self.mr_valid_loader = None
-
-        # if self.super_params.save_on == "sct" and not self.super_params._4d: # CT validation
-        if self.super_params.save_on == "sct": # CT validation
-            # self._clear_dataloader("ct", "valid")
-            with open(self.super_params.ct_json_dir, "r") as f:
-                _, ct_valid_transform = self._prepare_transform( # Get valid_transform with phase='validation'
-                    ["ct_image", "ct_label"], "ct", rotation, training_phase="validation" # Force validation phase
-                )
-                data_json = json.load(f)
-                valid_data = self._remap_abs_path(data_json["validation_fold0"], "ct", "Tr")
-                self.ct_valid_ds = Dataset(
-                    data=valid_data, transform=ct_valid_transform,
-                    cache_rate=self.super_params.cache_rate, num_workers=self.num_workers
-                )
-                if self.ct_valid_ds.__len__() > 0:
-                    self.ct_valid_loader = DataLoader(
-                        self.ct_valid_ds, batch_size=1, shuffle=False, num_workers=self.num_workers, collate_fn=collate_4D_batch
-                    )
-                else:
-                    self.ct_valid_loader = None
+        Args:
+            data_types: List of data types to prepare ["train", "valid", "test"]
+            training_phase: Phase for training data ("unet", "resnet", "gsn") - affects which training data is loaded
+            validation_phase: Phase for validation ("unet", "resnet", "gsn", "network") - affects which validation data is loaded
+            include_test: Whether to also prepare test dataloaders (only used if "test" not in data_types)
+        """
+        # Handle legacy include_test parameter
+        if include_test and "test" not in data_types:
+            data_types = data_types + ["test"]
         
-        # If in testing mode, also prepare test dataloaders with "validation" phase transforms
-        if not self.is_training:
-            self.prepare_test_specific_dataloaders(rotation=rotation)
+        # Prepare each requested data type
+        for data_type in data_types:
+            if data_type == "train":
+                self._prepare_training_dataloaders(training_phase)
+            elif data_type == "valid":
+                self._prepare_validation_dataloaders(validation_phase)
+            elif data_type == "test":
+                self._prepare_test_dataloaders()
+            else:
+                raise ValueError(f"Unknown data_type: {data_type}")
 
+    def _prepare_training_dataloaders(self, training_phase: str):
+        """Prepare training dataloaders based on training phase."""
+        # Load MR training data only for UNet phase OR if save_on == "cap" (for testing/validation)
+        prepare_mr_train = (self.is_training and training_phase == "unet") or self.super_params.save_on == "cap"
+        prepare_ct_train = self.is_training or self.super_params.save_on == "sct"
+        
+        self._prepare_modal_dataloader("mr", "train", prepare_mr_train, training_phase)
+        self._prepare_modal_dataloader("ct", "train", prepare_ct_train, training_phase)
 
-    def prepare_test_specific_dataloaders(self, rotation: bool = False):
-        print("Preparing test specific dataloaders with phase='validation' (full transforms)...")
-        if self.super_params.save_on == "cap": # MR test
-            self._clear_dataloader("mr", "test")
-            with open(self.super_params.mr_json_dir, "r") as f:
-                # Use training_phase="validation" for test transforms to get full data
-                _, mr_test_transform = self._prepare_transform( 
-                    ["mr_image", "mr_label"], "mr", rotation, target=self.target, training_phase="validation"
+    def _prepare_validation_dataloaders(self, validation_phase: str):
+        """Prepare validation dataloaders based on validation phase."""
+        # For UNet phase, prepare both CT and MR validation data regardless of save_on
+        # For other phases, only prepare validation data for the specific modal
+        prepare_mr_valid = (validation_phase == "unet") or self.super_params.save_on == "cap"
+        prepare_ct_valid = (validation_phase == "unet") or self.super_params.save_on == "sct"
+        
+        # Use the appropriate transform phase: "validation" for full pipeline, or specific phase for partial validation
+        transform_phase = "validation" if validation_phase == "network" else validation_phase
+        
+        self._prepare_modal_dataloader("mr", "valid", prepare_mr_valid, transform_phase)
+        self._prepare_modal_dataloader("ct", "valid", prepare_ct_valid, transform_phase)
+
+    def _prepare_test_dataloaders(self):
+        """Prepare test dataloaders."""
+        prepare_mr_test = self.super_params.save_on == "cap"
+        prepare_ct_test = self.super_params.save_on == "sct"
+        
+        self._prepare_modal_dataloader("mr", "test", prepare_mr_test, "validation")
+        self._prepare_modal_dataloader("ct", "test", prepare_ct_test, "validation")
+
+    def _prepare_modal_dataloader(self, modal: str, data_type: str, should_prepare: bool, transform_phase: str = "validation"):
+        """
+        Enhanced helper function to prepare a specific modal dataloader for any data type.
+        
+        Args:
+            modal: "mr" or "ct"
+            data_type: "train", "valid", or "test"
+            should_prepare: Whether to prepare this dataloader
+            transform_phase: Phase to use for transforms (training_phase for train data, "validation" for valid/test)
+        """
+        if not should_prepare:
+            # Clear the dataloader if we're not preparing it
+            self._clear_dataloader(modal, data_type)
+            return
+            
+        # Clear existing dataloader
+        self._clear_dataloader(modal, data_type)
+        
+        # Determine data split and phase suffix based on data type
+        if data_type == "train":
+            data_split = "train_fold0"
+            phase_suffix = "Tr"
+            batch_size = self.super_params.batch_size
+            shuffle = True
+            print_msg = f"Preparing {modal.upper()} training data for phase {transform_phase}..."
+        elif data_type == "valid":
+            data_split = "validation_fold0"
+            phase_suffix = "Tr"
+            batch_size = 1
+            shuffle = False
+            print_msg = f"Preparing {modal.upper()} validation data..."
+        else:  # test
+            data_split = "test"
+            phase_suffix = "Ts"
+            batch_size = 1
+            shuffle = False
+            print_msg = f"Preparing {modal.upper()} test data..."
+        
+        # Get JSON file path
+        json_path = self.super_params.mr_json_dir if modal == "mr" else self.super_params.ct_json_dir
+        
+        with open(json_path, "r") as f:
+            # Choose appropriate transform based on data type
+            if data_type == "train":
+                transform, _ = self._prepare_transform(
+                    [f"{modal}_image", f"{modal}_label"], modal, 
+                    target=self.target, training_phase=transform_phase
                 )
-                data_json = json.load(f)
-                test_data = self._remap_abs_path(data_json["test"], "mr", "Ts")
-                self.mr_test_ds = Dataset(
-                    data=test_data, transform=mr_test_transform,
-                    cache_rate=self.super_params.cache_rate, num_workers=self.num_workers
+            else:  # valid or test
+                _, transform = self._prepare_transform(
+                    [f"{modal}_image", f"{modal}_label"], modal, 
+                    target=self.target, training_phase=transform_phase
                 )
-                if self.mr_test_ds and self.mr_test_ds.__len__() > 0:
-                    self.mr_test_loader = DataLoader(
-                        self.mr_test_ds, batch_size=1, shuffle=False, num_workers=self.num_workers, collate_fn=collate_4D_batch
-                    )
-                else:
-                    self.mr_test_loader = None
-
-        # if self.super_params.save_on == "sct" and not self.super_params._4d: # CT test
-        if self.super_params.save_on == "sct": # CT test
-            self._clear_dataloader("ct", "test")
-            with open(self.super_params.ct_json_dir, "r") as f:
-                 # Use training_phase="validation" for test transforms to get full data
-                _, ct_test_transform = self._prepare_transform(
-                    ["ct_image", "ct_label"], "ct", rotation, training_phase="validation"
+            
+            data_json = json.load(f)
+            data_list = self._remap_abs_path(data_json[data_split], modal, phase_suffix)
+            
+            # Limit training data for testing (remove in production)
+            if data_type == "train":
+                data_list = data_list[:5]
+            
+            # Create dataset
+            dataset = Dataset(
+                data=data_list, transform=transform,
+                cache_rate=self.super_params.cache_rate, num_workers=self.num_workers
+            )
+            
+            # Create and assign dataloader
+            if dataset.__len__() > 0:
+                dataloader = DataLoader(
+                    dataset, batch_size=batch_size, shuffle=shuffle, 
+                    num_workers=self.num_workers, collate_fn=collate_4D_batch
                 )
-                data_json = json.load(f)
-                test_data = self._remap_abs_path(data_json["test"], "ct", "Ts")
-                self.ct_test_ds = Dataset(
-                    data=test_data, transform=ct_test_transform,
-                    cache_rate=self.super_params.cache_rate, num_workers=self.num_workers
-                )
-                if self.ct_test_ds and self.ct_test_ds.__len__() > 0:
-                    self.ct_test_loader = DataLoader(
-                        self.ct_test_ds, batch_size=1, shuffle=False, num_workers=self.num_workers, collate_fn=collate_4D_batch
-                    )
-                else:
-                    self.ct_test_loader = None
+                # Assign to appropriate attribute
+                self._assign_dataloader(modal, data_type, dataloader, dataset)
+            else:
+                # Set to None if empty
+                self._assign_dataloader(modal, data_type, None, None)
 
+    def _assign_dataloader(self, modal: str, data_type: str, dataloader, dataset):
+        """Helper to assign dataloader and dataset to correct attributes."""
+        if modal == "mr":
+            if data_type == "train":
+                self.mr_train_loader = dataloader
+                self.mr_train_ds = dataset
+            elif data_type == "valid":
+                self.mr_valid_loader = dataloader
+                self.mr_valid_ds = dataset
+            elif data_type == "test":
+                self.mr_test_loader = dataloader
+                self.mr_test_ds = dataset
+        elif modal == "ct":
+            if data_type == "train":
+                self.ct_train_loader = dataloader
+                self.ct_train_ds = dataset
+            elif data_type == "valid":
+                self.ct_valid_loader = dataloader
+                self.ct_valid_ds = dataset
+            elif data_type == "test":
+                self.ct_test_loader = dataloader
+                self.ct_test_ds = dataset
 
-    def _prepare_transform(self, keys, modal, rotation, training_phase: str, **kwargs):
+    # # Legacy wrapper functions for backward compatibility
+    # def _data_warper(self, rotation: bool, training_phase: str):
+    #     """Legacy wrapper for backward compatibility."""
+    #     self.prepare_all_dataloaders(data_types=["train"], training_phase=training_phase, rotation=rotation)
+
+    # def prepare_dataloaders(self, rotation: bool = False, validation_phase: str = "network", include_test: bool = False):
+    #     """Legacy wrapper for backward compatibility."""
+    #     data_types = ["valid"]
+    #     if include_test:
+    #         data_types.append("test")
+    #     self.prepare_all_dataloaders(data_types=data_types, validation_phase=validation_phase, rotation=rotation)
+
+    # def prepare_validation_specific_dataloaders(self, rotation: bool = False, validation_phase: str = "network"):
+    #     """Legacy wrapper for backward compatibility."""
+    #     self.prepare_all_dataloaders(data_types=["valid"], validation_phase=validation_phase, rotation=rotation)
+
+    # def prepare_test_specific_dataloaders(self, rotation: bool = False):
+    #     """Legacy wrapper for backward compatibility."""
+    #     self.prepare_all_dataloaders(data_types=["test"], validation_phase="network", rotation=rotation)
+
+    def _prepare_transform(self, keys, modal, training_phase: str, **kwargs):
         # For training data, use the specified training_phase
         train_transform = pre_transform(
-            keys, modal, "train", rotation,
+            keys, modal, "train",
             self.super_params.crop_window_size,
             self.super_params.pixdim, phase=training_phase, **kwargs
             )
         # For validation/test data transform preparation, use the specified phase.
-        # This allows _data_warper to set up initial valid/test loaders with training_phase transforms,
-        # and prepare_validation_specific_dataloaders to use "validation" phase.
         valid_transform = pre_transform(
-            keys, modal, "valid", rotation, # "valid" section for MONAI transforms like Rand*
+            keys, modal, "valid", # "valid" section for MONAI transforms like Rand*
             self.super_params.crop_window_size,
             self.super_params.pixdim, phase=training_phase, **kwargs # Use training_phase here by default
             )
         
         return train_transform, valid_transform
-
 
     def _remap_abs_path(self, data_list, modal, phase):
         if modal == "mr":
@@ -471,7 +501,6 @@ class TrainPipeline:
                 "ct_label": os.path.join(self.super_params.ct_data_dir, f"labels{phase}", os.path.split(d["label"])[-1]),
             } for d in data_list]
         
-
     def _prepare_modules(self):
         # initialise the df-predict module
         # Convert 1D parameter lists to the appropriate dimension based on spatial_dims
@@ -530,7 +559,6 @@ class TrainPipeline:
         # self.NDF = NODEBlock(
         #     hidden_size=16, atol=1, rtol=1e-2,
         # ).to(DEVICE)
-
 
     def _prepare_optimiser(self):
         # Create separate loss functions for CT and MR training to avoid shared state
@@ -616,7 +644,6 @@ class TrainPipeline:
         torch.backends.cudnn.enabled = torch.backends.cudnn.is_available()
         torch.backends.cudnn.benchmark = torch.backends.cudnn.is_available()
 
-
     def surface_extractor(self, seg_true, labels=None):
         """
             WARNING: this operation is non-differentiable.
@@ -632,7 +659,7 @@ class TrainPipeline:
         # Handle labels parameter
         if labels is None:
             # For GSN phase: extract only LV and MYO surfaces as originally designed
-            seg_idx_list = [[1], [1, 2, 3]]   # lv-endo, foreground
+            seg_idx_list = [[2]]   # myocardium
         elif isinstance(labels, int):
             # Single label
             seg_idx_list = [[labels]]
@@ -661,7 +688,6 @@ class TrainPipeline:
             mesh_true.append(taubin_smoothing(Meshes(verts, faces), 0.77, -0.34, 30))
 
         return mesh_true
-
 
     @torch.no_grad()
     def warp_template_mesh(self, df_preds):
@@ -728,142 +754,6 @@ class TrainPipeline:
 
         return template_mesh
 
-
-    def post_process_subdiv_mesh(self, subdiv_mesh, subdiv_level=-1):
-        """
-        Post-process the subdivided mesh by creating LV+RV-MYO shell from combined myocardium 
-        convex hull minus LV-ENDO and RV-ENDO convex hulls.
-        
-        Args:
-            subdiv_mesh: The subdivided mesh from GSN (can be a list of meshes or single mesh)
-            subdiv_level: Which subdivision level to process (-1 for the last level)
-            
-        Returns:
-            Modified mesh with combined myocardium shell or original mesh if processing fails
-        """
-        
-        # Handle case where subdiv_mesh is a list of meshes
-        if isinstance(subdiv_mesh, list):
-            target_mesh = subdiv_mesh[subdiv_level]
-            target_level = len(subdiv_mesh) + subdiv_level if subdiv_level < 0 else subdiv_level
-        else:
-            target_mesh = subdiv_mesh
-            target_level = len(self.subdivided_faces.labels_levels) - 1
-        
-        # Get vertex labels for the target subdivision level
-        vert_labels = self.subdivided_faces.labels_levels[target_level]
-        
-        # Validate label count matches vertex count
-        expected_num_verts = target_mesh.verts_padded().shape[1]
-        if vert_labels.shape[0] != expected_num_verts:
-            print(f"Warning: Label count mismatch, returning original mesh")
-            return target_mesh
-        
-        processed_meshes = []
-        
-        # Process each mesh in the batch
-        for batch_idx in range(target_mesh._N):
-            verts = target_mesh.verts_padded()[batch_idx]
-            faces = target_mesh.faces_padded()[batch_idx]
-            
-            # Select vertices based on labels:
-            # 0: LV-ENDO, 1: RV-ENDO, 2: LV-EPI, 3: RV-EPI
-            lv_endo_verts = verts[vert_labels == 0]  # LV-ENDO
-            rv_endo_verts = verts[vert_labels == 1]  # RV-ENDO
-            lv_epi_verts = verts[vert_labels == 2]   # LV-EPI
-            rv_epi_verts = verts[vert_labels == 3]   # RV-EPI
-            
-            # Check if we have sufficient vertices for each component
-            if (lv_endo_verts.shape[0] > 3 and rv_endo_verts.shape[0] > 3 and 
-                lv_epi_verts.shape[0] > 3 and rv_epi_verts.shape[0] > 3):
-                try:
-                    # Convert to numpy for trimesh operations
-                    lv_endo_verts_np = lv_endo_verts.cpu().numpy()
-                    rv_endo_verts_np = rv_endo_verts.cpu().numpy()
-                    lv_epi_verts_np = lv_epi_verts.cpu().numpy()
-                    rv_epi_verts_np = rv_epi_verts.cpu().numpy()
-                    
-                    # Create convex hulls
-                    lv_endo_hull = convex_hull(lv_endo_verts_np)
-                    rv_endo_hull = convex_hull(rv_endo_verts_np)
-                    
-                    # Combine LV-EPI and RV-EPI vertices for myocardium convex hull
-                    myo_verts_np = np.vstack([lv_epi_verts_np, rv_epi_verts_np])
-                    myo_hull = convex_hull(myo_verts_np)
-                    
-                    # # Export convex hulls for debugging (only for first batch item to avoid spam)
-                    # if batch_idx == 0:
-                    #     try:
-                    #         debug_dir = os.path.join(os.getcwd(), "debug_convex_hulls")
-                    #         os.makedirs(debug_dir, exist_ok=True)
-                            
-                    #         # Export each convex hull
-                    #         lv_endo_hull.export(os.path.join(debug_dir, f"lv_endo_hull_batch{batch_idx}.obj"))
-                    #         rv_endo_hull.export(os.path.join(debug_dir, f"rv_endo_hull_batch{batch_idx}.obj"))
-                    #         myo_hull.export(os.path.join(debug_dir, f"myo_hull_batch{batch_idx}.obj"))
-                            
-                    #         print(f"Debug: Exported convex hulls to {debug_dir}")
-                    #     except Exception as debug_e:
-                    #         print(f"Debug export failed: {debug_e}")
-                    
-                    # Subtract both endocardium hulls from myocardium hull
-                    myo_mesh = myo_hull.difference(lv_endo_hull)
-                    myo_mesh = myo_mesh.difference(rv_endo_hull)
-                    
-                    # Handle multiple bodies (take largest)
-                    if hasattr(myo_mesh, 'bodies') and len(myo_mesh.bodies) > 0:
-                        myo_mesh = max(myo_mesh.bodies, key=lambda x: x.volume)
-                    
-                    # Validate result and convert back to CUDA tensors
-                    # Check if the mesh is valid using available attributes
-                    is_valid_mesh = (
-                        hasattr(myo_mesh, 'vertices') and 
-                        hasattr(myo_mesh, 'faces') and
-                        len(myo_mesh.vertices) > 0 and 
-                        len(myo_mesh.faces) > 0 and
-                        (not hasattr(myo_mesh, 'is_valid') or myo_mesh.is_valid)
-                    )
-                    
-                    if is_valid_mesh:
-                        processed_verts = torch.tensor(myo_mesh.vertices, dtype=torch.float32, device=DEVICE)
-                        processed_faces = torch.tensor(myo_mesh.faces, dtype=torch.long, device=DEVICE)
-                        
-                        # # Export final processed myocardium mesh for debugging (only for first batch item)
-                        # if batch_idx == 0:
-                        #     try:
-                        #         debug_dir = os.path.join(os.getcwd(), "debug_convex_hulls")
-                        #         myo_mesh.export(os.path.join(debug_dir, f"final_myo_mesh_batch{batch_idx}.obj"))
-                        #         print(f"Debug: Exported final myocardium mesh to {debug_dir}")
-                        #     except Exception as debug_e:
-                        #         print(f"Debug export of final mesh failed: {debug_e}")
-                    else:
-                        # Fallback to original mesh
-                        processed_verts = verts.clone()
-                        processed_faces = faces.clone()
-                        
-                except Exception as e:
-                    if batch_idx == 0:  # Only print once to avoid spam
-                        print(f"Warning: Post-processing failed ({e}), using original mesh")
-                    processed_verts = verts.clone()
-                    processed_faces = faces.clone()
-            else:
-                # Insufficient vertices, use original mesh
-                if batch_idx == 0:  # Only print once to avoid spam
-                    print(f"Warning: Insufficient vertices for post-processing (LV-ENDO: {lv_endo_verts.shape[0]}, "
-                          f"RV-ENDO: {rv_endo_verts.shape[0]}, LV-EPI: {lv_epi_verts.shape[0]}, "
-                          f"RV-EPI: {rv_epi_verts.shape[0]}), using original mesh")
-                processed_verts = verts.clone()
-                processed_faces = faces.clone()
-            
-            processed_meshes.append((processed_verts, processed_faces))
-        
-        # Create new Meshes object
-        all_verts = [mesh[0] for mesh in processed_meshes]
-        all_faces = [mesh[1] for mesh in processed_meshes]
-        
-        return Meshes(verts=all_verts, faces=all_faces)
-
-
     def load_pretrained_weight(self, phase):
         # Determine which checkpoint directory to use
         if self.super_params.use_ckpt is None:
@@ -904,7 +794,6 @@ class TrainPipeline:
             # GSN checkpoint loading is intentionally skipped
             # The GSN will always use its current weights
 
-
     def _filter_unlabeled_slices(self, img, seg):
         """
         Filter out slices without labels between the first and last labeled slice.
@@ -944,8 +833,117 @@ class TrainPipeline:
             
         return img, seg
 
+    def _apply_resnet_padding(self, tensor):
+        """
+        Apply padding to ensure ResNet compatibility with skip connections.
+        
+        Args:
+            tensor: Input tensor with shape (B, C, H, W, D)
+        
+        Returns:
+            Tuple of (padded_tensor, pad_info) where pad_info contains padding information
+        """
+        # Calculate stride factor based on ResNet layers
+        # SegResNet typically has 2^(number of layers) stride factor
+        num_layers = len(self.super_params.layers)
+        stride_factor = 2 ** num_layers
+        
+        original_shape = tensor.shape
+        b, c, h, w, d = original_shape
+        
+        # Calculate padding needed for each spatial dimension
+        pad_h = (stride_factor - h % stride_factor) % stride_factor
+        pad_w = (stride_factor - w % stride_factor) % stride_factor
+        pad_d = (stride_factor - d % stride_factor) % stride_factor
+        
+        # Apply padding if needed
+        if pad_h > 0 or pad_w > 0 or pad_d > 0:
+            # PyTorch pad format: (D_left, D_right, W_left, W_right, H_left, H_right)
+            padding = (0, pad_d, 0, pad_w, 0, pad_h)
+            padded_tensor = F.pad(tensor, padding, mode="constant", value=0)
+            
+            # Store padding info for removal later
+            pad_info = {
+                'original_shape': original_shape,
+                'pad_h': pad_h,
+                'pad_w': pad_w,
+                'pad_d': pad_d
+            }
+            
+            # Silent padding - no logging
+            # Store padding info for debugging if needed
+            if not hasattr(self, '_resnet_padding_logged'):
+                self._resnet_padding_logged = True
+        else:
+            padded_tensor = tensor
+            pad_info = {'original_shape': original_shape, 'pad_h': 0, 'pad_w': 0, 'pad_d': 0}
+        
+        return padded_tensor, pad_info
+
+    def _remove_resnet_padding(self, tensor, pad_info):
+        """
+        Remove padding applied for ResNet compatibility.
+        
+        Args:
+            tensor: Padded tensor
+            pad_info: Dictionary containing padding information
+        
+        Returns:
+            Tensor with padding removed
+        """
+        # Extract padding information
+        original_shape = pad_info['original_shape']
+        pad_h = pad_info['pad_h']
+        pad_w = pad_info['pad_w']
+        pad_d = pad_info['pad_d']
+        
+        # Remove padding by slicing to original dimensions
+        if pad_h > 0 or pad_w > 0 or pad_d > 0:
+            _, _, orig_h, orig_w, orig_d = original_shape
+            tensor = tensor[:, :, :orig_h, :orig_w, :orig_d]
+        
+        return tensor
+
+    def _convert_to_onehot(self, tensor, num_classes, is_prediction=True):
+        """
+        Streamlined function to convert tensors to one-hot format for DiceMetric.
+        
+        Args:
+            tensor: Input tensor to convert
+            num_classes: Number of classes
+            is_prediction: If True, applies argmax first (for predictions), 
+                          if False, treats as labels (for ground truth)
+        
+        Returns:
+            One-hot encoded tensor with shape (B, C, H, W, D) or (B, C, H, W)
+        """
+        if is_prediction:
+            # For predictions: apply argmax first, then one-hot
+            tensor_discrete = torch.argmax(tensor, dim=1)
+        else:
+            # For ground truth: squeeze channel dimension if present, then convert to long
+            if tensor.dim() > 3 and tensor.shape[1] == 1:
+                tensor_discrete = tensor.squeeze(1).long()
+            else:
+                tensor_discrete = tensor.long()
+        
+        # Convert to one-hot and permute to (B, C, spatial_dims...)
+        onehot = torch.nn.functional.one_hot(tensor_discrete, num_classes=num_classes)
+        
+        # Permute based on tensor dimensions
+        if tensor.dim() == 5:  # 3D case: (B, C, H, W, D)
+            onehot = onehot.permute(0, 4, 1, 2, 3).float()
+        elif tensor.dim() == 4:  # 2D case: (B, C, H, W)
+            onehot = onehot.permute(0, 3, 1, 2).float()
+        else:
+            raise ValueError(f"Unsupported tensor dimensions: {tensor.dim()}")
+        
+        return onehot
 
     def train_iter(self, epoch, phase, commit_log=True):
+        print(f"\n{'='*60}")
+        print(f"EPOCH {epoch + 1} - {phase.upper()} TRAINING")
+        print(f"{'='*60}")
         if phase == "unet":
             self.encoder_mr.train()
             self.encoder_ct.train()
@@ -954,131 +952,140 @@ class TrainPipeline:
             log_data_unet = {} # Initialize dict to collect all unet phase logs for this epoch
             
             # train the CT segmentation encoder
-            log_ct_step = np.random.randint(0, len(self.ct_train_loader)) if len(self.ct_train_loader) > 0 else -1
-            for step, data_ct in enumerate(self.ct_train_loader):
-                img_ct, seg_true_ct = (
-                    data_ct["ct_image"].as_tensor().to(DEVICE),
-                    data_ct["ct_label"].as_tensor().to(DEVICE),
-                    )
+            log_ct_step = np.random.randint(0, len(self.ct_train_loader)) if self.ct_train_loader is not None and len(self.ct_train_loader) > 0 else -1
+            if self.ct_train_loader is not None:
+                for step, data_ct in enumerate(self.ct_train_loader):
+                    img_ct, seg_true_ct = (
+                        data_ct["ct_image"].as_tensor().to(DEVICE),
+                        data_ct["ct_label"].as_tensor().to(DEVICE),
+                        )
 
-                self.optimzer_ct_unet.zero_grad()
-                with torch.autocast(device_type=DEVICE):
-                    seg_pred_ct = sliding_window_inference(
-                        img_ct, 
-                        roi_size=self.super_params.crop_window_size, # Use full 3D roi_size for CT
-                        sw_batch_size=8, 
-                        predictor=self.encoder_ct,
-                        overlap=0.5, 
-                        mode="gaussian",
-                        # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                        # buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                        # buffer_dim=-1,   # Buffer along last spatial dimension
-                    ) 
-                    loss = self.dice_loss_fn_ct(seg_pred_ct.to(DEVICE), seg_true_ct)
+                    self.optimzer_ct_unet.zero_grad()
+                    with torch.autocast(device_type=DEVICE):
+                        seg_pred_ct = sliding_window_inference(
+                            img_ct, 
+                            roi_size=self.super_params.crop_window_size, # Use full 3D roi_size for CT
+                            sw_batch_size=8, 
+                            predictor=self.encoder_ct,
+                            overlap=0.5, 
+                            mode="gaussian",
+                            # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                            # buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                            # buffer_dim=-1,   # Buffer along last spatial dimension
+                        ) 
+                        loss = self.dice_loss_fn_ct(seg_pred_ct.to(DEVICE), seg_true_ct)
 
-                self.scaler_ct_unet.scale(loss).backward()
-                self.scaler_ct_unet.step(self.optimzer_ct_unet)
-                self.scaler_ct_unet.update()
-                
-                train_loss_epoch["ct"] += loss.item()
+                    self.scaler_ct_unet.scale(loss).backward()
+                    self.scaler_ct_unet.step(self.optimzer_ct_unet)
+                    self.scaler_ct_unet.update()
+                    
+                    train_loss_epoch["ct"] += loss.item()
 
-                if step == log_ct_step:
-                    # Extract case ID for logging
-                    case_id_ct = os.path.basename(self.ct_train_loader.dataset.data[step]["ct_label"]).replace(".nii.gz", '').replace(".seg.nrrd", '')
+                    if step == log_ct_step:
+                        # Extract case ID for logging
+                        case_id_ct = os.path.basename(self.ct_train_loader.dataset.data[step]["ct_label"]).replace(".nii.gz", '').replace(".seg.nrrd", '')
 
-                    # Log a slice of the ground truth and prediction
-                    # For CT, assuming img_ct is (B, C, D, H, W), typically B=1 for logging
-                    # Select a slice from the Depth dimension (dim 2)
-                    if img_ct.dim() == 5 and img_ct.shape[2] > 0: # Ensure it's 5D and has depth
-                        depth_slice_idx_ct = img_ct.shape[2] // 2
-                        
-                        # Prepare input image slice (B=0, C=0)
-                        input_img_ct_slice = img_ct[0, 0, depth_slice_idx_ct, :, :]
-                        input_img_ct_viz = self._prepare_slice_for_wandb(input_img_ct_slice, is_segmentation=False)
-                        h_in_ct, w_in_ct = input_img_ct_viz.shape[:2]
+                        # Log a slice of the ground truth and prediction
+                        # For CT, assuming img_ct is (B, C, D, H, W), typically B=1 for logging
+                        # Select a slice from the Depth dimension (dim 2)
+                        if img_ct.dim() == 5 and img_ct.shape[2] > 0: # Ensure it's 5D and has depth
+                            depth_slice_idx_ct = img_ct.shape[2] // 2
+                            
+                            # Prepare input image slice (B=0, C=0)
+                            input_img_ct_slice = img_ct[0, 0, depth_slice_idx_ct, :, :]
+                            input_img_ct_viz = self._prepare_slice_for_wandb(input_img_ct_slice, is_segmentation=False)
+                            h_in_ct, w_in_ct = input_img_ct_viz.shape[:2]
 
-                        # Prepare ground truth segmentation slice
-                        gt_slice_ct = seg_true_ct[0, 0, depth_slice_idx_ct, :, :]
-                        gt_slice_ct_viz = self._prepare_slice_for_wandb(gt_slice_ct, is_segmentation=True, num_classes=self.super_params.num_classes)
-                        h_gt_ct, w_gt_ct = gt_slice_ct_viz.shape[:2]
+                            # Prepare ground truth segmentation slice
+                            gt_slice_ct = seg_true_ct[0, 0, depth_slice_idx_ct, :, :]
+                            gt_slice_ct_viz = self._prepare_slice_for_wandb(gt_slice_ct, is_segmentation=True, num_classes=self.super_params.num_classes)
+                            h_gt_ct, w_gt_ct = gt_slice_ct_viz.shape[:2]
 
-                        # Prepare predicted segmentation slice (move to GPU first for argmax)
-                        pred_slice_ct = torch.argmax(seg_pred_ct[0, :, depth_slice_idx_ct, :, :].to(DEVICE), dim=0)
-                        pred_slice_ct_viz = self._prepare_slice_for_wandb(pred_slice_ct, is_segmentation=True, num_classes=self.super_params.num_classes)
-                        h_pred_ct, w_pred_ct = pred_slice_ct_viz.shape[:2]
-                        
-                        log_data_unet["CT/Input Image"] = wandb.Image(input_img_ct_viz, caption=f"Case ID: {case_id_ct}")
-                        log_data_unet["CT/Ground Truth Segmentation"] = wandb.Image(gt_slice_ct_viz, caption=f"Case ID: {case_id_ct}")
-                        log_data_unet["CT/Predicted Segmentation"] = wandb.Image(pred_slice_ct_viz, caption=f"Case ID: {case_id_ct}")
-                    else:
-                        print(f"Warning: CT image tensor for logging has unexpected shape: {img_ct.shape}")
+                            # Prepare predicted segmentation slice (move to GPU first for argmax)
+                            pred_slice_ct = torch.argmax(seg_pred_ct[0, :, depth_slice_idx_ct, :, :].to(DEVICE), dim=0)
+                            pred_slice_ct_viz = self._prepare_slice_for_wandb(pred_slice_ct, is_segmentation=True, num_classes=self.super_params.num_classes)
+                            h_pred_ct, w_pred_ct = pred_slice_ct_viz.shape[:2]
+                            
+                            log_data_unet["CT/Input Image"] = wandb.Image(input_img_ct_viz, caption=f"Case ID: {case_id_ct}")
+                            log_data_unet["CT/Ground Truth Segmentation"] = wandb.Image(gt_slice_ct_viz, caption=f"Case ID: {case_id_ct}")
+                            log_data_unet["CT/Predicted Segmentation"] = wandb.Image(pred_slice_ct_viz, caption=f"Case ID: {case_id_ct}")
+                        else:
+                            print(f"Warning: CT image tensor for logging has unexpected shape: {img_ct.shape}")
 
-            train_loss_epoch["ct"] = train_loss_epoch["ct"] / (step + 1) if len(self.ct_train_loader) > 0 else 0.0
+            train_loss_epoch["ct"] = train_loss_epoch["ct"] / (step + 1) if self.ct_train_loader is not None and len(self.ct_train_loader) > 0 else 0.0
+            
+            if self.ct_train_loader is not None and len(self.ct_train_loader) > 0:
+                print(f"CT UNet Training - Loss: {train_loss_epoch['ct']:.4f}, LR: {self.optimzer_ct_unet.param_groups[0]['lr']:.6f}")
                 
             self.lr_scheduler_ct_unet.step(train_loss_epoch["ct"])
 
             # train the CMR segmentation encoder
-            log_mr_step = np.random.randint(0, len(self.mr_train_loader)) if len(self.mr_train_loader) > 0 else -1
-            for step, data_mr in enumerate(self.mr_train_loader):
-                img_mr, seg_true_mr = (
-                    data_mr["mr_image"].as_tensor().to(DEVICE),
-                    data_mr["mr_label"].as_tensor().to(DEVICE),
-                    )
+            log_mr_step = np.random.randint(0, len(self.mr_train_loader)) if self.mr_train_loader is not None and len(self.mr_train_loader) > 0 else -1
+            if self.mr_train_loader is not None:
+                for step, data_mr in enumerate(self.mr_train_loader):
+                    img_mr, seg_true_mr = (
+                        data_mr["mr_image"].as_tensor().to(DEVICE),
+                        data_mr["mr_label"].as_tensor().to(DEVICE),
+                        )
 
-                # Filter out slices without labels
-                img_mr, seg_true_mr = self._filter_unlabeled_slices(img_mr, seg_true_mr)
+                    # Filter out slices without labels
+                    img_mr, seg_true_mr = self._filter_unlabeled_slices(img_mr, seg_true_mr)
 
-                self.optimzer_mr_unet.zero_grad()
-                with torch.autocast(device_type=DEVICE):
-                    seg_pred_mr = sliding_window_inference(
-                        img_mr,
-                        roi_size=self.super_params.crop_window_size[:2],
-                        sw_batch_size=8,
-                        predictor=self.encoder_mr,
-                        overlap=0.5,
-                        mode="gaussian",
-                        # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                        # buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                        # buffer_dim=-1,   # Buffer along last spatial dimension
-                    )
-                    loss = self.dice_loss_fn_mr(seg_pred_mr.to(DEVICE), seg_true_mr)
+                    self.optimzer_mr_unet.zero_grad()
+                    with torch.autocast(device_type=DEVICE):
+                        seg_pred_mr = sliding_window_inference(
+                            img_mr,
+                            roi_size=self.super_params.crop_window_size[:2],
+                            sw_batch_size=8,
+                            predictor=self.encoder_mr,
+                            overlap=0.5,
+                            mode="gaussian",
+                            # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                            # buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                            # buffer_dim=-1,   # Buffer along last spatial dimension
+                        )
+                        loss = self.dice_loss_fn_mr(seg_pred_mr.to(DEVICE), seg_true_mr)
 
-                self.scaler_mr_unet.scale(loss).backward()
-                self.scaler_mr_unet.step(self.optimzer_mr_unet)
-                self.scaler_mr_unet.update()
-                
-                train_loss_epoch["mr"] += loss.item()
-
-                if step == log_mr_step:
-                    # Extract case ID for logging
-                    case_id_mr = os.path.basename(self.mr_train_loader.dataset.data[step]["mr_label"]).replace(".nii.gz", '').replace(".seg.nrrd", '')
-                    case_id_mr = case_id_mr.split('-')[0]
+                    self.scaler_mr_unet.scale(loss).backward()
+                    self.scaler_mr_unet.step(self.optimzer_mr_unet)
+                    self.scaler_mr_unet.update()
                     
-                    # Log a slice of the ground truth and prediction
-                    slice_idx_mr = seg_true_mr.shape[0] // 4 # Select a slice from the Slices dimension
+                    train_loss_epoch["mr"] += loss.item()
 
-                    # Prepare input image slice
-                    input_img_mr_slice = img_mr[slice_idx_mr, 0]
-                    input_img_mr_viz = self._prepare_slice_for_wandb(input_img_mr_slice, is_segmentation=False)
-                    h_in_mr, w_in_mr = input_img_mr_viz.shape[:2]
+                    if step == log_mr_step:
+                        # Extract case ID for logging
+                        case_id_mr = os.path.basename(self.mr_train_loader.dataset.data[step]["mr_label"]).replace(".nii.gz", '').replace(".seg.nrrd", '')
+                        case_id_mr = case_id_mr.split('-')[0]
+                        
+                        # Log a slice of the ground truth and prediction
+                        slice_idx_mr = seg_true_mr.shape[0] // 4 # Select a slice from the Slices dimension
 
-                    # Prepare ground truth segmentation slice
-                    gt_slice_mr = seg_true_mr[slice_idx_mr, 0]
-                    gt_slice_mr_viz = self._prepare_slice_for_wandb(gt_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
-                    h_gt_mr, w_gt_mr = gt_slice_mr_viz.shape[:2]
+                        # Prepare input image slice
+                        input_img_mr_slice = img_mr[slice_idx_mr, 0]
+                        input_img_mr_viz = self._prepare_slice_for_wandb(input_img_mr_slice, is_segmentation=False)
+                        h_in_mr, w_in_mr = input_img_mr_viz.shape[:2]
 
-                    # Prepare predicted segmentation slice (move to GPU first for argmax)
-                    pred_slice_mr = torch.argmax(seg_pred_mr[slice_idx_mr].to(DEVICE), dim=0)
-                    pred_slice_mr_viz = self._prepare_slice_for_wandb(pred_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
-                    h_pred_mr, w_pred_mr = pred_slice_mr_viz.shape[:2]
+                        # Prepare ground truth segmentation slice
+                        gt_slice_mr = seg_true_mr[slice_idx_mr, 0]
+                        gt_slice_mr_viz = self._prepare_slice_for_wandb(gt_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
+                        h_gt_mr, w_gt_mr = gt_slice_mr_viz.shape[:2]
 
-                    # Add to log_data_unet for grouped, epoch-indexed viewing
-                    log_data_unet["MR/Input Image"] = wandb.Image(input_img_mr_viz, caption=f"Case ID: {case_id_mr}")
-                    log_data_unet["MR/Ground Truth Segmentation"] = wandb.Image(gt_slice_mr_viz, caption=f"Case ID: {case_id_mr}")
-                    log_data_unet["MR/Predicted Segmentation"] = wandb.Image(pred_slice_mr_viz, caption=f"Case ID: {case_id_mr}")
+                        # Prepare predicted segmentation slice (move to GPU first for argmax)
+                        pred_slice_mr = torch.argmax(seg_pred_mr[slice_idx_mr].to(DEVICE), dim=0)
+                        pred_slice_mr_viz = self._prepare_slice_for_wandb(pred_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
+                        h_pred_mr, w_pred_mr = pred_slice_mr_viz.shape[:2]
+
+                        # Add to log_data_unet for grouped, epoch-indexed viewing
+                        log_data_unet["MR/Input Image"] = wandb.Image(input_img_mr_viz, caption=f"Case ID: {case_id_mr}")
+                        log_data_unet["MR/Ground Truth Segmentation"] = wandb.Image(gt_slice_mr_viz, caption=f"Case ID: {case_id_mr}")
+                        log_data_unet["MR/Predicted Segmentation"] = wandb.Image(pred_slice_mr_viz, caption=f"Case ID: {case_id_mr}")
 
 
-            train_loss_epoch["mr"] = train_loss_epoch["mr"] / (step + 1) if len(self.mr_train_loader) > 0 else 0.0
+            train_loss_epoch["mr"] = train_loss_epoch["mr"] / (step + 1) if self.mr_train_loader is not None and len(self.mr_train_loader) > 0 else 0.0
+            
+            if self.mr_train_loader is not None and len(self.mr_train_loader) > 0:
+                print(f"MR UNet Training - Loss: {train_loss_epoch['mr']:.4f}, LR: {self.optimzer_mr_unet.param_groups[0]['lr']:.6f}")
+            
             self.lr_scheduler_mr_unet.step(train_loss_epoch["mr"])
 
             train_loss_epoch["total"] = train_loss_epoch["ct"] + train_loss_epoch["mr"]
@@ -1090,64 +1097,80 @@ class TrainPipeline:
             # Add losses to the dictionary
             log_data_unet["unet_loss_ct"] = train_loss_epoch["ct"]
             log_data_unet["unet_loss_mr"] = train_loss_epoch["mr"]
+            
+            print(f"UNet Total Loss: {train_loss_epoch['total']:.4f} (CT: {train_loss_epoch['ct']:.4f}, MR: {train_loss_epoch['mr']:.4f})")
+            print(f"{'='*60}")
 
             # Single log call for the unet phase
             if log_data_unet: # Ensure there's something to log
-                wandb.log(log_data_unet, step=epoch + 1, commit=True)
+                wandb.log(log_data_unet, step=epoch + 1, commit=commit_log)
             
         elif phase == "resnet":
             self.encoder_ct.eval()
             self.decoder.train()
 
             train_loss_epoch = dict(total=0.0, df=0.0)
-            for step, data_ct in enumerate(self.ct_train_loader):
-                img_ct, seg_true_ct, seg_true_ct_ds = (
-                    data_ct["ct_image"].to(DEVICE),
-                    data_ct["ct_label"].to(DEVICE),
-                    data_ct["ct_label_ds"].to(DEVICE),
-                )
-                
-                self.optimizer_resnet.zero_grad()
-                with torch.autocast(device_type=DEVICE):
-                    seg_pred_ct = sliding_window_inference(
-                        img_ct,
-                        roi_size=self.super_params.crop_window_size, # Use full 3D roi_size for CT
-                        sw_batch_size=8,
-                        predictor=self.encoder_ct,
-                        overlap=0.5,
-                        mode="gaussian",
-                        # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                        # buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                        # buffer_dim=-1,   # Buffer along last spatial dimension
+            if self.ct_train_loader is not None:
+                for step, data_ct in enumerate(self.ct_train_loader):
+                    img_ct, seg_true_ct, seg_true_ct_ds = (
+                        data_ct["ct_image"].to(DEVICE),
+                        data_ct["ct_label"].to(DEVICE),
+                        data_ct["ct_label_ds"].to(DEVICE),
                     )
-                    # Use memory-efficient post-transform processing for resnet phase
-                    seg_pred_ct_ds = self._memory_efficient_post_transform(seg_pred_ct, seg_true_ct, "ct", to_gpu=True)
                     
-                    # Calculate binary mask and compute distance map
-                    binary_mask_pred = (torch.argmax(seg_pred_ct_ds, dim=1, keepdim=True) == 0)
-                    dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
-                    mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor + 1).detach()
-                    mask = mask * binary_mask_pred
-                    mask[mask < self.mask_threshold] = 0
+                    self.optimizer_resnet.zero_grad()
+                    with torch.autocast(device_type=DEVICE):
+                        seg_pred_ct = sliding_window_inference(
+                            img_ct,
+                            roi_size=self.super_params.crop_window_size, # Use full 3D roi_size for CT
+                            sw_batch_size=8,
+                            predictor=self.encoder_ct,
+                            overlap=0.5,
+                            mode="gaussian",
+                            # device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                            # buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                            # buffer_dim=-1,   # Buffer along last spatial dimension
+                        )
+                        # Use memory-efficient post-transform processing for resnet phase
+                        seg_pred_ct_ds = self._memory_efficient_post_transform(seg_pred_ct, seg_true_ct, "ct", to_gpu=True)
+                        
+                        # Calculate binary mask and compute distance map
+                        binary_mask_pred = (torch.argmax(seg_pred_ct_ds, dim=1, keepdim=True) == 0)
+                        dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
+                        mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor + 1).detach()
+                        mask = mask * binary_mask_pred
+                        mask[mask < self.mask_threshold] = 0
+                        
+                        # Apply padding for ResNet compatibility
+                        seg_pred_ct_ds_padded, pad_info = self._apply_resnet_padding(seg_pred_ct_ds)
+                        
+                        # Apply ResNet with padding
+                        resnet_output_padded = self.decoder(seg_pred_ct_ds_padded)
+                        
+                        # Remove padding from ResNet output
+                        resnet_output = self._remove_resnet_padding(resnet_output_padded, pad_info)
+                        
+                        seg_pred_ct_ds = seg_pred_ct_ds + mask * resnet_output
+
+                        loss = self.msk_dice_loss_fn(seg_pred_ct_ds, seg_true_ct_ds)
+
+                    self.scaler_resnet.scale(loss).backward()
+                    self.scaler_resnet.step(self.optimizer_resnet)
+                    self.scaler_resnet.update()
                     
-                    seg_pred_ct_ds = seg_pred_ct_ds + mask * self.decoder(seg_pred_ct_ds)
-
-                    loss = self.msk_dice_loss_fn(seg_pred_ct_ds, seg_true_ct_ds)
-
-                self.scaler_resnet.scale(loss).backward()
-                self.scaler_resnet.step(self.optimizer_resnet)
-                self.scaler_resnet.update()
-                
-                train_loss_epoch["total"] += loss.item()
-                train_loss_epoch["df"] += loss.item()
+                    train_loss_epoch["total"] += loss.item()
+                    train_loss_epoch["df"] += loss.item()
 
             for k, v in train_loss_epoch.items():
-                train_loss_epoch[k] = v / (step + 1)
+                train_loss_epoch[k] = v / (step + 1) if self.ct_train_loader is not None and len(self.ct_train_loader) > 0 else 0.0
                 self.resnet_loss[k] = np.append(self.resnet_loss[k], train_loss_epoch[k])
+
+            print(f"ResNet Training - Loss: {train_loss_epoch['total']:.4f}, LR: {self.optimizer_resnet.param_groups[0]['lr']:.6f}")
+            print(f"{'='*60}")
 
             wandb.log(
                 {f"{phase}_loss": train_loss_epoch["total"]},
-                step=epoch + 1, commit=True
+                step=epoch + 1, commit=commit_log
                 )
 
             self.lr_scheduler_resnet.step(train_loss_epoch["total"])
@@ -1158,95 +1181,120 @@ class TrainPipeline:
             self.GSN.train()
 
             finetune_loss_epoch = dict(total=0.0, chmf=0.0, smooth=0.0)
-            for step, data_ct in enumerate(self.ct_train_loader):
-                img_ct, seg_true_ct = (
-                    data_ct["ct_image"].to(DEVICE),
-                    data_ct["ct_label"].to(DEVICE)
-                )
-                
-                seg_true_ct_ = torch.stack([self.post_transform({"label": i, "modal": "ct"})["label"] for i in seg_true_ct], dim=0)
-                # Generate ground truth mesh for myocardium only (label=2)
-                mesh_true_ct = self.surface_extractor(seg_true_ct_.to(DEVICE), labels=2)
-
-                self.optimizer_gsn.zero_grad()
-                with torch.autocast(device_type=DEVICE):
-                    seg_pred_ct = sliding_window_inference(
-                        img_ct,
-                        roi_size=self.super_params.crop_window_size, # Use full 3D roi_size for CT
-                        sw_batch_size=8,
-                        predictor=self.encoder_ct,
-                        overlap=0.5,
-                        mode="gaussian",
-                        device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
-                        buffer_steps=4,  # Buffer multiple steps before writing to CPU
-                        buffer_dim=-1,   # Buffer along last spatial dimension
+            if self.ct_train_loader is not None:
+                for step, data_ct in enumerate(self.ct_train_loader):
+                    img_ct, seg_true_ct = (
+                        data_ct["ct_image"].to(DEVICE),
+                        data_ct["ct_label"].to(DEVICE)
                     )
-                    # Use memory-efficient post-transform processing
-                    seg_pred_ct_ds = self._memory_efficient_post_transform(seg_pred_ct, seg_true_ct, "ct", to_gpu=True)
                     
-                    binary_mask_pred = (torch.argmax(seg_pred_ct_ds, dim=1, keepdim=True) == 0)
-                    dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
-                    mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor + 1).detach()
-                    mask = mask * binary_mask_pred
-                    mask[mask < self.mask_threshold] = 0
+                    seg_true_ct_ = torch.stack([self.post_transform({"label": i, "modal": "ct"})["label"] for i in seg_true_ct], dim=0)
+                    # Generate ground truth mesh for myocardium only (label=2)
+                    mesh_true_ct = self.surface_extractor(seg_true_ct_.to(DEVICE), labels=2)
 
-                    seg_pred_ct_ds = seg_pred_ct_ds + mask * self.decoder(seg_pred_ct_ds)
-                    seg_pred_ct_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ct_ds])
-                    
-                    foreground = seg_pred_ct_ds > 0  # Include RV in foreground
-                    lv = (seg_pred_ct_ds == 1)
-                    rv = (seg_pred_ct_ds == 3)
-                    myo = (seg_pred_ct_ds == 2)  # Now contains combined LV-MYO + RV-MYO
-                    df_pred_ct = torch.stack([
-                        distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
-                        for i in [foreground, lv, rv, myo]], dim=1)
-                    
-                    template_mesh = self.warp_template_mesh(df_pred_ct.detach())
-                    
-                    # Convert template mesh to half precision for compatibility with AMP training
-                    template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float16))
-                    
-                    level_outs = self.GSN(template_mesh, self.subdivided_faces.faces_levels)
-
-                    loss_chmf, loss_smooth = 0.0, 0.0
-                    for l, subdiv_mesh in enumerate(level_outs):
-                        verts_label = self.subdivided_faces.labels_levels[l]
-                        # Filter to only surface nodes: LV-ENDO (0), RV-ENDO (1), LV-EPI (2), RV-EPI (3)
-                        surface_mask = torch.any(torch.stack([verts_label == i for i in [0, 1, 2, 3]]), dim=0)
-                        surface_verts = subdiv_mesh.verts_padded()[:, surface_mask]
+                    self.optimizer_gsn.zero_grad()
+                    with torch.autocast(device_type=DEVICE):
+                        seg_pred_ct = sliding_window_inference(
+                            img_ct,
+                            roi_size=self.super_params.crop_window_size, # Use full 3D roi_size for CT
+                            sw_batch_size=4,  # Reduced from 8 to 4 for GSN phase to save memory
+                            predictor=self.encoder_ct,
+                            overlap=0.5,
+                            mode="gaussian",
+                            device=torch.device('cpu'),  # Move output stitching to CPU to save GPU memory
+                            buffer_steps=4,  # Buffer multiple steps before writing to CPU
+                            buffer_dim=-1,   # Buffer along last spatial dimension
+                        )
+                        # Use memory-efficient post-transform processing
+                        seg_pred_ct_ds = self._memory_efficient_post_transform(seg_pred_ct, seg_true_ct, "ct", to_gpu=True)
                         
-                        # Calculate chamfer loss between surface vertices and myocardium ground truth
-                        loss_chmf += chamfer_distance(
-                            surface_verts, 
-                            mesh_true_ct[0].verts_padded(),
-                            point_reduction="mean", batch_reduction="mean"
-                            )[0] 
-                        loss_smooth += mesh_laplacian_smoothing(subdiv_mesh, method="cot")
+                        binary_mask_pred = (torch.argmax(seg_pred_ct_ds, dim=1, keepdim=True) == 0)
+                        dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
+                        mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor + 1).detach()
+                        mask = mask * binary_mask_pred
+                        mask[mask < self.mask_threshold] = 0
+
+                        # Apply padding for ResNet compatibility
+                        seg_pred_ct_ds_padded, pad_info = self._apply_resnet_padding(seg_pred_ct_ds)
+                        
+                        # Apply ResNet with padding
+                        resnet_output_padded = self.decoder(seg_pred_ct_ds_padded)
+                        
+                        # Remove padding from ResNet output
+                        resnet_output = self._remove_resnet_padding(resnet_output_padded, pad_info)
+                        
+                        seg_pred_ct_ds = seg_pred_ct_ds + mask * resnet_output
+                        seg_pred_ct_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ct_ds])
+                        
+                        foreground = seg_pred_ct_ds > 0  # Include RV in foreground
+                        lv = (seg_pred_ct_ds == 1)
+                        rv = (seg_pred_ct_ds == 3)
+                        myo = (seg_pred_ct_ds == 2)  # Now contains combined LV-MYO + RV-MYO
+                        df_pred_ct = torch.stack([
+                            distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
+                            for i in [foreground, lv, rv, myo]], dim=1)
+                        
+                        template_mesh = self.warp_template_mesh(df_pred_ct.detach())
+                        
+                        # Convert template mesh to half precision for compatibility with AMP training
+                        template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float16))
+                        
+                        level_outs = self.GSN(template_mesh, self.subdivided_faces.faces_levels)
+
+                        loss_chmf, loss_smooth = 0.0, 0.0
+                        for l, subdiv_mesh in enumerate(level_outs):
+                            verts_label = self.subdivided_faces.labels_levels[l]
+                            # Filter to only surface nodes: LV-ENDO (0), RV-ENDO (1), LV-EPI (2), RV-EPI (3)
+                            surface_mask = torch.any(torch.stack([verts_label == i for i in [0, 1, 2, 3]]), dim=0)
+                            surface_verts = subdiv_mesh.verts_padded()[:, surface_mask]
+                            
+                            # Calculate chamfer loss between surface vertices and myocardium ground truth
+                            loss_chmf += chamfer_distance(
+                                surface_verts, 
+                                mesh_true_ct[0].verts_padded(),
+                                point_reduction="mean", batch_reduction="mean"
+                                )[0] 
+                            loss_smooth += mesh_laplacian_smoothing(subdiv_mesh, method="cot")
+                        
+                        loss = self.super_params.lambda_0 * loss_chmf +\
+                            self.super_params.lambda_1 * loss_smooth
+
+                    self.scaler_gsn.scale(loss).backward()
+                    self.scaler_gsn.step(self.optimizer_gsn)
+                    self.scaler_gsn.update()
                     
-                    loss = self.super_params.lambda_0 * loss_chmf +\
-                        self.super_params.lambda_1 * loss_smooth
+                    finetune_loss_epoch["total"] += loss.item()
+                    finetune_loss_epoch["chmf"] += loss_chmf.item()
+                    finetune_loss_epoch["smooth"] += loss_smooth.item()
+                    
+                    # Aggressive memory cleanup during GSN training
+                    del seg_pred_ct, seg_pred_ct_ds, binary_mask_pred, dist_map_pred, mask
+                    del seg_pred_ct_ds_padded, resnet_output_padded, resnet_output
+                    del foreground, lv, myo, df_pred_ct, template_mesh, level_outs
+                    del loss_chmf, loss_smooth, loss
+                    torch.cuda.empty_cache()
 
-                self.scaler_gsn.scale(loss).backward()
-                self.scaler_gsn.step(self.optimizer_gsn)
-                self.scaler_gsn.update()
-                
-                finetune_loss_epoch["total"] += loss.item()
-                finetune_loss_epoch["chmf"] += loss_chmf.item()
-                finetune_loss_epoch["smooth"] += loss_smooth.item()
+                for k, v in finetune_loss_epoch.items():
+                    finetune_loss_epoch[k] = v / (step + 1) if self.ct_train_loader is not None and len(self.ct_train_loader) > 0 else 0.0
+                    self.gsn_loss[k] = np.append(self.gsn_loss[k], finetune_loss_epoch[k])
 
-            for k, v in finetune_loss_epoch.items():
-                finetune_loss_epoch[k] = v / (step + 1)
-                self.gsn_loss[k] = np.append(self.gsn_loss[k], finetune_loss_epoch[k])
 
-            wandb.log(
-                {f"{phase}_loss": finetune_loss_epoch["total"]},
-                step=epoch + 1, commit=commit_log
-            )
+                print(f"GSN Training - Total Loss: {finetune_loss_epoch['total']:.4f} "
+                      f"(Chamfer: {finetune_loss_epoch['chmf']:.4f}, Smooth: {finetune_loss_epoch['smooth']:.4f})")
+                print(f"GSN Training - LR: {self.optimizer_gsn.param_groups[0]['lr']:.6f}")
+                print(f"{'='*60}")
 
-            self.lr_scheduler_gsn.step(finetune_loss_epoch["total"])
+                wandb.log(
+                    {f"{phase}_loss": finetune_loss_epoch["total"]},
+                    step=epoch + 1, commit=commit_log
+                )
 
+                self.lr_scheduler_gsn.step(finetune_loss_epoch["total"])
 
     def valid(self, epoch, save_on):
+        print(f"\n--- FULL NETWORK VALIDATION ---")
+        print(f"Phase: Full Pipeline (UNet + ResNet + GSN), Modal: {save_on.upper()}")
+        
         self.decoder.eval()
         self.GSN.eval()
         # if self.super_params._4d:
@@ -1353,8 +1401,20 @@ class TrainPipeline:
                         pred_mesh.verts_padded(), pred_mesh.faces_padded())
                     for pred_mesh in subdiv_mesh
                     ], dim=0)
+
+                # Create 3-pixel thick dilation mask for seg_true_ds
+                dilated_mask = torch.zeros_like(seg_true_ds)
+                for batch_idx in range(seg_true_ds.shape[0]):
+                    # Convert to numpy for dilation, then back to tensor
+                    seg_np = seg_true_ds[batch_idx, 0].cpu().numpy().astype(bool)
+                    dilated_np = binary_dilation(seg_np, iterations=2)
+                    dilated_mask[batch_idx, 0] = torch.from_numpy(dilated_np.astype(np.float32)).to(seg_true_ds.device)
+
+                # Apply dilated mask to voxeld_mesh
+                voxeld_mesh_masked = voxeld_mesh * dilated_mask
                 
-                msh_metric_batch_decoder(voxeld_mesh, (seg_true_ds == 2).to(torch.float32))
+                seg_true_ds = (seg_true_ds == 2).to(torch.float32)
+                msh_metric_batch_decoder(voxeld_mesh_masked, seg_true_ds)
 
                 if step == choice_case:
                     df_true = df_true
@@ -1372,29 +1432,18 @@ class TrainPipeline:
         # log dice score
         self.eval_df_score["myo"] = np.append(self.eval_df_score["myo"], df_metric_batch_decoder.aggregate().cpu())
         self.eval_msh_score["myo"] = np.append(self.eval_msh_score["myo"], msh_metric_batch_decoder.aggregate().cpu())
-        draw_train_loss(
-            # self.ndf_loss if self.super_params._4d else self.gsn_loss, 
-            self.gsn_loss,
-            self.super_params, task_code="dynamic", phase="train",
-            ckpt_dir=self.ckpt_dir
-            )
-        draw_eval_score(self.eval_df_score, self.super_params, task_code="dynamic", module="df", ckpt_dir=self.ckpt_dir)
-        draw_eval_score(self.eval_msh_score, self.super_params, task_code="dynamic", module="msh", ckpt_dir=self.ckpt_dir)
         
         # Calculate evaluation score
         eval_score_epoch = msh_metric_batch_decoder.aggregate().mean()
+        df_score_epoch = df_metric_batch_decoder.aggregate().mean()
+        
+        print(f"Mesh Dice Score: {eval_score_epoch:.4f}")
+        print(f"Distance Field MSE: {df_score_epoch:.4f}")
+        print(f"Current Best Score: {self.best_eval_score:.4f}")
         
         # Initialize dictionary to collect all validation logs for this epoch
         log_data_valid = {}
         
-        log_data_valid["train_categorised_loss"] = wandb.Table(
-            columns=[f"train_loss \u2193", f"eval_df_error \u2193", f"eval_msh_score \u2191"],
-            data=[[
-                wandb.Image(f"{self.ckpt_dir}/train_loss.png"),
-                wandb.Image(f"{self.ckpt_dir}/eval_df_score.png"),
-                wandb.Image(f"{self.ckpt_dir}/eval_msh_score.png"),
-            ]]
-        )
         log_data_valid["eval_score"] = eval_score_epoch
         # log_data_valid["epoch"] = epoch + 1  # Add epoch as a custom x-axis
         
@@ -1414,6 +1463,9 @@ class TrainPipeline:
             
             self.best_eval_score = eval_score_epoch
             wandb.run.summary["best_eval_score"] = eval_score_epoch
+            
+            print(f"*** NEW BEST VALIDATION SCORE: {eval_score_epoch:.4f} ***")
+            print(f"Saving best model and generating visualizations...")
 
             # save visualization when the eval score is the best
             # Set up visualization directory
@@ -1478,8 +1530,9 @@ class TrainPipeline:
         # Single log call for the validation phase
         if log_data_valid:
             wandb.log(log_data_valid, step=epoch + 1, commit=True)
+        
+        print(f"--- END FULL NETWORK VALIDATION ---\n")
          
-
     @torch.no_grad()
     def test(self, save_on):
         # load networks
@@ -1597,6 +1650,17 @@ class TrainPipeline:
                 end_time = time.time()
                 total_inference_time += (end_time - start_time)
 
+                # Create 3-pixel thick dilation mask for seg_true_ds
+                dilated_mask = torch.zeros_like(seg_true_ds)
+                for batch_idx in range(seg_true_ds.shape[0]):
+                    # Convert to numpy for dilation, then back to tensor
+                    seg_np = seg_true_ds[batch_idx, 0].cpu().numpy().astype(bool)
+                    dilated_np = binary_dilation(seg_np, iterations=2)
+                    dilated_mask[batch_idx, 0] = torch.from_numpy(dilated_np.astype(np.float32)).to(seg_true_ds.device)
+
+                # Apply dilated mask to voxeld_mesh
+                voxeld_mesh_masked = voxeld_mesh * dilated_mask
+
                 # Generate ground truth mesh using surface_extractor
                 try:
                     mesh_true_gt = self.surface_extractor(seg_true_ds, labels=2)  # Only extract myocardium (label 2)
@@ -1641,7 +1705,7 @@ class TrainPipeline:
                 # actual_heart_size_in_pixel.append(list(data[f"{modal}_label_ds"].applied_operations[3 if self.super_params.target == "acdc" else 4]["orig_size"]))
 
                 seg_true_ds = (seg_true_ds == 2).to(torch.float32)
-                msh_metric_batch_decoder(voxeld_mesh, seg_true_ds)
+                msh_metric_batch_decoder(voxeld_mesh_masked, seg_true_ds)
 
                 # Store visualization data for later processing
                 if step == choice_case:
@@ -2028,4 +2092,236 @@ class TrainPipeline:
                     # save each mesh as a time instance
                     save_obj(f"{self.out_dir}/myo/f0/{id}-{i:02d}.obj", 
                             subdiv_mesh[i].verts_packed(), subdiv_mesh[i].faces_packed())
+            
+    @torch.no_grad()
+    def validate_segmentation(self, epoch, save_on, commit=True):
+        """
+        Dedicated validation method for computing dice scores between segmentation predictions and ground truth.
+        Phase-aware validation:
+        - UNet phase: Validate both encoder_ct AND encoder_mr directly (no ResNet refinement)
+        - ResNet phase: Validate only the specific modal encoder WITH ResNet refinement
+        """
+        print(f"\n--- SEGMENTATION VALIDATION ---")
+        
+        # Determine current training phase
+        is_unet_phase = epoch < self.super_params.pretrain_epochs
+        phase_name = "UNet" if is_unet_phase else ("ResNet" if epoch < self.super_params.train_epochs else "GSN")
+        print(f"Phase: {phase_name}, Modal: {save_on.upper()}")
+        
+        log_data_validation = {}
+        
+        if is_unet_phase:
+            # UNet phase: Validate both CT and MR encoders directly
+            if self.ct_valid_loader is not None:
+                self.encoder_ct.eval()
+                ct_dice_scores = {"lv": [], "rv": [], "myo": []}
+                
+                for step, data_ct in enumerate(self.ct_valid_loader):
+                    img_ct, seg_true_ct = (
+                        data_ct["ct_image"].to(DEVICE),
+                        data_ct["ct_label"].to(DEVICE),
+                    )
+                    
+                    seg_pred_ct = sliding_window_inference(
+                        img_ct,
+                        roi_size=self.super_params.crop_window_size,
+                        sw_batch_size=4,
+                        predictor=self.encoder_ct,
+                        overlap=0.5,
+                        mode="gaussian",
+                    )
+                    
+                    # Convert to one-hot for DiceMetric
+                    seg_pred_onehot = self._convert_to_onehot(seg_pred_ct, self.super_params.num_classes, is_prediction=True)
+                    seg_true_onehot = self._convert_to_onehot(seg_true_ct, self.super_params.num_classes, is_prediction=False)
+                    
+                    # Compute dice scores for each class
+                    dice_metric = DiceMetric(include_background=False, reduction="mean")
+                    dice_scores = dice_metric(seg_pred_onehot, seg_true_onehot)
+                    
+                    if dice_scores.shape[1] >= 3:  # Ensure we have at least 3 classes
+                        ct_dice_scores["lv"].append(dice_scores[0, 0].item())  # Class 1: LV
+                        if dice_scores.shape[1] > 2:
+                            ct_dice_scores["myo"].append(dice_scores[0, 1].item())  # Class 2: MYO
+                        if dice_scores.shape[1] > 3:
+                            ct_dice_scores["rv"].append(dice_scores[0, 2].item())  # Class 3: RV
+                
+                # Log CT validation metrics
+                if ct_dice_scores["lv"]:
+                    ct_avg_dice = {k: np.mean(v) for k, v in ct_dice_scores.items() if v}
+                    log_data_validation.update({
+                        f"val_ct_dice_{k}": v for k, v in ct_avg_dice.items()
+                    })
+                    print(f"CT Dice Scores - LV: {ct_avg_dice.get('lv', 0):.4f}, "
+                          f"MYO: {ct_avg_dice.get('myo', 0):.4f}, RV: {ct_avg_dice.get('rv', 0):.4f}")
+            
+            if self.mr_valid_loader is not None:
+                self.encoder_mr.eval()
+                mr_dice_scores = {"lv": [], "rv": [], "myo": []}
+                
+                for step, data_mr in enumerate(self.mr_valid_loader):
+                    img_mr, seg_true_mr = (
+                        data_mr["mr_image"].to(DEVICE),
+                        data_mr["mr_label"].to(DEVICE),
+                    )
+                    
+                    # Filter out slices without labels for MR
+                    img_mr, seg_true_mr = self._filter_unlabeled_slices(img_mr, seg_true_mr)
+                    
+                    seg_pred_mr = sliding_window_inference(
+                        img_mr,
+                        roi_size=self.super_params.crop_window_size[:2],
+                        sw_batch_size=4,
+                        predictor=self.encoder_mr,
+                        overlap=0.5,
+                        mode="gaussian",
+                    )
+                    
+                    # Convert to one-hot for DiceMetric
+                    seg_pred_onehot = self._convert_to_onehot(seg_pred_mr, self.super_params.num_classes, is_prediction=True)
+                    seg_true_onehot = self._convert_to_onehot(seg_true_mr, self.super_params.num_classes, is_prediction=False)
+                    
+                    # Compute dice scores for each class
+                    dice_metric = DiceMetric(include_background=False, reduction="mean")
+                    dice_scores = dice_metric(seg_pred_onehot, seg_true_onehot)
+                    
+                    if dice_scores.shape[1] >= 3:  # Ensure we have at least 3 classes
+                        mr_dice_scores["lv"].append(dice_scores[0, 1].item())  # Class 1: LV
+                        if dice_scores.shape[1] > 2:
+                            mr_dice_scores["myo"].append(dice_scores[0, 2].item())  # Class 2: MYO
+                        if dice_scores.shape[1] > 3:
+                            mr_dice_scores["rv"].append(dice_scores[0, 3].item())  # Class 3: RV
+                
+                # Log MR validation metrics
+                if mr_dice_scores["lv"]:
+                    mr_avg_dice = {k: np.mean(v) for k, v in mr_dice_scores.items() if v}
+                    log_data_validation.update({
+                        f"val_mr_dice_{k}": v for k, v in mr_avg_dice.items()
+                    })
+                    print(f"MR Dice Scores - LV: {mr_avg_dice.get('lv', 0):.4f}, "
+                          f"MYO: {mr_avg_dice.get('myo', 0):.4f}, RV: {mr_avg_dice.get('rv', 0):.4f}")
+        
+        else:
+            # ResNet phase: Validate only the specific modal with ResNet refinement
+            if save_on == "sct" and self.ct_valid_loader is not None:
+                self.encoder_ct.eval()
+                self.decoder.eval()
+                ct_dice_scores = {"lv": [], "rv": [], "myo": []}
+                
+                for step, data_ct in enumerate(self.ct_valid_loader):
+                    img_ct, seg_true_ct, seg_true_ct_ds = (
+                        data_ct["ct_image"].to(DEVICE),
+                        data_ct["ct_label"].to(DEVICE),
+                        data_ct["ct_label_ds"].to(DEVICE),
+                    )
+                    
+                    # UNet prediction
+                    seg_pred_ct = sliding_window_inference(
+                        img_ct,
+                        roi_size=self.super_params.crop_window_size,
+                        sw_batch_size=4,
+                        predictor=self.encoder_ct,
+                        overlap=0.5,
+                        mode="gaussian",
+                    )
+                    
+                    # Apply post-transform to get downsampled version
+                    seg_pred_ct_ds = self._memory_efficient_post_transform(seg_pred_ct, seg_true_ct, "ct", to_gpu=True)
+                    
+                    # Apply ResNet refinement
+                    binary_mask_pred = (torch.argmax(seg_pred_ct_ds, dim=1, keepdim=True) == 0)
+                    dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + 
+                                    distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
+                    mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor + 1).detach()
+                    mask = mask * binary_mask_pred
+                    mask[mask < self.mask_threshold] = 0
+                    
+                    # Apply padding for ResNet compatibility
+                    seg_pred_ct_ds_padded, pad_info = self._apply_resnet_padding(seg_pred_ct_ds)
+                    resnet_output_padded = self.decoder(seg_pred_ct_ds_padded)
+                    resnet_output = self._remove_resnet_padding(resnet_output_padded, pad_info)
+                    
+                    # Final refined prediction
+                    seg_pred_ct_refined = seg_pred_ct_ds + mask * resnet_output
+                    
+                    # Use downsampled ground truth for comparison
+                    seg_true_ct_ds = seg_true_ct_ds.to(DEVICE)
+                    
+                    # Convert to one-hot for DiceMetric
+                    seg_pred_onehot = self._convert_to_onehot(seg_pred_ct_refined, self.super_params.num_classes, is_prediction=True)
+                    seg_true_onehot = self._convert_to_onehot(seg_true_ct_ds, self.super_params.num_classes, is_prediction=False)
+                    
+                    # Compute dice scores for each class
+                    dice_metric = DiceMetric(include_background=False, reduction="mean")
+                    dice_scores = dice_metric(seg_pred_onehot, seg_true_onehot)
+                    
+                    if dice_scores.shape[1] >= 3:  # Ensure we have at least 3 classes
+                        ct_dice_scores["lv"].append(dice_scores[0, 1].item())  # Class 1: LV
+                        if dice_scores.shape[1] > 2:
+                            ct_dice_scores["myo"].append(dice_scores[0, 2].item())  # Class 2: MYO
+                        if dice_scores.shape[1] > 3:
+                            ct_dice_scores["rv"].append(dice_scores[0, 3].item())  # Class 3: RV
+                
+                # Log CT validation metrics
+                if ct_dice_scores["lv"]:
+                    ct_avg_dice = {k: np.mean(v) for k, v in ct_dice_scores.items() if v}
+                    log_data_validation.update({
+                        f"val_ct_dice_{k}": v for k, v in ct_avg_dice.items()
+                    })
+                    print(f"CT Dice Scores (ResNet refined) - LV: {ct_avg_dice.get('lv', 0):.4f}, "
+                          f"MYO: {ct_avg_dice.get('myo', 0):.4f}, RV: {ct_avg_dice.get('rv', 0):.4f}")
+            
+            elif save_on == "cap" and self.mr_valid_loader is not None:
+                # For MR, ResNet phase validation would be similar but we don't have ResNet for MR
+                # So we just validate the MR encoder directly
+                self.encoder_mr.eval()
+                mr_dice_scores = {"lv": [], "rv": [], "myo": []}
+                
+                for step, data_mr in enumerate(self.mr_valid_loader):
+                    img_mr, seg_true_mr = (
+                        data_mr["mr_image"].to(DEVICE),
+                        data_mr["mr_label"].to(DEVICE),
+                    )
+                    
+                    # Filter out slices without labels for MR
+                    img_mr, seg_true_mr = self._filter_unlabeled_slices(img_mr, seg_true_mr)
+                    
+                    seg_pred_mr = sliding_window_inference(
+                        img_mr,
+                        roi_size=self.super_params.crop_window_size[:2],
+                        sw_batch_size=4,
+                        predictor=self.encoder_mr,
+                        overlap=0.5,
+                        mode="gaussian",
+                    )
+                    
+                    # Convert to one-hot for DiceMetric
+                    seg_pred_onehot = self._convert_to_onehot(seg_pred_mr, self.super_params.num_classes, is_prediction=True)
+                    seg_true_onehot = self._convert_to_onehot(seg_true_mr, self.super_params.num_classes, is_prediction=False)
+                    
+                    # Compute dice scores for each class
+                    dice_metric = DiceMetric(include_background=False, reduction="mean")
+                    dice_scores = dice_metric(seg_pred_onehot, seg_true_onehot)
+                    
+                    if dice_scores.shape[1] >= 3:  # Ensure we have at least 3 classes
+                        mr_dice_scores["lv"].append(dice_scores[0, 1].item())  # Class 1: LV
+                        if dice_scores.shape[1] > 2:
+                            mr_dice_scores["myo"].append(dice_scores[0, 2].item())  # Class 2: MYO
+                        if dice_scores.shape[1] > 3:
+                            mr_dice_scores["rv"].append(dice_scores[0, 3].item())  # Class 3: RV
+                
+                # Log MR validation metrics
+                if mr_dice_scores["lv"]:
+                    mr_avg_dice = {k: np.mean(v) for k, v in mr_dice_scores.items() if v}
+                    log_data_validation.update({
+                        f"val_mr_dice_{k}": v for k, v in mr_avg_dice.items()
+                    })
+                    print(f"MR Dice Scores - LV: {mr_avg_dice.get('lv', 0):.4f}, "
+                          f"MYO: {mr_avg_dice.get('myo', 0):.4f}, RV: {mr_avg_dice.get('rv', 0):.4f}")
+        
+        # Log all validation metrics
+        if log_data_validation:
+            wandb.log(log_data_validation, step=epoch + 1, commit=commit)
+        
+        print(f"--- END SEGMENTATION VALIDATION ---\n")
             

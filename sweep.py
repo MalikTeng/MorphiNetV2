@@ -42,7 +42,7 @@ def train(sweep_params=None):
             )
 
         current_training_phase = "unet"
-        pipeline._data_warper(rotation=False, training_phase=current_training_phase)
+        pipeline.prepare_all_dataloaders(data_types=["train"], training_phase=current_training_phase)
 
         has_unet_ckpt = False
 
@@ -74,7 +74,7 @@ def train(sweep_params=None):
                 if not has_unet_ckpt:
                     if current_training_phase != new_phase:
                         current_training_phase = new_phase
-                        pipeline._data_warper(rotation=False, training_phase=current_training_phase)
+                        pipeline.prepare_all_dataloaders(data_types=["train"], training_phase=current_training_phase)
                     pipeline.train_iter(epoch, "unet")
                 else:
                     print(f"Skipping UNet training (epoch {epoch}) - using checkpoint")
@@ -83,7 +83,7 @@ def train(sweep_params=None):
                 new_phase = "resnet"
                 if current_training_phase != new_phase:
                     current_training_phase = new_phase
-                    pipeline._data_warper(rotation=False, training_phase=current_training_phase)
+                    pipeline.prepare_all_dataloaders(data_types=["train"], training_phase=current_training_phase)
                 
                 pipeline.train_iter(epoch, "resnet")
             
@@ -91,7 +91,7 @@ def train(sweep_params=None):
                 new_phase = "gsn"
                 if current_training_phase != new_phase:
                     current_training_phase = new_phase
-                    pipeline._data_warper(rotation=False, training_phase=current_training_phase)
+                    pipeline.prepare_all_dataloaders(data_types=["train"], training_phase=current_training_phase)
 
                 will_validate_this_epoch = (epoch - cfg.train_epochs) % cfg.val_interval == 0
                 pipeline.train_iter(epoch, "gsn", commit_log=not will_validate_this_epoch)
@@ -100,7 +100,7 @@ def train(sweep_params=None):
                     pipeline.update_precomputed_faces()
                 
                 if will_validate_this_epoch:
-                    pipeline.prepare_validation_specific_dataloaders(rotation=False)
+                    pipeline.prepare_all_dataloaders(data_types=["valid"], validation_phase="gsn")
                     pipeline.valid(epoch, cfg.save_on)
                     pipeline._clear_dataloader("ct" if cfg.save_on == "sct" else "mr", "valid")
 

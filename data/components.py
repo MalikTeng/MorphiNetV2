@@ -9,7 +9,7 @@ from monai.transforms.utils import distance_transform_edt
 import nibabel as nib
 
 
-__all__ = ["Maskd", "DFConvertd", "Adjustd", "FlexResized", "Probd"]
+__all__ = ["Maskd", "DFConvertd", "Adjustd", "FlexResized", "Probd", "DynUNetPaddingd"]
 
 
 class Maskd(MapTransform):
@@ -183,5 +183,164 @@ class DFConvertd(MapTransform):
         # data.pop(self.key)
 
         return data
+
+
+class DynUNetPaddingd(MapTransform):
+    """
+    Pad spatial dimensions to ensure compatibility with DynUNet skip connections.
+    
+    This transform pads the spatial dimensions (height, width, depth) to be divisible 
+    by the stride factor, preventing odd shapes in DynUNet encoder/decoder layers.
+    
+    For 2D DynUNet (MR): pads H, W dimensions
+    For 3D DynUNet (CT): pads H, W, D dimensions
+    
+    Args:
+        keys: Keys to apply the padding to (typically image and label)
+        strides: Stride configuration (e.g., (1, 2, 2, 2, 2))
+        spatial_dims: Either 2 for 2D DynUNet or 3 for 3D DynUNet
+        mode: Padding mode ('constant', 'reflect', 'replicate', 'circular')
+        value: Padding value when mode='constant'
+    """
+    def __init__(
+        self, 
+        keys: KeysCollection, 
+        strides: tuple = (1, 2, 2, 2, 2),
+        spatial_dims: int = 3,
+        mode: str = "constant",
+        value: float = 0.0,
+        allow_missing_keys: bool = False
+    ) -> None:
+        super().__init__(keys, allow_missing_keys)
+        self.strides = strides
+        self.spatial_dims = spatial_dims
+        self.mode = mode
+        self.value = value
+        
+        # Calculate stride factor for spatial dimensions
+        # For DynUNet with default 5-level architecture: strides = (1, 2, 2, 2, 2)
+        # The stride factor should be the product of the downsampling strides
+        if self.spatial_dims == 2:
+            # For 2D DynUNet, typically use 4 levels: stride factor = 2*2*2 = 8
+            effective_strides = self.strides[1:4]  # Skip first stride, take next 3
+        elif self.spatial_dims == 3:
+            # For 3D DynUNet, typically use 4 levels: stride factor = 2*2*2 = 8  
+            effective_strides = self.strides[1:4]  # Skip first stride, take next 3
+        else:
+            raise ValueError(f"Unsupported spatial_dims: {self.spatial_dims}. Must be 2 or 3.")
+        
+        self.stride_factor = 1
+        for s in effective_strides:
+            self.stride_factor *= s
+        
+        # Silent initialization - no logging
+        # Store configuration for debugging if needed
+        self._config_info = {
+            'spatial_dims': self.spatial_dims,
+            'strides': self.strides,
+            'effective_strides': effective_strides,
+            'stride_factor': self.stride_factor
+        }
+
+    def __call__(self, data):
+        data_dict = dict(data)
+        
+        # Iterate through the keys explicitly
+        for key in self.keys:
+            if key not in data_dict:
+                if self.allow_missing_keys:
+                    continue
+                else:
+                    raise KeyError(f"Key '{key}' not found in data")
+                    
+            try:
+                array = data_dict[key]
+                
+                # Ensure we work with CPU arrays to avoid GPU memory issues
+                if hasattr(array, 'is_cuda') and array.is_cuda:
+                    array = array.cpu()
+                
+                if hasattr(array, 'get_array'):
+                    pixel_array = array.get_array()
+                else:
+                    pixel_array = array
+                
+                # Get original shape
+                original_shape = pixel_array.shape
+                
+                if len(original_shape) == 4:  # (C, H, W, D) format
+                    c, h, w, d = original_shape
+                    
+                    if self.spatial_dims == 2:
+                        # 2D DynUNet: pad only H, W dimensions
+                        pad_h = (self.stride_factor - h % self.stride_factor) % self.stride_factor
+                        pad_w = (self.stride_factor - w % self.stride_factor) % self.stride_factor
+                        
+                        if pad_h > 0 or pad_w > 0:
+                            # PyTorch pad format: (D_left, D_right, W_left, W_right, H_left, H_right)
+                            padding = (0, 0, 0, pad_w, 0, pad_h)
+                            
+                            # Apply padding
+                            if isinstance(pixel_array, torch.Tensor):
+                                import torch.nn.functional as F
+                                padded_array = F.pad(pixel_array, padding, mode=self.mode, value=self.value)
+                            else:
+                                # Convert to tensor, pad, then convert back
+                                tensor_array = torch.from_numpy(pixel_array) if isinstance(pixel_array, np.ndarray) else pixel_array
+                                import torch.nn.functional as F
+                                padded_tensor = F.pad(tensor_array, padding, mode=self.mode, value=self.value)
+                                padded_array = padded_tensor.numpy() if isinstance(pixel_array, np.ndarray) else padded_tensor
+                            
+                            # Silent padding - no logging
+                            pass
+                        else:
+                            padded_array = pixel_array
+                    
+                    elif self.spatial_dims == 3:
+                        # 3D DynUNet: pad H, W, D dimensions
+                        pad_h = (self.stride_factor - h % self.stride_factor) % self.stride_factor
+                        pad_w = (self.stride_factor - w % self.stride_factor) % self.stride_factor
+                        pad_d = (self.stride_factor - d % self.stride_factor) % self.stride_factor
+                        
+                        if pad_h > 0 or pad_w > 0 or pad_d > 0:
+                            # PyTorch pad format: (D_left, D_right, W_left, W_right, H_left, H_right)  
+                            padding = (0, pad_d, 0, pad_w, 0, pad_h)
+                            
+                            # Apply padding
+                            if isinstance(pixel_array, torch.Tensor):
+                                import torch.nn.functional as F
+                                padded_array = F.pad(pixel_array, padding, mode=self.mode, value=self.value)
+                            else:
+                                # Convert to tensor, pad, then convert back
+                                tensor_array = torch.from_numpy(pixel_array) if isinstance(pixel_array, np.ndarray) else pixel_array
+                                import torch.nn.functional as F
+                                padded_tensor = F.pad(tensor_array, padding, mode=self.mode, value=self.value)
+                                padded_array = padded_tensor.numpy() if isinstance(pixel_array, np.ndarray) else padded_tensor
+                            
+                            # Silent padding - no logging
+                            pass
+                        else:
+                            padded_array = pixel_array
+                    
+                    # Update the data with padded array, preserving metadata
+                    if hasattr(array, 'affine'):
+                        # Create new MetaTensor with preserved metadata
+                        if hasattr(array, 'applied_operations'):
+                            data_dict[key] = MetaTensor(padded_array, affine=array.affine, 
+                                                       applied_operations=array.applied_operations)
+                        else:
+                            data_dict[key] = MetaTensor(padded_array, affine=array.affine)
+                    else:
+                        data_dict[key] = padded_array
+                
+                else:
+                    print(f"Skipping {key}: unsupported shape {original_shape}. Expected 4D (C, H, W, D).")
+                    
+            except Exception as e:
+                if not self.allow_missing_keys:
+                    raise KeyError(f"Error processing key '{key}' in DynUNetPaddingd: {str(e)}")
+                print(f"Warning: Skipping key '{key}' due to error: {str(e)}")
+        
+        return data_dict
 
 

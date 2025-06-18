@@ -109,7 +109,7 @@ def test(super_params):
         is_training=False,
         target="acdc" if super_params.target == "acdc" else None
     )
-    pipeline.prepare_test_specific_dataloaders(rotation=False)
+    pipeline.prepare_all_dataloaders(data_types=["test"], validation_phase="network")
     pipeline.test(super_params.save_on)
 
     # Note: The test() method now includes post-processing of subdiv_mesh
@@ -131,7 +131,8 @@ def ablation(super_params):
         seed=42, num_workers=0,
         is_training=False
     )
-    pipeline.prepare_test_specific_dataloaders(rotation=False)
+    # Use the new unified function to prepare test dataloaders
+    pipeline.prepare_all_dataloaders(data_types=["test"], validation_phase="network")
     pipeline.ablation_study(super_params.save_on)
 
 
