@@ -32,6 +32,7 @@ def pre_transform(
         keys: tuple, modal: str, section: str,
         crop_window_size: list, pixdim: list, spacing: float = 2.0,
         phase: str = "validation",  # "unet", "resnet", "gsn", "ndf", "validation"
+        upscale_ratio: int = 2,  # Add upscale_ratio parameter for decoder-sized distance field
         **kwargs
 ):
     """
@@ -86,16 +87,19 @@ def pre_transform(
                            allow_missing_keys=True),
         ])
 
-    # Determine if full data (including _ds and _df keys) is needed
-    load_full_data = phase not in ["unet", "gsn"]
+    # Only load distance fields for validation (distance fields are only needed for @valid)
+    load_distance_fields = (section == "valid")
 
-    if load_full_data:
+    if load_distance_fields:
+        # Calculate target size for distance field (decoder-sized for validation)
+        df_target_size = int(crop_window_size[0] // pixdim[0] * upscale_ratio)
+        
         transforms.extend([
             CopyItemsd(keys[1], names=f"{keys[1]}_ds"),
             Spacingd(f"{keys[1]}_ds", [spacing] * 3,
                     mode="nearest", padding_mode="zeros"),
             CropForegroundd(f"{keys[1]}_ds", source_key=f"{keys[1]}_ds"),
-            # create distance field from down-sampled label
+            # create distance field from down-sampled label at decoder size
             Maskd([f"{keys[1]}_ds", f"{keys[1][:2]}"], allow_missing_keys=True),
             FlexResized(
                 f"{keys[1]}_ds", 
@@ -103,12 +107,12 @@ def pre_transform(
                 ),
             Resized(
                 f"{keys[1]}_ds", 
-                int(crop_window_size[0] // pixdim[0]), 
+                df_target_size,  # Use decoder-sized target for validation
                 size_mode="longest", mode="nearest-exact"
                 ),
             ResizeWithPadOrCropd(
                 f"{keys[1]}_ds", 
-                int(crop_window_size[0] // pixdim[0]), 
+                df_target_size,  # Use decoder-sized target for validation
                 mode="constant", value=0
                 ),
             DFConvertd(f"{keys[1]}_ds"),
@@ -138,14 +142,13 @@ def pre_transform(
             # normalize the image intensity to 0-1
             ScaleIntensityRangePercentilesd(keys[0], lower=1, upper=99, b_min=0.0, b_max=1.0, clip=True, allow_missing_keys=True),
         ])
-        float_keys_train_no_rot = [keys[0]]
-        int_keys_train_no_rot = [keys[1]]
-        if load_full_data:
-            float_keys_train_no_rot.append(f"{keys[0][:2]}_df")
-            int_keys_train_no_rot.append(f"{keys[1]}_ds")
+        float_keys_train = [keys[0]]
+        int_keys_train = [keys[1]]
+        if load_distance_fields:
+            float_keys_train.append(f"{keys[0][:2]}_df")
         transforms.extend([
-            EnsureTyped(float_keys_train_no_rot, data_type="tensor", dtype=torch.float32, allow_missing_keys=True),
-            EnsureTyped(int_keys_train_no_rot, data_type="tensor", dtype=torch.int8, allow_missing_keys=True),
+            EnsureTyped(float_keys_train, data_type="tensor", dtype=torch.float32, allow_missing_keys=True),
+            EnsureTyped(int_keys_train, data_type="tensor", dtype=torch.int8, allow_missing_keys=True),
         ])
     else: # "valid" or "test" section
         transforms.extend([
@@ -153,9 +156,8 @@ def pre_transform(
         ])
         float_keys_valid = [keys[0]]
         int_keys_valid = [keys[1]]
-        if load_full_data:
+        if load_distance_fields:
             float_keys_valid.append(f"{keys[0][:2]}_df")
-            int_keys_valid.append(f"{keys[1]}_ds")
         transforms.extend([
             EnsureTyped(float_keys_valid, data_type="tensor", dtype=torch.float32, allow_missing_keys=True),
             EnsureTyped(int_keys_valid, data_type="tensor", dtype=torch.int8, allow_missing_keys=True),

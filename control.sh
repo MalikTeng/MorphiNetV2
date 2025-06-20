@@ -1,90 +1,56 @@
 #!/bin/bash
 
-# # ---- Run the training script with only mr data ----
-# python main.py \
-#     --save_on cap \
-#     \
-#     --mr_json_dir ./dataset/dataset_task11_f0.json \
-#     --mr_data_dir /mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX \
-#     \
-#     --template_mesh_dir ./template/template_mesh-myo.obj \
-#     --use_ckpt /mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2024-08-10-2338 \
-#     \
-#     --max_epochs 150 \
-#     --pretrain_epochs 1 \
-#     --train_epochs 81 \
-#     --val_interval 10 \
-#     \
-#     --hidden_features_gsn 16 \
-#     --pixdim 4 4 4 \
-#     --lambda_0 0.56 \
-#     --lambda_1 0.12 \
-#     --iteration 10 \
-#     \
-#     --lr 0.001 \
-#     --batch_size 1 \
-#     --mode online \
-#     --_mr
+# MorphiNet Training Control Script - Modular Architecture
+# This script launches the modular MorphiNet training pipeline
 
-# ---- Run the training script with both ct & mr data----
-CT_RATIO=(1.0)
-for ratio in "${CT_RATIO[@]}"
-do
-    python main.py \
-        --save_on sct \
-        \
-        --mr_json_dir ./dataset/dataset_task11_f0.json \
-        --mr_data_dir /mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX \
-        \
-        --use_ckpt n \
-        --template_mesh_dir ./template/template_mesh-myo.obj \
-        \
-        --max_epochs 200 \
-        --pretrain_epochs 100 \
-        --train_epochs 150 \
-        --val_interval 5 \
-        \
-        --pixdim 4 4 4 \
-        --filters 8 16 32 64 128 \
-        --kernel_size 3 3 3 3 3 \
-        --strides 1 2 2 2 2 \
-        --lambda_0 0.18 \
-        --layers 1 2 2 4 \
-        --lambda_1 0.64 \
-        \
-        --hidden_features_gsn 64 \
-        --iteration 10 \
-        --sigmoid_scale_factor 0.55 \
-        \
-        --lr 0.001 \
-        --batch_size 1 \
-        --mode online \
-        --ct_ratio "$ratio"
-done
+echo "================================================="
+echo "MorphiNet Training - Modular Architecture"
+echo "================================================="
 
-# # ---- Run the training script with both mr and ct data for 4D creation----
+# Default parameters - modify as needed
+SAVE_ON="sct"
+MR_JSON_DIR="./dataset/dataset_task11_f0.json"
+MR_DATA_DIR="/path/to/your/mr/data"
+CT_JSON_DIR="./dataset/dataset_task20_f0.json"
+CT_DATA_DIR="/path/to/your/ct/data"
+TEMPLATE_MESH_DIR="./template/template_mesh-myo.obj"
 
-# python main.py \
-#     --save_on cap \
-#     \
-#     --mr_json_dir ./dataset/dataset_task10_f0.json \
-#     --mr_data_dir /mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset010_CAP_SAX_NRRD \
-#     \
-#     --template_mesh_dir ./template/template_mesh-myo.obj \
-#     --use_ckpt /mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2024-08-18-1346 \
-#     \
-#     --max_epochs 200 \
-#     --pretrain_epochs 100 \
-#     --train_epochs 150 \
-#     --val_interval 10 \
-#     \
-#     --hidden_features_gsn 16 \
-#     --pixdim 4 4 4 \
-#     --lambda_0 0.56 \
-#     --lambda_1 0.12 \
-#     --iteration 10 \
-#     \
-#     --lr 0.001 \
-#     --batch_size 1 \
-#     --mode online \
-#     --_4d
+# Training parameters
+MAX_EPOCHS=10
+PRETRAIN_EPOCHS=3
+TRAIN_EPOCHS=5
+VAL_INTERVAL=1
+BATCH_SIZE=1
+LR=0.001
+
+# Model parameters
+SUBDIV_LEVELS=2
+HIDDEN_FEATURES_GSN=64
+LAMBDA_0=2.07
+LAMBDA_1=0.89
+ITERATION=5
+
+# Run the modular training
+python main.py \
+    --save_on $SAVE_ON \
+    --mr_json_dir $MR_JSON_DIR \
+    --mr_data_dir $MR_DATA_DIR \
+    --ct_json_dir $CT_JSON_DIR \
+    --ct_data_dir $CT_DATA_DIR \
+    --template_mesh_dir $TEMPLATE_MESH_DIR \
+    --max_epochs $MAX_EPOCHS \
+    --pretrain_epochs $PRETRAIN_EPOCHS \
+    --train_epochs $TRAIN_EPOCHS \
+    --val_interval $VAL_INTERVAL \
+    --batch_size $BATCH_SIZE \
+    --lr $LR \
+    --subdiv_levels $SUBDIV_LEVELS \
+    --hidden_features_gsn $HIDDEN_FEATURES_GSN \
+    --lambda_0 $LAMBDA_0 \
+    --lambda_1 $LAMBDA_1 \
+    --iteration $ITERATION \
+    --mode online
+
+echo "================================================="
+echo "Training completed!"
+echo "================================================="

@@ -30,266 +30,7 @@ from monai.transforms.utils import distance_transform_edt
 
 from .parts import ResNetBlock, ResNetBottleneck
 
-__all__ = ["GSN", "Subdivision", "NODEBlock", "LocalMeshWarper"]
-
-
-class AutoEncoder(nn.Module):
-    """
-        concate the encoder and decoder to predict the distance field. down-sample should be applied to scale the output segmentation into sizes matching the target distance field.
-    """
-    def __init__(self, encoder, decoder, downsample_scale, spatial_dims=3) -> None:
-        super().__init__()
-
-        conv_type: Union[nn.Conv1d, nn.Conv2d, nn.Conv3d] = Conv[Conv.CONV, spatial_dims]
-        norm_type: Union[nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d] = Norm[Norm.BATCH, spatial_dims]
-
-        self.encoder = encoder
-        self.decoder = decoder
-
-        num_layers = torch.log2(torch.tensor(downsample_scale)).int().item()
-        ds_layer = []
-        for _ in range(num_layers):
-            ds_layer.extend([
-                conv_type(
-                    encoder.out_channels, encoder.out_channels, 
-                    kernel_size=3, stride=2, padding=1, bias=True
-                    ),
-                norm_type(encoder.out_channels),
-                ])
-        self.ds_block = nn.Sequential(*ds_layer)
-
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        x_seg = self.encoder(x)
-        x_df = self.ds_block(x_seg)
-        x_df = self.decoder(x_df)
-
-        return x_df, x_seg
-    
-
-class DownSample(nn.Module):
-    """
-    down-sample should be applied to scale the output segmentation into sizes matching the target distance field.
-    """
-    def __init__(self, out_channels, downsample_scale, spatial_dims=3) -> None:
-        super().__init__()
-
-        conv_type: Union[nn.Conv1d, nn.Conv2d, nn.Conv3d] = Conv[Conv.CONV, spatial_dims]
-        norm_type: Union[nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d] = Norm[Norm.BATCH, spatial_dims]
-
-        num_layers = torch.log2(torch.tensor(downsample_scale)).int().item()
-        ds_layer = []
-        for _ in range(num_layers):
-            ds_layer.extend([
-                conv_type(
-                    out_channels, out_channels, 
-                    kernel_size=3, stride=2, padding=1, bias=True
-                    ),
-                norm_type(out_channels),
-                ])
-        self.ds_block = nn.Sequential(*ds_layer)
-
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, x_seg):
-        x_df = self.ds_block(x_seg)
-
-        return x_df
-
-
-class ResNet(nn.Module):
-    """
-    ResNet based on: `Deep Residual Learning for Image Recognition <https://arxiv.org/pdf/1512.03385.pdf>`_
-    and `Can Spatiotemporal 3D CNNs Retrace the History of 2D CNNs and ImageNet? <https://arxiv.org/pdf/1711.09577.pdf>`_.
-    Adapted from `<https://github.com/kenshohara/3D-ResNets-PyTorch/tree/master/models>`_.
-
-    Args:
-        block: which ResNet block to use, either Basic or Bottleneck.
-            ResNet block class or str.
-            for Basic: ResNetBlock or 'basic'
-            for Bottleneck: ResNetBottleneck or 'bottleneck'
-        layers: how many layers to use.
-        block_inplanes: determine the size of planes at each step. Also tunable with widen_factor.
-        spatial_dims: number of spatial dimensions of the input image.
-        n_input_channels: number of input channels for first convolutional layer.
-        conv1_t_size: size of first convolution layer, determines kernel and padding.
-        conv1_t_stride: stride of first convolution layer.
-        no_max_pool: bool argument to determine if to use maxpool layer.
-        shortcut_type: which downsample block to use. Options are 'A', 'B', default to 'B'.
-            - 'A': using `self._downsample_basic_block`.
-            - 'B': kernel_size 1 conv + norm.
-        widen_factor: widen output for each layer.
-        num_classes: number of output (classifications).
-        feed_forward: whether to add the FC layer for the output, default to `True`.
-        bias_downsample: whether to use bias term in the downsampling block when `shortcut_type` is 'B', default to `True`.
-
-    """
-
-    def __init__(
-        self,
-        block: Union[ResNetBlock, ResNetBottleneck, str],
-        layers: list[int],
-        block_inplanes: list[int],
-        spatial_dims: int = 3,
-        n_input_channels: int = 3,
-        conv1_t_size: Union[tuple[int], int] = 7,
-        conv1_t_stride: Union[tuple[int], int] = 1,
-        no_max_pool: bool = False,
-        shortcut_type: str = "B",
-        widen_factor: float = 1.0,
-        num_classes: int = 400,
-        feed_forward: bool = True,
-        bias_downsample: bool = True,  # for backwards compatibility (also see PR #5477)
-    ) -> None:
-        super().__init__()
-
-        if isinstance(block, str):
-            if block == "basic":
-                block = ResNetBlock
-            elif block == "bottleneck":
-                block = ResNetBottleneck
-            else:
-                raise ValueError("Unknown block '%s', use basic or bottleneck" % block)
-
-        conv_type: Union[nn.Conv1d, nn.Conv2d, nn.Conv3d] = Conv[Conv.CONV, spatial_dims]
-        norm_type: Union[nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d] = Norm[Norm.BATCH, spatial_dims]
-
-        block_inplanes = [int(x * widen_factor) for x in block_inplanes]
-
-        self.in_planes = block_inplanes[0]
-        self.no_max_pool = no_max_pool
-        self.bias_downsample = bias_downsample
-
-        conv1_kernel_size = ensure_tuple_rep(conv1_t_size, spatial_dims)
-        conv1_stride = ensure_tuple_rep(conv1_t_stride, spatial_dims)
-
-        # self.conv0 = StandardDynUNet(
-        #     spatial_dims=3, 
-        #     in_channels=num_classes, out_channels=num_classes,
-        #     kernel_size=(3, 3, 3), strides=(1, 2, 2),
-        #     upsample_kernel_size=(2, 2), 
-        #     filters=(16, 32, 64),
-        #     dropout=False, deep_supervision=False, res_block=False,
-        # )
-
-        self.conv1 = conv_type(
-            n_input_channels,
-            self.in_planes,
-            kernel_size=conv1_kernel_size,  # type: ignore
-            stride=conv1_stride,  # type: ignore
-            padding=tuple(k // 2 for k in conv1_kernel_size),  # type: ignore
-            bias=False,
-        )
-        self.bn1 = norm_type(self.in_planes)
-        self.relu = nn.ReLU(inplace=True)
-        self.layer1 = self._make_layer(block, block_inplanes[0], layers[0], spatial_dims, shortcut_type)
-        self.layer2 = self._make_layer(block, block_inplanes[1], layers[1], spatial_dims, shortcut_type)
-        self.layer3 = self._make_layer(block, block_inplanes[2], layers[2], spatial_dims, shortcut_type)
-        self.layer4 = self._make_layer(block, block_inplanes[3], layers[3], spatial_dims, shortcut_type)
-        self.out = conv_type(block_inplanes[3] * block.expansion, 2, kernel_size=1, stride=1, bias=True)
-
-        for m in self.modules():
-            if isinstance(m, conv_type):
-                nn.init.kaiming_normal_(torch.as_tensor(m.weight), mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, norm_type):
-                nn.init.constant_(torch.as_tensor(m.weight), 1)
-                nn.init.constant_(torch.as_tensor(m.bias), 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.constant_(torch.as_tensor(m.bias), 0)
-
-    def _downsample_basic_block(self, x: torch.Tensor, planes: int, stride: int, spatial_dims: int = 3) -> torch.Tensor:
-        out: torch.Tensor = get_pool_layer(("avg", {"kernel_size": 1, "stride": stride}), spatial_dims=spatial_dims)(x)
-        zero_pads = torch.zeros(out.size(0), planes - out.size(1), *out.shape[2:], dtype=out.dtype, device=out.device)
-        out = torch.cat([out.data, zero_pads], dim=1)
-        return out
-
-    def _make_layer(
-        self,
-        block: Union[ResNetBlock, ResNetBottleneck],
-        planes: int,
-        blocks: int,
-        spatial_dims: int,
-        shortcut_type: str,
-        stride: int = 1,
-    ) -> nn.Sequential:
-        conv_type: Callable = Conv[Conv.CONV, spatial_dims]
-        norm_type: Callable = Norm[Norm.BATCH, spatial_dims]
-
-        downsample: Union[nn.Module, partial, None] = None
-        if stride != 1 or self.in_planes != planes * block.expansion:
-            if look_up_option(shortcut_type, {"A", "B"}) == "A":
-                downsample = partial(
-                    self._downsample_basic_block,
-                    planes=planes * block.expansion,
-                    stride=stride,
-                    spatial_dims=spatial_dims,
-                )
-            else:
-                downsample = nn.Sequential(
-                    conv_type(
-                        self.in_planes,
-                        planes * block.expansion,
-                        kernel_size=1,
-                        stride=stride,
-                        bias=self.bias_downsample,
-                    ),
-                    norm_type(planes * block.expansion),
-                )
-
-        layers = [
-            block(
-                in_planes=self.in_planes, planes=planes, spatial_dims=spatial_dims, stride=stride, downsample=downsample
-            )
-        ]
-
-        self.in_planes = planes * block.expansion
-        for _i in range(1, blocks):
-            layers.append(block(self.in_planes, planes, spatial_dims=spatial_dims))
-
-        return nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-
-        # # add conv layers to complete the segmentation
-        # dx = torch.sigmoid(self.conv0(x))
-        # x_ = x + (torch.argmax(x, dim=1, keepdim=True) == 0) * dx
-        
-        # if self.training:
-        #     f_x = torch.argmax(x, dim=1, keepdim=True)
-        # else:
-        #     f_x = torch.argmax(x_, dim=1, keepdim=True)
-
-        # compute the distance field
-        # foreground = (f_x > 0).to(torch.float32)
-        # myo = (f_x == 2).to(torch.float32)
-        
-        # compute the distance field
-        x = torch.argmax(x, dim=1, keepdim=True)
-        foreground = (x > 0).to(torch.float32)
-        myo = (x == 2).to(torch.float32)
-        f = torch.stack(
-            [distance_transform_edt(i[:, 0]) + distance_transform_edt(1 - i[:, 0]) 
-                for i in [foreground, myo]], 
-                dim=1)
-
-        df = self.conv1(f)
-        df = self.bn1(df)
-        df = self.relu(df)
-
-        df = self.layer1(df)
-        df = self.layer2(df)
-        df = self.layer3(df)
-        df = self.layer4(df)
-
-        df = self.out(df)
-        df = self.relu(df)
-
-        y = f + df
-
-        # return y, x_
-        return y
-
+__all__ = ["GSN", "Subdivision", "LocalMeshWarper", "UpscalingResNet"]
 
 """
     implementation of forming Loop subdivision method as message passing neural network. this takes Pytorch3d.Mesh object as input and output. 
@@ -569,142 +310,216 @@ class GSN(nn.Module):
         return level_outs
 
 
-# Neural Odinary Differential Equation
-"""
-    create a NODE solver for IVP problem defined as dh(x, t)/dt = f(x, t), where f(x, t) is a dynamics function given location (x) at time (t) returns the direction of flow. Consult https://github.com/Siwensun/Neural_Diffeomorphic_Flow--NDF for details. The solver returns the location of the point at time (t) on the trajectory. Implementation of the solve requires,
-    1. ODEFunc: the dynamics function f(x, t) in the IVP.
-    2. NODEBlock: the solver for the IVP.
-"""
-from torchdiffeq import odeint_adjoint as odeint
-
-class ODEFunc(nn.Module):
-    '''
-    This refers to the dynamics function f(x,t) in a IVP defined as dh(x,t)/dt = f(x,t). 
-    For a given time frame (t) on point (x) trajectory, it returns the direction of 'flow'.
-    '''
-    # def __init__(self, hidden_size, latent_size):
-    def __init__(self, hidden_size):
-        '''
-        Initialization. 
-        num_hidden: number of nodes in a hidden layer
-        latent_len: size of the latent code being used
-        '''
-        
-        super(ODEFunc, self).__init__()
-        
-        self.l1 = nn.Linear(3, hidden_size)
-        self.l2 = nn.Linear(hidden_size, hidden_size)   
-        # self.l3 = nn.Linear(hidden_size, hidden_size)
-        self.l4 = nn.Linear(hidden_size, 3)
-        
-        # self.cond = nn.Linear(latent_size, hidden_size) 
-
-        self.tanh = nn.Tanh()
-        self.relu = nn.ReLU()
-        
-        self.nfe = 0
-        # self.zeros = torch.zeros((1, latent_size))
-        # self.latent_dyn_zeros=None
-
-    def forward(self, t, xyz):
-        '''
-        xyz: Torch tensor of shape (N, 3).
-        '''
-
-        point_features = self.relu(self.l1(xyz))
-
-        point_features = self.relu(self.l2(point_features)) + point_features
-
-        dyns_x_t = self.tanh(self.l4(point_features))
-
-        self.nfe += 1
-
-        return dyns_x_t
-        
-    # def forward(self, t, cxyz):
-    #     '''
-    #     t: Torch tensor of shape (1,) 
-    #     cxyz: Torch tensor of shape (N, zdim+3). Along dimension 1, the point and shape embeddings are concatenated. 
-        
-    #     **NOTE**
-    #     For the uniqueness property to hold, a single dynamics function (operating in 3D) must be used to compute 
-    #     trajectories pertaining to points of a single shape. 
-        
-    #     Here, the shape encoding (same for all points of a shape) is used to choose a function which is applied over all the shape points.
-    #     Hence, even though the input xz appears to be a 3+zdim dimensional state, the ODE is still restricted to a 3D state-space. 
-    #     The concatenation is purely to make programming simpler without affecting the underlying theory. 
-        
-    #     '''
-    #     point_features = self.relu(self.l1((cxyz[...,-3:]))) # Extract point features #ptsx3 -> #ptsx512
-    #     shape_features = self.tanh(self.cond(cxyz[...,:-3]))  # Extract shape features #ptsxzdim -> #ptsx512
-        
-    #     point_shape_features = point_features*shape_features  # Compute point-shape features by elementwise multiplication
-    #     # [Insight :]  Conditioning is critical to allow for several shapes getting learned by same NeuralODE. 
-    #     #              Note that under current formulation, all points belonging to a shape share a common dynamics function.
-        
-    #     # Two residual blocks
-    #     point_shape_features = self.relu(self.l2(point_shape_features)) + point_shape_features
-    #     # point_shape_features = self.relu(self.l3(point_shape_features)) + point_shape_features
-    #     # [Insight :] Using less residual blocks leads to drop in performance
-    #     #             while more residual blocks make model heavy and training slow due to more complex trajectories being learned.
-        
-    #     dyns_x_t = self.tanh(self.l4(point_shape_features)) #Computed dynamics of point x at time t
-    #     # [Insight :] We specifically choose a tanh activation to get maximum expressivity as observed by He, et.al and Massaroli, et.al
-        
-    #     self.nfe+=1  #To check #ode evaluations
-        
-    #     # To prevent updating of latent codes during ODESolver calls, we simply make their dynamics all zeros. 
-    #     if self.latent_dyn_zeros is None or self.latent_dyn_zeros.shape[0] != dyns_x_t.shape[0]:
-    #         self.latent_dyn_zeros = self.zeros.repeat(dyns_x_t.shape[0], 1).type_as(dyns_x_t)  
-        
-    #     return torch.cat([self.latent_dyn_zeros, dyns_x_t], dim=1) # output is therefore like [0,0..,0, dyn_x, dyn_y, dyn_z] for a point
-
-class NODEBlock(nn.Module):
-    '''
-    Function to solve an IVP defined as dh(x,t)/dt = f(x,t). 
-    We use the differentiable ODE Solver by Chen et.al used in their NeuralODE paper.
-    '''
-    # def __init__(self, odefunc, tol):
-    def __init__(self, hidden_size, atol, rtol):
-        '''
-        Initialization. 
-        odefunc: The dynamics function to be used for solving IVP
-        tol: tolerance of the ODESolver
-        '''
-        super(NODEBlock, self).__init__()
-        self.odefunc = ODEFunc(hidden_size)
-        self.cost = 0
-        self.rtol = atol
-        self.atol = rtol
-
-    def define_time_steps(self, end_time, steps, invert):
-        times = torch.linspace(0, end_time, steps+1)
-        if invert:
-            times = times.flip(0)
-        return times
+class UpscalingResNet(nn.Module):
+    """
+    Custom ResNet decoder that can upscale segmentation predictions by a specified ratio.
+    Uses transpose convolutions for upscaling while maintaining segmentation quality.
     
-    def forward(self, xyz, end_time, step, invert):
-        '''
-        Solves the ODE in the forward / reverse time. 
-        '''
-        self.odefunc.nfe = 0
-
-        self.times = self.define_time_steps(end_time, step, invert).to(xyz)
-
-        out = odeint(self.odefunc, xyz, self.times, rtol = self.rtol, atol = self.atol, method="dopri5")
-
-        self.cost = self.odefunc.nfe
-
-        return out
+    Args:
+        spatial_dims: number of spatial dimensions (2 or 3)
+        in_channels: number of input channels
+        out_channels: number of output channels
+        upscale_ratio: upscaling factor for output compared to input
+        layers: list/tuple of number of residual blocks per layer (length determines number of layers)
+        act: activation type and arguments
+        norm: normalization type and arguments
+    """
+    
+    def __init__(
+        self,
+        spatial_dims: int = 3,
+        in_channels: int = 4,
+        out_channels: int = 4,
+        upscale_ratio: int = 2,
+        layers: tuple = (1, 2, 2, 4),
+        act: tuple = ("leakyrelu", {"inplace": True, "negative_slope": 0.1}),
+        norm: tuple = ("INSTANCE", {"affine": True}),
+    ):
+        super().__init__()
         
-    # def forward(self, cxyz, end_time, steps, invert):
-    #     '''
-    #     Solves the ODE in the forward / reverse time. 
-    #     '''
-    #     self.odefunc.nfe = 0  #To check #ode evaluations
+        self.spatial_dims = spatial_dims
+        self.upscale_ratio = upscale_ratio
+        self.num_encoder_layers = len(layers)
         
-    #     self.times = self.define_time_steps(end_time, steps, invert).to(cxyz)  # Time of integration (must be monotinically increasing!)
-    #     # Solve the ODE with initial condition x and interval time.
-    #     out = odeint(self.odefunc, cxyz, self.times, rtol = self.rtol, atol = self.rtol)
-    #     self.cost = self.odefunc.nfe  # Number of evaluations it took to solve it
-    #     return out
+        # Get appropriate layer types based on spatial dimensions
+        conv_type = Conv[Conv.CONV, spatial_dims]
+        norm_type = Norm[norm[0], spatial_dims]
+        
+        # Handle activation type properly
+        if isinstance(act[1], dict):
+            if act[0].lower() == "leakyrelu":
+                act_type = nn.LeakyReLU(**act[1])
+            else:
+                act_type = getattr(nn, act[0])(**act[1])
+        else:
+            if act[0].lower() == "leakyrelu":
+                act_type = nn.LeakyReLU()
+            else:
+                act_type = getattr(nn, act[0])()
+        
+        # Create a fresh activation for each use
+        def get_activation():
+            if isinstance(act[1], dict):
+                if act[0].lower() == "leakyrelu":
+                    return nn.LeakyReLU(**act[1])
+                else:
+                    return getattr(nn, act[0])(**act[1])
+            else:
+                if act[0].lower() == "leakyrelu":
+                    return nn.LeakyReLU()
+                else:
+                    return getattr(nn, act[0])()
+        
+        # Encoder layers (downsampling) - use user-defined layers parameter
+        self.encoder_layers = nn.ModuleList()
+        current_channels = in_channels
+        
+        # Initial conv
+        initial_out_channels = 32  # Start with smaller channels, will be scaled up
+        self.initial_conv = nn.Sequential(
+            conv_type(current_channels, initial_out_channels, kernel_size=3, padding=1, bias=False),
+            norm_type(initial_out_channels),
+            act_type
+        )
+        current_channels = initial_out_channels
+        
+        # Dynamic channel calculation based on number of layers
+        # Start with initial_out_channels and double for each layer
+        layer_channels = [initial_out_channels * (2 ** i) for i in range(self.num_encoder_layers)]
+        
+        # Ensure we don't go above reasonable channel limits
+        max_channels = 512
+        layer_channels = [min(ch, max_channels) for ch in layer_channels]
+        
+        for i, (num_blocks, out_ch) in enumerate(zip(layers, layer_channels)):
+            layer = []
+            stride = 2 if i > 0 else 1  # First layer doesn't downsample
+            
+            # First block with potential downsampling
+            layer.append(self._make_residual_block(
+                current_channels, out_ch, stride, norm_type, get_activation, spatial_dims
+            ))
+            current_channels = out_ch
+            
+            # Additional blocks based on layers parameter
+            for _ in range(num_blocks - 1):
+                layer.append(self._make_residual_block(
+                    current_channels, out_ch, 1, norm_type, get_activation, spatial_dims
+                ))
+            
+            self.encoder_layers.append(nn.Sequential(*layer))
+        
+        # Decoder layers (upsampling)
+        self.decoder_layers = nn.ModuleList()
+        
+        # Calculate total upsampling needed
+        # encoder downsamples by 2^(num_encoder_layers-1), decoder needs to upsample by that * upscale_ratio
+        encoder_downsample_factor = 2 ** (self.num_encoder_layers - 1)
+        total_upsample_factor = encoder_downsample_factor * upscale_ratio
+        
+        # Number of upsampling layers needed
+        num_upsample_layers = int(torch.log2(torch.tensor(total_upsample_factor, dtype=torch.float32)).item())
+        
+        # Decoder upsampling layers - reverse the encoder channel progression
+        decoder_channels = layer_channels[::-1][1:] + [initial_out_channels // 2]  # Reverse and add final smaller channel
+        
+        # Ensure we have enough decoder channels
+        while len(decoder_channels) < num_upsample_layers:
+            decoder_channels.append(decoder_channels[-1] // 2 if decoder_channels[-1] > 16 else 16)
+        
+        # Take only the number we need
+        decoder_channels = decoder_channels[:num_upsample_layers]
+        
+        for i in range(num_upsample_layers):
+            in_ch = current_channels if i == 0 else decoder_channels[i-1]
+            out_ch = decoder_channels[i] if i < len(decoder_channels) else 16
+            
+            layer = []
+            # Transpose convolution for upsampling
+            if spatial_dims == 3:
+                layer.append(nn.ConvTranspose3d(
+                    in_ch, out_ch, kernel_size=4, stride=2, padding=1, bias=False
+                ))
+            else:
+                layer.append(nn.ConvTranspose2d(
+                    in_ch, out_ch, kernel_size=4, stride=2, padding=1, bias=False
+                ))
+            
+            layer.extend([
+                norm_type(out_ch),
+                get_activation(),
+                # Additional residual block for better quality
+                self._make_residual_block(out_ch, out_ch, 1, norm_type, get_activation, spatial_dims)
+            ])
+            
+            self.decoder_layers.append(nn.Sequential(*layer))
+            current_channels = out_ch
+        
+        # Final output layer
+        self.final_conv = conv_type(current_channels, out_channels, kernel_size=3, padding=1)
+    
+    def _make_residual_block(self, in_channels, out_channels, stride, norm_type, get_activation, spatial_dims):
+        """Create a residual block"""
+        conv_type = Conv[Conv.CONV, spatial_dims]
+        
+        layers = [
+            conv_type(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False),
+            norm_type(out_channels),
+            get_activation(),
+            conv_type(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            norm_type(out_channels),
+        ]
+        
+        # Skip connection
+        if stride != 1 or in_channels != out_channels:
+            shortcut = nn.Sequential(
+                conv_type(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                norm_type(out_channels),
+            )
+        else:
+            shortcut = nn.Identity()
+        
+        return ResidualBlock(nn.Sequential(*layers), shortcut, get_activation())
+    
+    def forward(self, x):
+        # Store input shape for potential skip connections
+        input_shape = x.shape
+        
+        # Initial convolution
+        x = self.initial_conv(x)
+        
+        # Encoder (downsampling)
+        skip_connections = []
+        for layer in self.encoder_layers:
+            skip_connections.append(x)
+            x = layer(x)
+        
+        # Decoder (upsampling)
+        for i, layer in enumerate(self.decoder_layers):
+            x = layer(x)
+            # Optional: add skip connections from encoder
+            # if i < len(skip_connections):
+            #     skip = skip_connections[-(i+1)]
+            #     # Resize skip connection to match current x
+            #     if skip.shape[2:] != x.shape[2:]:
+            #         skip = F.interpolate(skip, size=x.shape[2:], mode='trilinear' if self.spatial_dims==3 else 'bilinear')
+            #     x = x + skip
+        
+        # Final output
+        x = self.final_conv(x)
+        
+        return x
+
+
+class ResidualBlock(nn.Module):
+    """Simple residual block helper"""
+    def __init__(self, main_path, shortcut, activation):
+        super().__init__()
+        self.main_path = main_path
+        self.shortcut = shortcut
+        self.activation = activation
+    
+    def forward(self, x):
+        residual = self.shortcut(x)
+        out = self.main_path(x)
+        return self.activation(out + residual)

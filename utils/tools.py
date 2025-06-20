@@ -154,10 +154,17 @@ def draw_plotly(
         assert mesh_pred._N == 1, "Only support one mesh at a time."
         # transform from NDC space to world space
         mesh_pred.offset_verts_(torch.tensor([1.0] * 3))
-        if df_pred is None:
-            mesh_pred.scale_verts_(seg_true.shape[-1] / 2)
+        # Use consistent reference size - prefer df_pred, fallback to seg_true, then seg_pred
+        if df_pred is not None:
+            reference_size = df_pred.shape[-1]
+        elif seg_true is not None:
+            reference_size = seg_true.shape[-1]
+        elif seg_pred is not None:
+            reference_size = seg_pred.shape[-1]
         else:
-            mesh_pred.scale_verts_(df_pred.shape[-1] / 2)
+            reference_size = 32  # Default fallback size
+        mesh_pred.scale_verts_(reference_size / 2)
+        
         for mesh in mesh_pred:
             x, y, z = mesh.verts_packed().T
             I, J, K = mesh.faces_packed().T
@@ -172,7 +179,7 @@ def draw_plotly(
         mesh_c = kwargs.get("mesh_c")
         if mesh_c is not None:
             mesh_c = mesh_c / 2 + 0.5
-            mesh_c = mesh_c * seg_true.shape[-1] if df_pred is None else mesh_c * df_pred.shape[-1]
+            mesh_c = mesh_c * reference_size
             for i, center in enumerate(mesh_c):
                 fig.add_trace(go.Scatter3d(
                     x=[center[0].item()], y=[center[1].item()], z=[center[2].item()],
@@ -213,8 +220,7 @@ def draw_plotly(
             # draw the zero-level set from the df_pred
             mesh = matrix_to_marching_cubes((df_pred[-1].cpu().numpy() <= 1))
             verts, faces = mesh.vertices, mesh.faces
-            if seg_true is not None:
-                verts *= seg_true.shape[-1] / df_pred.shape[-1]
+            # Use consistent scaling - no need to adjust if df_pred is already correctly sized
             y, x, z = verts.T
             I, J, K = faces.T
             fig.add_trace(go.Mesh3d(

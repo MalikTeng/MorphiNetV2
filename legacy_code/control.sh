@@ -1,0 +1,90 @@
+#!/bin/bash
+
+# # ---- Run the training script with only mr data ----
+# python main.py \
+#     --save_on cap \
+#     \
+#     --mr_json_dir ./dataset/dataset_task11_f0.json \
+#     --mr_data_dir /mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX \
+#     \
+#     --template_mesh_dir ./template/template_mesh-myo.obj \
+#     --use_ckpt /mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2024-08-10-2338 \
+#     \
+#     --max_epochs 150 \
+#     --pretrain_epochs 1 \
+#     --train_epochs 81 \
+#     --val_interval 10 \
+#     \
+#     --hidden_features_gsn 16 \
+#     --pixdim 4 4 4 \
+#     --lambda_0 0.56 \
+#     --lambda_1 0.12 \
+#     --iteration 10 \
+#     \
+#     --lr 0.001 \
+#     --batch_size 1 \
+#     --mode online \
+#     --_mr
+
+# ---- Run the training script with both ct & mr data----
+CT_RATIO=(1.0)
+for ratio in "${CT_RATIO[@]}"
+do
+    python main.py \
+        --save_on sct \
+        \
+        --mr_json_dir ./dataset/dataset_task11_f0.json \
+        --mr_data_dir /mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX \
+        \
+        --use_ckpt n \
+        --template_mesh_dir ./template/template_mesh-myo.obj \
+        \
+        --max_epochs 100 \
+        --pretrain_epochs 50 \
+        --train_epochs 75 \
+        --val_interval 5 \
+        \
+        --pixdim 4 4 4 \
+        --filters 8 16 32 64 128 \
+        --kernel_size 3 3 3 3 3 \
+        --strides 1 2 2 2 2 \
+        --lambda_0 0.18 \
+        --layers 1 2 2 4 \
+        --lambda_1 0.64 \
+        \
+        --hidden_features_gsn 64 \
+        --iteration 10 \
+        --sigmoid_scale_factor 0.55 \
+        \
+        --lr 0.001 \
+        --batch_size 1 \
+        --mode online \
+        --ct_ratio "$ratio"
+done
+
+# # ---- Run the training script with both mr and ct data for 4D creation----
+
+# python main.py \
+#     --save_on cap \
+#     \
+#     --mr_json_dir ./dataset/dataset_task10_f0.json \
+#     --mr_data_dir /mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset010_CAP_SAX_NRRD \
+#     \
+#     --template_mesh_dir ./template/template_mesh-myo.obj \
+#     --use_ckpt /mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/sct--myo--f0--2024-08-18-1346 \
+#     \
+#     --max_epochs 200 \
+#     --pretrain_epochs 100 \
+#     --train_epochs 150 \
+#     --val_interval 10 \
+#     \
+#     --hidden_features_gsn 16 \
+#     --pixdim 4 4 4 \
+#     --lambda_0 0.56 \
+#     --lambda_1 0.12 \
+#     --iteration 10 \
+#     \
+#     --lr 0.001 \
+#     --batch_size 1 \
+#     --mode online \
+#     --_4d

@@ -1,8 +1,47 @@
 # Adaptive Bi-ventricle Surface Reconstruction from Cardiovascular Imaging
 
-This repository contains scripts and tools for the paper "Adaptive Bi-ventricle Surface Reconstruction from Cardiovascular Imaging". It serves as a reference implementation for the paper. Please note that the code is not optimized for efficiency and may not be bug-free on all machines.
+This repository contains scripts and tools for the paper "Adaptive Bi-ventricle Surface Reconstruction from Cardiovascular Imaging". 
+
+**🔄 Major Update (June 2025)**: The codebase has been completely refactored into a **modular architecture** for better maintainability, extensibility, and ease of use. The original monolithic implementation has been preserved in the `legacy_code/` folder for reference.
 
 ![Figure 1](figure/Fig-1.png)
+
+## 🏗️ Architecture Overview
+
+MorphiNet now features a clean, modular architecture:
+
+```
+MorphiNet/
+├── data/                    # Data processing and loading
+│   ├── loaders.py          # DataLoaderManager 
+│   └── preprocessors.py    # DataPreprocessor
+├── model/                   # Neural network models
+│   ├── networks.py         # UNet, ResNet, GSN definitions
+│   ├── mesh_operations.py  # Mesh processing operations
+│   └── inference.py        # Model inference utilities
+├── training/                # Training components
+│   ├── trainer.py          # MorphiNetTrainer
+│   ├── validators.py       # MorphiNetValidator
+│   └── losses.py           # LossManager (optimizers, schedulers, losses)
+├── evaluation/              # Evaluation and metrics
+│   └── metrics.py          # MorphiNetMetrics
+├── pipeline/                # Pipeline orchestration
+│   └── orchestrator.py     # MorphiNetOrchestrator (main coordinator)
+├── utils/                   # Utilities
+│   ├── checkpoint_manager.py # Model checkpointing
+│   └── tools.py            # General utilities
+├── main.py                  # Main training script (modular)
+├── run.py                   # Backward compatibility layer
+└── legacy_code/             # Original monolithic implementation
+```
+
+### Key Improvements
+
+- **🔧 Modular Design**: Clean separation of concerns with focused components
+- **📚 Better Documentation**: Comprehensive inline documentation and type hints
+- **🔄 Backward Compatibility**: Existing workflows continue to work unchanged
+- **🧪 Comprehensive Testing**: Full test coverage for all components
+- **📈 Enhanced Maintainability**: Easier to extend and modify individual components
 
 ## Contact
 
@@ -118,13 +157,36 @@ The training process consists of three stages:
 2. ResNet: Learning a continuous distance field
 3. GSN: Deforming and refining the template mesh
 
-To run the training process:
+### Modular Training (Recommended)
+
+To run the training process with the new modular architecture:
+
+```bash
+python main.py \
+    --save_on sct \
+    --mr_json_dir ./dataset/dataset_task11_f0.json \
+    --mr_data_dir /path/to/preprocessed/MR/data \
+    --ct_json_dir ./dataset/dataset_task20_f0.json \
+    --ct_data_dir /path/to/preprocessed/CT/data \
+    --template_mesh_dir ./template/template_mesh-myo.obj \
+    --max_epochs 200 \
+    --pretrain_epochs 100 \
+    --train_epochs 150 \
+    --val_interval 10
 ```
+
+### Legacy Training
+
+For users who prefer the original epoch-by-epoch training approach, the legacy implementation is available in the `legacy_code/` folder:
+
+```bash
+# Use the legacy control script
+cd legacy_code
 chmod +x control.sh
 ./control.sh
 ```
 
-This calls the `main.py` script. Example parameters:
+### Training Parameters
 ```
 $ python main.py \
     --save_on sct \             # option to run the network on either CT ('sct') or CMR ('mr') data
@@ -160,24 +222,63 @@ Use the provided network checkpoint `pretrained/trained_weights/best*.pth` for i
 
 Ensure your data is preprocessed and organized similarly to the training data. Use 4D CMR image data in `.nrrd` format or 4D CMR/3D CT image data in `.nii` or `.nii.gz` format. 3D CMR image data in `.nii` or `.nii.gz` is supported but 4D CMR data is not tested.
 
-Example inference command:
+### Modular Inference
 
+```bash
+python -c "
+from run import create_inference_pipeline
+import argparse
+
+# Create minimal config for inference
+config = argparse.Namespace(
+    save_on='sct',
+    mr_json_dir='./dataset/dataset_task11_f0.json',
+    ct_json_dir='./dataset/dataset_task20_f0.json',
+    template_mesh_dir='./template/template_mesh-myo.obj',
+    ckpt_dir='/path/to/your/checkpoint',
+    output_dir='/path/to/output'
+)
+
+# Create and run inference pipeline
+pipeline = create_inference_pipeline(config, seed=42, num_workers=4)
+pipeline.run_inference()
+"
 ```
-$ python test.py \
-    --save_on cap \                                 # option to run the network on either CT ('sct') or CMR ('mr') data
-    \
-    # if you want to inference the network on CMR data, add the following arguments
-    --mr_json_dir ./dataset/dataset_taskXX_f0.json  # dataset file for CMR data \
-    --mr_data_dir /path/to/preprocessed/CMR/data \
-    \
-    # or inference on CT data, add the following arguments
-    --ct_json_dir ./dataset/dataset_taskXX_f0.json  # dataset file for CT data \
+
+### Legacy Inference
+
+For legacy inference, use the original test script:
+
+```bash
+cd legacy_code
+python test.py \
+    --save_on sct \
+    --ct_json_dir ../dataset/dataset_task20_f0.json \
     --ct_data_dir /path/to/preprocessed/CT/data \
-    \
     --output_dir /path/to/your/output/directory \
     --ckpt_dir /path/to/your/network/check_point \
-    --template_mesh_dir ./template/template_mesh-myo.obj \
-    \
-    --_4d \                                         # if your data is 4D, add this flag
-    --_mr                                           # if you want to train the network solely on MR image data, add this flag
+    --template_mesh_dir ../template/template_mesh-myo.obj
 ```
+
+## 📚 Legacy Code Preservation
+
+The original monolithic implementation has been preserved in the `legacy_code/` folder for:
+
+- **Reference**: Users familiar with the original implementation
+- **Reproducibility**: Ensuring exact replication of published results
+- **Backward Compatibility**: Supporting existing workflows
+
+### Legacy Code Structure
+
+```
+legacy_code/
+├── main.py                  # Original monolithic training script
+├── test.py                  # Original inference script  
+├── control.sh               # Original control script
+├── data_preprocessing.py    # Original data preprocessing
+├── data/                    # Original data components
+├── utils/                   # Original utility functions
+└── help_code/               # Development utilities
+```
+
+For detailed migration information, see `CLAUDE.md`.
