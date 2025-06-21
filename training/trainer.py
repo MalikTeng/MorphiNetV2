@@ -64,9 +64,8 @@ class MorphiNetTrainer:
         self.dice_loss_fn_mr = loss_functions['dice_mr']
         self.msk_dice_loss_fn = loss_functions['masked_dice']
         
-        # Data loaders
-        self.ct_train_loader = dataloaders.get('ct_train_loader')
-        self.mr_train_loader = dataloaders.get('mr_train_loader')
+        # Data loaders - store reference to dataloader manager for dynamic access
+        self.dataloader_manager = dataloaders
         
         # Helper modules
         self.preprocessor = preprocessor
@@ -85,6 +84,16 @@ class MorphiNetTrainer:
         # Prediction transform
         from monai.transforms import AsDiscrete
         self.pred_transform = AsDiscrete(argmax=True, to_onehot=self.super_params.num_classes)
+    
+    @property
+    def ct_train_loader(self):
+        """Dynamic access to CT training loader."""
+        return getattr(self.dataloader_manager, 'ct_train_loader', None)
+    
+    @property  
+    def mr_train_loader(self):
+        """Dynamic access to MR training loader."""
+        return getattr(self.dataloader_manager, 'mr_train_loader', None)
     
     def train_iter(self, epoch, phase, commit_log=True):
         """
@@ -118,8 +127,10 @@ class MorphiNetTrainer:
         
         # Train CT segmentation encoder
         log_ct_step = np.random.randint(0, len(self.ct_train_loader)) if self.ct_train_loader is not None and len(self.ct_train_loader) > 0 else -1
+        ct_step_count = 0
         if self.ct_train_loader is not None:
             for step, data_ct in enumerate(self.ct_train_loader):
+                ct_step_count = step + 1
                 img_ct, seg_true_ct = (
                     data_ct["ct_image"].as_tensor().to(DEVICE),
                     data_ct["ct_label"].as_tensor().to(DEVICE),
@@ -141,7 +152,8 @@ class MorphiNetTrainer:
                 self.scaler_ct_unet.step(self.optimzer_ct_unet)
                 self.scaler_ct_unet.update()
                 
-                train_loss_epoch["ct"] += loss.item()
+                loss_value = loss.item()
+                train_loss_epoch["ct"] += loss_value
 
                 # Logging for CT
                 if step == log_ct_step:
@@ -163,7 +175,7 @@ class MorphiNetTrainer:
                         log_data_unet["unet/ct_ground_truth"] = wandb.Image(gt_slice_ct_viz, caption=f"Case ID: {case_id_ct}")
                         log_data_unet["unet/ct_prediction"] = wandb.Image(pred_slice_ct_viz, caption=f"Case ID: {case_id_ct}")
 
-        train_loss_epoch["ct"] = train_loss_epoch["ct"] / (step + 1) if self.ct_train_loader is not None and len(self.ct_train_loader) > 0 else 0.0
+        train_loss_epoch["ct"] = train_loss_epoch["ct"] / ct_step_count if self.ct_train_loader is not None and ct_step_count > 0 else 0.0
         
         if self.ct_train_loader is not None and len(self.ct_train_loader) > 0:
             print(f"CT UNet Training - Loss: {train_loss_epoch['ct']:.4f}, LR: {self.optimzer_ct_unet.param_groups[0]['lr']:.6f}")
@@ -172,8 +184,10 @@ class MorphiNetTrainer:
 
         # Train MR segmentation encoder
         log_mr_step = np.random.randint(0, len(self.mr_train_loader)) if self.mr_train_loader is not None and len(self.mr_train_loader) > 0 else -1
+        mr_step_count = 0
         if self.mr_train_loader is not None:
             for step, data_mr in enumerate(self.mr_train_loader):
+                mr_step_count = step + 1
                 img_mr, seg_true_mr = (
                     data_mr["mr_image"].as_tensor().to(DEVICE),
                     data_mr["mr_label"].as_tensor().to(DEVICE),
@@ -198,7 +212,8 @@ class MorphiNetTrainer:
                 self.scaler_mr_unet.step(self.optimzer_mr_unet)
                 self.scaler_mr_unet.update()
                 
-                train_loss_epoch["mr"] += loss.item()
+                loss_value = loss.item()
+                train_loss_epoch["mr"] += loss_value
 
                 # Logging for MR
                 if step == log_mr_step:
@@ -220,7 +235,7 @@ class MorphiNetTrainer:
                     log_data_unet["unet/mr_ground_truth"] = wandb.Image(gt_slice_mr_viz, caption=f"Case ID: {case_id_mr}")
                     log_data_unet["unet/mr_prediction"] = wandb.Image(pred_slice_mr_viz, caption=f"Case ID: {case_id_mr}")
 
-        train_loss_epoch["mr"] = train_loss_epoch["mr"] / (step + 1) if self.mr_train_loader is not None and len(self.mr_train_loader) > 0 else 0.0
+        train_loss_epoch["mr"] = train_loss_epoch["mr"] / mr_step_count if self.mr_train_loader is not None and mr_step_count > 0 else 0.0
         
         if self.mr_train_loader is not None and len(self.mr_train_loader) > 0:
             print(f"MR UNet Training - Loss: {train_loss_epoch['mr']:.4f}, LR: {self.optimzer_mr_unet.param_groups[0]['lr']:.6f}")
@@ -230,7 +245,7 @@ class MorphiNetTrainer:
         train_loss_epoch["total"] = train_loss_epoch["ct"] + train_loss_epoch["mr"]
         train_loss_epoch["seg"] = train_loss_epoch["total"]
 
-        for k, v in self.unet_loss.items():
+        for k in self.unet_loss.keys():
             self.unet_loss[k] = np.append(self.unet_loss[k], train_loss_epoch[k])
 
         # Add losses to wandb logging
@@ -250,8 +265,10 @@ class MorphiNetTrainer:
         self.decoder.train()
 
         train_loss_epoch = dict(total=0.0, df=0.0)
+        resnet_step_count = 0
         if self.ct_train_loader is not None:
             for step, data_ct in enumerate(self.ct_train_loader):
+                resnet_step_count = step + 1
                 img_ct, seg_true_ct = (
                     data_ct["ct_image"].to(DEVICE),
                     data_ct["ct_label"].to(DEVICE),
@@ -300,11 +317,12 @@ class MorphiNetTrainer:
                 self.scaler_resnet.step(self.optimizer_resnet)
                 self.scaler_resnet.update()
                 
-                train_loss_epoch["total"] += loss.item()
-                train_loss_epoch["df"] += loss.item()
+                loss_value = loss.item()
+                train_loss_epoch["total"] += loss_value
+                train_loss_epoch["df"] += loss_value
 
         for k, v in train_loss_epoch.items():
-            train_loss_epoch[k] = v / (step + 1) if self.ct_train_loader is not None and len(self.ct_train_loader) > 0 else 0.0
+            train_loss_epoch[k] = v / resnet_step_count if self.ct_train_loader is not None and resnet_step_count > 0 else 0.0
             self.resnet_loss[k] = np.append(self.resnet_loss[k], train_loss_epoch[k])
 
         print(f"ResNet Training - Loss: {train_loss_epoch['total']:.4f}, LR: {self.optimizer_resnet.param_groups[0]['lr']:.6f}")
@@ -323,8 +341,10 @@ class MorphiNetTrainer:
         self.GSN.train()
 
         finetune_loss_epoch = dict(total=0.0, chmf=0.0, smooth=0.0)
+        gsn_step_count = 0
         if self.ct_train_loader is not None:
             for step, data_ct in enumerate(self.ct_train_loader):
+                gsn_step_count = step + 1
                 img_ct, seg_true_ct = (
                     data_ct["ct_image"].to(DEVICE),
                     data_ct["ct_label"].to(DEVICE)
@@ -383,13 +403,15 @@ class MorphiNetTrainer:
                     
                     # Warp template and apply GSN
                     template_mesh = self.mesh_ops.warp_template_mesh(df_pred_ct.detach())
-                    template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float16))
+                    template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float32))
                     
                     level_outs = self.GSN(template_mesh, self.mesh_ops.subdivided_faces.faces_levels)
 
                     # Calculate losses
                     loss_chmf, loss_smooth = 0.0, 0.0
                     for l, subdiv_mesh in enumerate(level_outs):
+                        # Ensure mesh vertices are in float32 for PyTorch3D compatibility
+                        subdiv_mesh = subdiv_mesh.update_padded(subdiv_mesh.verts_padded().to(torch.float32))
                         verts_label = self.mesh_ops.subdivided_faces.labels_levels[l]
                         surface_mask = torch.any(torch.stack([verts_label == i for i in [0, 1, 2, 3]]), dim=0)
                         surface_verts = subdiv_mesh.verts_padded()[:, surface_mask]
@@ -407,9 +429,12 @@ class MorphiNetTrainer:
                 self.scaler_gsn.step(self.optimizer_gsn)
                 self.scaler_gsn.update()
                 
-                finetune_loss_epoch["total"] += loss.item()
-                finetune_loss_epoch["chmf"] += loss_chmf.item()
-                finetune_loss_epoch["smooth"] += loss_smooth.item()
+                loss_value = loss.item()
+                loss_chmf_value = loss_chmf.item()
+                loss_smooth_value = loss_smooth.item()
+                finetune_loss_epoch["total"] += loss_value
+                finetune_loss_epoch["chmf"] += loss_chmf_value
+                finetune_loss_epoch["smooth"] += loss_smooth_value
                 
                 # Memory cleanup
                 del seg_pred_ct, seg_pred_ct_ds, binary_mask_pred, dist_map_pred, mask
@@ -418,19 +443,24 @@ class MorphiNetTrainer:
                 del loss_chmf, loss_smooth, loss
                 torch.cuda.empty_cache()
 
-            for k, v in finetune_loss_epoch.items():
-                finetune_loss_epoch[k] = v / (step + 1) if self.ct_train_loader is not None and len(self.ct_train_loader) > 0 else 0.0
-                self.gsn_loss[k] = np.append(self.gsn_loss[k], finetune_loss_epoch[k])
+        # Calculate average losses and update tracking
+        for k, v in finetune_loss_epoch.items():
+            finetune_loss_epoch[k] = v / gsn_step_count if self.ct_train_loader is not None and gsn_step_count > 0 else 0.0
+            self.gsn_loss[k] = np.append(self.gsn_loss[k], finetune_loss_epoch[k])
 
-            print(f"GSN Training - Total Loss: {finetune_loss_epoch['total']:.4f} "
-                  f"(Chamfer: {finetune_loss_epoch['chmf']:.4f}, Smooth: {finetune_loss_epoch['smooth']:.4f})")
-            print(f"GSN Training - LR: {self.optimizer_gsn.param_groups[0]['lr']:.6f}")
-            print(f"{'='*60}")
+        # Always print GSN training progress
+        print(f"GSN Training - Total Loss: {finetune_loss_epoch['total']:.4f} "
+              f"(Chamfer: {finetune_loss_epoch['chmf']:.4f}, Smooth: {finetune_loss_epoch['smooth']:.4f})")
+        print(f"GSN Training - LR: {self.optimizer_gsn.param_groups[0]['lr']:.6f}")
+        print(f"{'='*60}")
 
-            wandb.log({
-                "gsn/train_loss_total": finetune_loss_epoch["total"],
-                "gsn/train_loss_chamfer": finetune_loss_epoch["chmf"],
-                "gsn/train_loss_smooth": finetune_loss_epoch["smooth"]
-            }, step=epoch + 1, commit=commit_log)
+        # Log to WandB
+        wandb.log({
+            "gsn/train_loss_total": finetune_loss_epoch["total"],
+            "gsn/train_loss_chamfer": finetune_loss_epoch["chmf"],
+            "gsn/train_loss_smooth": finetune_loss_epoch["smooth"]
+        }, step=epoch + 1, commit=commit_log)
 
+        # Update learning rate scheduler
+        if self.ct_train_loader is not None and gsn_step_count > 0:
             self.lr_scheduler_gsn.step(finetune_loss_epoch["total"])

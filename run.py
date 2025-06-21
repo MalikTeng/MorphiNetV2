@@ -16,7 +16,6 @@ from collections import OrderedDict
 # Import modular components
 from pipeline.orchestrator import MorphiNetOrchestrator
 from evaluation.metrics import MorphiNetMetrics
-from utils.tools import draw_eval_score
 
 # Configure device
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -196,38 +195,8 @@ class MorphiNetPipeline:
     
     def _plot_training_curves(self):
         """Plot training loss curves."""
-        try:
-            # Access loss history from trainer
-            trainer = self.orchestrator.trainer
-            
-            # Plot UNet losses
-            if len(trainer.unet_loss['total']) > 0:
-                draw_eval_score(
-                    trainer.unet_loss,
-                    title="UNet Training Losses",
-                    save_path=os.path.join(self.orchestrator.ckpt_dir, "unet_losses.png")
-                )
-            
-            # Plot ResNet losses
-            if len(trainer.resnet_loss['total']) > 0:
-                draw_eval_score(
-                    trainer.resnet_loss,
-                    title="ResNet Training Losses", 
-                    save_path=os.path.join(self.orchestrator.ckpt_dir, "resnet_losses.png")
-                )
-            
-            # Plot GSN losses
-            if len(trainer.gsn_loss['total']) > 0:
-                draw_eval_score(
-                    trainer.gsn_loss,
-                    title="GSN Training Losses",
-                    save_path=os.path.join(self.orchestrator.ckpt_dir, "gsn_losses.png")
-                )
-            
-            print("Training curve plots saved successfully!")
-            
-        except Exception as e:
-            print(f"Warning: Could not generate training curves: {e}")
+        # Training curves now tracked in WandB - no need for local plots
+        print("Training curves are tracked in WandB dashboard")
     
     def _generate_validation_report(self):
         """Generate final validation report."""
@@ -345,8 +314,7 @@ def create_inference_pipeline(super_params, **kwargs):
     )
 
 
-# Maintain backward compatibility with original TrainPipeline class name
-TrainPipeline = MorphiNetPipeline
+# Backward compatibility removed - use MorphiNetPipeline only
 
 
 if __name__ == "__main__":

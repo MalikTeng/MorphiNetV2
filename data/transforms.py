@@ -55,6 +55,8 @@ def pre_transform(
     # Get stride configuration for DynUNet padding
     strides = kwargs.get("strides", (1, 2, 2, 2, 2))  # Default stride configuration
     
+    # Removed UNet transform logging as per cleanup requirements
+    
     # data loading
     transforms = [
         LoadImaged(keys, ensure_channel_first=False if modal == "mr" and target != 'acdc' else True, image_only=True, allow_missing_keys=True),

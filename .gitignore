@@ -30,3 +30,7 @@ test_*.py
 # keep important dataset files
 !dataset/*.json
 
+# exclude internal documentation from public repo
+CLAUDE.md
+CLAUDE.local.md
+

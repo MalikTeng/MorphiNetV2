@@ -19,34 +19,6 @@ from monai.transforms import RemoveSmallObjects
 __all__ = ["draw_plotly", "draw_train_loss", "draw_eval_score"]
 
 
-# def find_optimal_clusters(points, max_clusters=3):
-#     points_np = points.cpu().numpy()
-#     silhouette_scores = []
-#     for n_clusters in range(2, max_clusters + 1):
-#         kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-#         cluster_labels = kmeans.fit_predict(points_np)
-#         silhouette_avg = silhouette_score(points_np, cluster_labels)
-#         silhouette_scores.append(silhouette_avg)
-    
-#     optimal_clusters = silhouette_scores.index(max(silhouette_scores)) + 2
-#     return optimal_clusters
-
-
-# def find_cluster_centers(point_cloud, max_clusters=3):
-#     # Ensure point_cloud is on CPU for sklearn compatibility
-#     point_cloud_np = point_cloud.cpu().numpy()
-
-#     # Find the optimal number of clusters
-#     n_clusters = find_optimal_clusters(point_cloud, max_clusters)
-
-#     # Apply K-Means clustering
-#     kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-#     kmeans.fit(point_cloud_np)
-
-#     # Get cluster centers and convert back to PyTorch tensor
-#     cluster_centers = torch.tensor(kmeans.cluster_centers_, device=point_cloud.device)
-
-#     return cluster_centers, n_clusters
 
 
 def draw_plotly(
@@ -240,33 +212,6 @@ def draw_plotly(
                     mode="markers", marker=dict(size=5, color="blue"),
                     name=f"center_{name}"
                 ))
-            
-            # # find the miteral valve centroid
-            # lv = (df_pred[1] == 1)
-            # myo_no_lv = (df_pred[0] == 1)
-            # mv = (lv | myo_no_lv) ^ myo_no_lv
-            # mv_c = torch.nonzero(mv).float().mean(0)
-            # fig.add_trace(go.Scatter3d(
-            #     x=[mv_c[1]], y=[mv_c[0]], z=[mv_c[2]],
-            #     mode="markers", marker=dict(size=5, color="red"),
-            #     name="center_mv"
-            # ))
-
-            # # find the tricuspid valve & pulmonary valve centroid
-            # rv = (df_pred[3] == 1)
-            # myo_no_rv = (df_pred[2] == 1)
-            # rvv = (rv | myo_no_rv) ^ myo_no_rv
-            # rvv = RemoveSmallObjects(min_size=8)(rvv.unsqueeze(0)).squeeze(0)
-            # rvv_c = torch.nonzero(rvv).float()
-
-            # cluster_centers, *_ = find_cluster_centers(rvv_c, max_clusters=4)
-            
-            # for center in cluster_centers:
-            #     fig.add_trace(go.Scatter3d(
-            #         x=[center[1].item()], y=[center[0].item()], z=[center[2].item()],
-            #         mode="markers", marker=dict(size=5, color="green"),
-            #         name="center_rvv"
-            #     ))
         
     # Save the figure as HTML if requested
     if save_html and save_dir is not None:

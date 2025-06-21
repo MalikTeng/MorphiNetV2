@@ -38,9 +38,8 @@ class MorphiNetValidator:
         self.decoder = models['decoder']
         self.GSN = models['GSN']
         
-        # Data loaders
-        self.ct_valid_loader = dataloaders.get('ct_valid_loader')
-        self.mr_valid_loader = dataloaders.get('mr_valid_loader')
+        # Data loaders - store reference to manager for dynamic access
+        self.dataloader_manager = dataloaders
         
         # Helper modules
         self.preprocessor = preprocessor
@@ -84,18 +83,18 @@ class MorphiNetValidator:
         self._save_model_checkpoints(epoch)
         
         # Choose the validation loader and encoder
-        if save_on == "sct":
+        if save_on == "ct":
             modal = "ct"
             encoder = self.encoder_ct
-            valid_loader = self.ct_valid_loader
+            valid_loader = self.dataloader_manager.ct_valid_loader
             roi_size = self.super_params.crop_window_size
-        elif save_on == "cap":
+        elif save_on == "mr":
             modal = "mr"
             encoder = self.encoder_mr
-            valid_loader = self.mr_valid_loader
+            valid_loader = self.dataloader_manager.mr_valid_loader
             roi_size = self.super_params.crop_window_size[:2]
         else:
-            raise ValueError("Invalid dataset name")
+            raise ValueError(f"Invalid validation modality: {save_on}. Use 'ct' or 'mr'")
         
         encoder.eval()
         
@@ -174,7 +173,7 @@ class MorphiNetValidator:
                 
                 # Generate mesh predictions
                 template_mesh = self.mesh_ops.warp_template_mesh(df_pred)
-                template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float16))
+                template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float32))
                 
                 subdiv_mesh = self.GSN(template_mesh, self.mesh_ops.subdivided_faces.faces_levels, df_pred, self.mesh_ops.subdivided_faces.labels_levels)[-1]
                 
@@ -315,18 +314,18 @@ class MorphiNetValidator:
         print(f"Phase: UNet Only, Modal: {save_on.upper()}")
         
         # Choose validation components
-        if save_on == "sct":
+        if save_on == "ct":
             modal = "ct"
             encoder = self.encoder_ct
-            valid_loader = self.ct_valid_loader
+            valid_loader = self.dataloader_manager.ct_valid_loader
             roi_size = self.super_params.crop_window_size
-        elif save_on == "cap":
+        elif save_on == "mr":
             modal = "mr"
             encoder = self.encoder_mr
-            valid_loader = self.mr_valid_loader
+            valid_loader = self.dataloader_manager.mr_valid_loader
             roi_size = self.super_params.crop_window_size[:2]
         else:
-            raise ValueError("Invalid dataset name")
+            raise ValueError(f"Invalid validation modality: {save_on}. Use 'ct' or 'mr'")
         
         encoder.eval()
         
@@ -340,10 +339,23 @@ class MorphiNetValidator:
                     data[f"{modal}_label"].to(DEVICE),
                 )
                 
-                # Apply unflatten only for MR
+                # Filter out slices without labels for MR
                 if modal == 'mr':
-                    num_items_for_unflatten = 2
-                    seg_true = seg_true.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
+                    img, seg_true = self.preprocessor._filter_unlabeled_slices(img, seg_true)
+                    
+                    # Check if we have any data left after filtering
+                    if img.shape[0] == 0:
+                        print(f"Warning: No labeled slices found in MR batch {step}, skipping")
+                        continue
+                    
+                    # Debug: Check data dimensions after filtering
+                    print(f"Debug: After filtering - img shape: {img.shape}, roi_size: {roi_size}")
+                    
+                    # Adjust roi_size based on actual image dimensions
+                    if len(img.shape) == 4:  # (B, C, H, W) - 2D slices
+                        roi_size = roi_size  # Keep 2D roi_size
+                    elif len(img.shape) == 5:  # (B, C, D, H, W) - 3D volume
+                        roi_size = self.super_params.crop_window_size  # Use 3D roi_size
                 
                 # Run segmentation inference
                 seg_pred = sliding_window_inference(
@@ -355,9 +367,7 @@ class MorphiNetValidator:
                     mode="gaussian",
                 )
                 
-                # Apply unflatten only for MR
-                if modal == 'mr':
-                    seg_pred = seg_pred.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
+                # No unflatten needed for segmentation validation (data already filtered)
                 
                 # Convert to one-hot for metric computation
                 seg_pred_onehot = self.inference._convert_to_onehot(seg_pred, self.super_params.num_classes, is_prediction=True)
@@ -376,3 +386,111 @@ class MorphiNetValidator:
         }, step=epoch + 1, commit=True)
         
         return dice_score
+    
+    def validate_resnet(self, epoch, save_on):
+        """
+        Validate ResNet performance (UNet + ResNet pipeline without GSN).
+        
+        Args:
+            epoch: Current epoch number
+            save_on: Dataset to validate on ('ct' or 'mr')
+        
+        Returns:
+            Distance field MSE score
+        """
+        print(f"\n--- RESNET VALIDATION ---")
+        print(f"Phase: UNet + ResNet Only, Modal: {save_on.upper()}")
+        
+        self.decoder.eval()
+        
+        # Choose validation components
+        if save_on == "ct":
+            modal = "ct"
+            encoder = self.encoder_ct
+            valid_loader = self.dataloader_manager.ct_valid_loader
+            roi_size = self.super_params.crop_window_size
+        elif save_on == "mr":
+            modal = "mr"
+            encoder = self.encoder_mr
+            valid_loader = self.dataloader_manager.mr_valid_loader
+            roi_size = self.super_params.crop_window_size[:2]
+        else:
+            raise ValueError(f"Invalid validation modality: {save_on}. Use 'ct' or 'mr'")
+        
+        encoder.eval()
+        
+        # Initialize metrics
+        df_metric_batch_decoder = MSEMetric(reduction="mean_batch")
+        
+        with torch.no_grad():
+            for step, data in enumerate(valid_loader):
+                img, seg_true, df_true = (
+                    data[f"{modal}_image"].to(DEVICE),
+                    data[f"{modal}_label"].to(DEVICE),
+                    data[f"{modal}_df"].as_tensor().to(DEVICE),
+                )
+                num_items_for_unflatten = 1 if modal == 'ct' else 2
+                
+                # Apply unflatten only for MR
+                if modal == 'mr':
+                    seg_true = seg_true.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
+                
+                # Run inference through UNet
+                seg_pred = sliding_window_inference(
+                    img, 
+                    roi_size=roi_size, 
+                    sw_batch_size=8, 
+                    predictor=encoder,
+                    overlap=0.5, 
+                    mode="gaussian",
+                    device=torch.device('cpu'),
+                    buffer_steps=4,
+                    buffer_dim=-1,
+                )
+                
+                # Apply unflatten only for MR
+                if modal == 'mr':
+                    seg_pred = seg_pred.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
+                
+                # Process predictions through ResNet pipeline
+                seg_pred_ds_decoder_size = self.preprocessor._memory_efficient_post_transform(
+                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=True)
+                
+                seg_pred_ds = self.preprocessor._memory_efficient_post_transform(
+                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=False)
+                
+                # Calculate mask for refinement
+                binary_mask_pred = (torch.argmax(seg_pred_ds_decoder_size, dim=1, keepdim=True) == 0)
+                dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
+                mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor + 1).detach()
+                mask = mask * binary_mask_pred
+                mask[mask < self.mask_threshold] = 0
+                
+                # Apply decoder (ResNet) and combine predictions
+                decoder_output = self.decoder(seg_pred_ds)
+                seg_pred_ds = seg_pred_ds_decoder_size + mask * decoder_output
+                seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
+                
+                # Generate distance fields from ResNet output
+                foreground = seg_pred_ds > 0
+                lv = (seg_pred_ds == 1)
+                rv = (seg_pred_ds == 3)
+                myo = (seg_pred_ds == 2)
+                df_pred = torch.stack([
+                    distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
+                    for i in [foreground, lv, rv, myo]], dim=1)
+                
+                # Compute distance field metric (ResNet validation)
+                df_metric_batch_decoder(df_pred, df_true)
+        
+        # Calculate metrics
+        df_score_epoch = df_metric_batch_decoder.aggregate().mean()
+        
+        print(f"Distance Field MSE: {df_score_epoch:.4f}")
+        
+        # Log ResNet validation metrics
+        wandb.log({
+            f"resnet_validation/{modal}_df_mse": df_score_epoch
+        }, step=epoch + 1, commit=True)
+        
+        return df_score_epoch

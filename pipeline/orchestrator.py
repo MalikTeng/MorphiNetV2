@@ -5,6 +5,7 @@ import time
 import gc
 from collections import OrderedDict
 from trimesh import load
+from pytorch3d.structures import Meshes
 from monai.utils import set_determinism
 from monai.networks.nets import DynUNet
 
@@ -72,7 +73,6 @@ class MorphiNetOrchestrator:
         
         # Initialize model components
         self._initialize_models()
-        self.mesh_ops = MeshOperations(self.super_params, self.vert_label)
         self.inference = ModelInference(self.super_params)
         
         # Initialize training components (only if training)
@@ -158,13 +158,20 @@ class MorphiNetOrchestrator:
     
     def _initialize_mesh_components(self):
         """Initialize mesh-related components."""
-        # Load and process template mesh
-        template_mesh = load(self.super_params.template_mesh_dir)
+        # Load and process template mesh using trimesh
+        template_mesh_trimesh = load(self.super_params.template_mesh_dir)
+        
+        # Convert Trimesh object to PyTorch3D Meshes object
+        template_mesh = Meshes(
+            verts=[torch.tensor(template_mesh_trimesh.vertices, dtype=torch.float32)],
+            faces=[torch.tensor(template_mesh_trimesh.faces, dtype=torch.int64)]
+        ).to(DEVICE)
+        
         self.mesh_ops = MeshOperations(self.super_params)
-        self.mesh_ops._mesh_label(template_mesh)
+        self.mesh_ops._mesh_label(template_mesh_trimesh)  # Use trimesh object for mesh operations
         self.vert_label = self.mesh_ops.vert_label
         
-        # Initialize subdivision
+        # Initialize subdivision with PyTorch3D Meshes object
         self.subdivided_faces = Subdivision(
             template_mesh, self.super_params.subdiv_levels, mesh_label=self.vert_label
         )
@@ -199,7 +206,7 @@ class MorphiNetOrchestrator:
             schedulers=schedulers,
             scalers=scalers,
             loss_functions=loss_functions,
-            dataloaders=self.dataloader_manager.__dict__,
+            dataloaders=self.dataloader_manager,
             preprocessor=self.preprocessor,
             mesh_ops=self.mesh_ops,
             inference=self.inference,
@@ -210,7 +217,7 @@ class MorphiNetOrchestrator:
         self.validator = MorphiNetValidator(
             super_params=self.super_params,
             models=self.models,
-            dataloaders=self.dataloader_manager.__dict__,
+            dataloaders=self.dataloader_manager,
             preprocessor=self.preprocessor,
             mesh_ops=self.mesh_ops,
             inference=self.inference,
@@ -282,10 +289,13 @@ class MorphiNetOrchestrator:
             if (epoch + 1) % self.super_params.val_interval == 0:
                 if phase == "unet":
                     # For UNet phase, validate segmentation only
-                    self.validator.validate_segmentation(epoch, self.super_params.save_on)
+                    self.validator.validate_segmentation(epoch, self.super_params.validation_modality)
+                elif phase == "resnet":
+                    # For ResNet phase, validate UNet + ResNet pipeline
+                    self.validator.validate_resnet(epoch, self.super_params.validation_modality)
                 else:
-                    # For ResNet/GSN phases, validate full pipeline
-                    self.validator.validate(epoch, self.super_params.save_on)
+                    # For GSN phase, validate full pipeline
+                    self.validator.validate(epoch, self.super_params.validation_modality)
             
             # Epoch timing
             epoch_time = time.time() - epoch_start_time

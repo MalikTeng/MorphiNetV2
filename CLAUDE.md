@@ -36,12 +36,12 @@ chmod +x control.sh
 ./control.sh
 
 # Manual training
-python main.py --save_on sct --mr_json_dir ./dataset/dataset_task11_f0.json --template_mesh_dir ./template/template_mesh-myo.obj --max_epochs 100 --pretrain_epochs 50 --train_epochs 75
+python main.py --validation_modality ct --mr_json_dir ./dataset/dataset_task11_f0.json --template_mesh_dir ./template/template_mesh-myo.obj --max_epochs 100 --pretrain_epochs 50 --train_epochs 75
 ```
 
 ### Inference/Testing
 ```bash
-python test.py --save_on cap --mr_json_dir ./dataset/dataset_task11_f0.json --output_dir /path/to/output --ckpt_dir /path/to/checkpoint --template_mesh_dir ./template/template_mesh-myo.obj
+python test.py --validation_modality mr --target acdc --mr_json_dir ./dataset/dataset_task11_f0.json --output_dir /path/to/output --ckpt_dir /path/to/checkpoint --template_mesh_dir ./template/template_mesh-myo.obj
 ```
 
 ### Data Preprocessing
@@ -84,9 +84,10 @@ The system supports simultaneous CT + MR training. Use `--ct_ratio` to control t
 - `--iteration 10` - Distance field warping iterations
 
 ### Data Handling
-- `--_4d` - Enable for 4D CMR data
-- `--_mr` - Train exclusively on MR data
+- `--validation_modality ct/mr` - Validation modality ('ct' for CT data, 'mr' for MR data)
+- `--target dataset_name` - Target dataset identifier for testing (e.g., 'acdc', 'cap', 'scotheart')
 - `--crop_window_size 128 128 128` - Input patch size
+- Note: Deprecated parameters `--_4d` and `--_mr` have been removed
 
 ## Data Organization Requirements
 
@@ -108,11 +109,11 @@ template/
 └── control_mesh-rv.obj      # Right ventricle control mesh
 ```
 
-## Modular Architecture (NEW)
+## Modular Architecture
 
-The codebase has been refactored from a monolithic structure into clean, modular components:
+The codebase has been fully refactored from a monolithic structure (preserved in `@legacy_code/`) into clean, modular components:
 
-### New Structure
+### Current Modular Structure
 - **`data/`** - `DataLoaderManager`, `DataPreprocessor` for unified data handling
 - **`model/`** - `MeshOperations`, `ModelInference` for model-specific operations  
 - **`training/`** - `MorphiNetTrainer`, `MorphiNetValidator`, `LossManager` for training logic
@@ -120,31 +121,46 @@ The codebase has been refactored from a monolithic structure into clean, modular
 - **`pipeline/`** - `MorphiNetOrchestrator` for coordinating all components
 - **`utils/`** - `CheckpointManager` for model persistence
 
-### Usage Patterns
+### Training Commands (Updated)
 ```bash
-# New modular interface
-python main_modular.py --mode online --save_on sct
+# Primary training interface - automated 3-phase pipeline
+chmod +x control.sh
+./control.sh
 
-# Component demonstration
-python demo_modular.py
-
-# Backward compatible (original interface still works)
-python main.py --mode online --save_on sct
+# Direct modular training
+python main.py --validation_modality ct --mr_json_dir ./dataset/dataset_task11_f0.json --template_mesh_dir ./template/template_mesh-myo.obj --max_epochs 3 --pretrain_epochs 1 --train_epochs 2
 ```
 
 ### Programming Interface
 ```python
-# New modular approach
+# Recommended modular approach
+from pipeline.orchestrator import MorphiNetOrchestrator
+orchestrator = MorphiNetOrchestrator(super_params)
+orchestrator.train_full_pipeline()  # Automated 3-phase training
+
+# Alternative simplified interface
 from run_modular import create_training_pipeline
 pipeline = create_training_pipeline(super_params)
 pipeline.train_full_pipeline()
 
-# Or use orchestrator directly
-from pipeline.orchestrator import MorphiNetOrchestrator
-orchestrator = MorphiNetOrchestrator(super_params)
+# Backward compatibility (legacy interface still works)
+from run import TrainPipeline
+pipeline = TrainPipeline(super_params, seed=42, num_workers=4)
+```
 
-# Backward compatible
-from run import TrainPipeline  # Still works identically
+### Individual Component Usage
+```python
+# Use data loading independently
+from data.loaders import DataLoaderManager
+loader_manager = DataLoaderManager(config, num_workers=4)
+
+# Use mesh operations independently  
+from model.mesh_operations import MeshOperations
+mesh_ops = MeshOperations(config)
+
+# Use training components independently
+from training.trainer import MorphiNetTrainer
+trainer = MorphiNetTrainer(config, models, optimizers, ...)
 ```
 
 ## Development Notes
@@ -155,12 +171,65 @@ from run import TrainPipeline  # Still works identically
 - **Experiment tracking**: Weights & Biases integration (`--mode online/offline/disabled`)
 - **Interactive visualization**: Plotly-based 3D mesh visualization in `/iframe_figures/`
 - **Modular design**: Components can be tested and used independently
-- **Backward compatibility**: All existing code continues to work unchanged
+- **Clean architecture**: Only modular components supported
+- **Sample limiting**: Use `--max_samples N` to limit dataset size for testing (0 = full dataset)
+- **Half precision**: PyTorch3D mesh operations require float32, automatically handled
 
 ## Testing Framework
 
 - **Component testing**: `python demo_modular.py` tests all modular components
 - **Integration testing**: Individual components can be imported and tested separately
-- **Legacy testing**: `test.py` for inference validation (original approach)
+- **Inference testing**: Use modular pipeline for inference validation
 - **Visual validation**: Mesh reconstruction inspection and Plotly visualizations
 - **Quantitative metrics**: Computed via `evaluation/metrics.py` or `utils/tools.py`
+
+## Operational Flow Details
+
+- MorphiNet training consists of three stages: UNet phase, ResNet phase, and GSN phase
+- **UNet Phase**:
+  - Loads both MR and CT data
+  - Trains encoder_ct and encoder_mr networks
+  - Validates both MR and CT data encoders
+- **ResNet Phase**:
+  - Uses only CT data
+  - Passes frozen encoder_ct output to ResNet
+  - Combines ResNet output with frozen encoder_ct for final prediction
+  - Validates encoder_ct + ResNet combination
+- **GSN Phase**:
+  - Uses only CT data
+  - Employs frozen encoder_ct and frozen ResNet
+  - Generates prediction converted to distance field
+  - Processes distance field with warped template mesh in GSN network
+  - Validates full encoder_ct + ResNet + GSN pipeline
+- **Validation Modes**:
+  - When `validation_modality == 'ct'`: CT data used for validation/testing
+  - When `validation_modality == 'mr'`: MR data used for validation/testing
+- **Parameter Changes**:
+  - `save_on` renamed to `validation_modality` for clarity (now uses 'ct'/'mr' values)
+  - Added `target` parameter for testing dataset identification
+  - Added `max_samples` parameter for development/testing (0 = full dataset)
+  - Deprecated parameters `_mr` and `_4d` have been removed
+  - Legacy training modes removed - only modular architecture supported
+
+## Legacy Code Management
+
+- **Repository Policy**:
+  - `@legacy_code/` directory contains the original monolithic implementation
+  - Legacy code should NOT be edited but preserved for reference
+  - Contains older versions of code useful for understanding system evolution
+  - Original 2500+ line monolithic `run.py` preserved as historical reference
+
+## Recent Updates (Previous Session)
+
+### Bug Fixes Applied
+- **Training Loss Calculation**: Fixed zero loss issue by implementing dynamic dataloader access
+- **WandB Media Upload**: Resolved through proper dataloader integration (6+ media files per epoch)  
+- **Half Precision Compatibility**: Fixed PyTorch3D mesh operations with float32 conversion
+- **Sample Limiting**: Added configurable sample limiting for faster development cycles
+
+### Current Status
+- ✅ **Full Pipeline**: All three training phases (UNet → ResNet → GSN) working correctly
+- ✅ **Loss Calculation**: Training losses properly computed (UNet: ~5.8, ResNet: ~2.5)
+- ✅ **Validation**: Best model tracking and visualization generation operational
+- ✅ **Logging**: WandB integration fully functional with media uploads
+- ✅ **Memory Management**: Improved through modular architecture and garbage collection

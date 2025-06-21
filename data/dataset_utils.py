@@ -25,7 +25,10 @@ def collate_4D_batch(data: List[Dict[str, Union[torch.Tensor, np.ndarray]]]) -> 
                 if batch[key].dim() == 4:
                     batch[key] = batch[key].unsqueeze(1)
             else:
-                batch[key] = torch.stack([d[key] for d in data], dim=0)
+                # For MR data (not distance fields), concatenate along slice dimension
+                # and flatten to create 2D slices for 2D UNet processing
+                batch[key] = torch.concat([d[key] for d in data], dim=1)
+                batch[key] = batch[key].flatten(0, 1).unsqueeze(1)
         else:
             batch[key] = [d[key] for d in data]
     

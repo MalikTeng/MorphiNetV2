@@ -61,16 +61,20 @@ class DataLoaderManager:
     
     def _prepare_training_dataloaders(self, training_phase: str):
         """Prepare training dataloaders based on training phase."""
-        prepare_mr_train = (training_phase == "unet") or self.super_params.save_on == "cap"
-        prepare_ct_train = True or self.super_params.save_on == "sct"
+        # UNet phase: load both MR and CT data for training encoders
+        # ResNet/GSN phases: load only CT data
+        prepare_mr_train = (training_phase == "unet")
+        prepare_ct_train = True  # CT data always needed for training
         
         self._prepare_modal_dataloader("mr", "train", prepare_mr_train, training_phase)
         self._prepare_modal_dataloader("ct", "train", prepare_ct_train, training_phase)
     
     def _prepare_validation_dataloaders(self, validation_phase: str):
         """Prepare validation dataloaders based on validation phase."""
-        prepare_mr_valid = (validation_phase == "unet") or self.super_params.save_on == "cap"
-        prepare_ct_valid = (validation_phase == "unet") or self.super_params.save_on == "sct"
+        # UNet phase: validate both MR and CT encoders
+        # ResNet/GSN phases: validate based on save_on parameter
+        prepare_mr_valid = (validation_phase == "unet") or self.super_params.validation_modality == "mr"
+        prepare_ct_valid = (validation_phase == "unet") or self.super_params.validation_modality == "ct"
         
         transform_phase = "validation" if validation_phase == "network" else validation_phase
         
@@ -79,8 +83,9 @@ class DataLoaderManager:
     
     def _prepare_test_dataloaders(self):
         """Prepare test dataloaders."""
-        prepare_mr_test = self.super_params.save_on == "cap"
-        prepare_ct_test = self.super_params.save_on == "sct"
+        # Test data loading based on save_on parameter
+        prepare_mr_test = self.super_params.validation_modality == "mr"
+        prepare_ct_test = self.super_params.validation_modality == "ct"
         
         self._prepare_modal_dataloader("mr", "test", prepare_mr_test, "validation")
         self._prepare_modal_dataloader("ct", "test", prepare_ct_test, "validation")
@@ -141,9 +146,12 @@ class DataLoaderManager:
             data_json = json.load(f)
             data_list = self._remap_abs_path(data_json[data_split], modal, phase_suffix)
             
-            # Limit training data for testing (remove in production)
-            if data_type == "train":
-                data_list = data_list[:5]
+            print(f"DEBUG: {modal.upper()} {data_type} - JSON split '{data_split}' contains {len(data_list)} samples")
+            
+            # Apply sample limiting if specified
+            if self.super_params.max_samples > 0:
+                data_list = data_list[:self.super_params.max_samples]
+                print(f"  Limited to {len(data_list)} samples for {modal.upper()} {data_type} data")
             
             # Create dataset
             dataset = Dataset(
@@ -152,13 +160,16 @@ class DataLoaderManager:
             )
             
             # Create and assign dataloader
+            print(f"DEBUG: {modal.upper()} {data_type} - Dataset created with {dataset.__len__()} samples")
             if dataset.__len__() > 0:
                 dataloader = DataLoader(
                     dataset, batch_size=batch_size, shuffle=shuffle, 
                     num_workers=self.num_workers, collate_fn=collate_4D_batch
                 )
+                print(f"DEBUG: {modal.upper()} {data_type} - DataLoader created with {len(dataloader)} batches")
                 self._assign_dataloader(modal, data_type, dataloader, dataset)
             else:
+                print(f"WARNING: {modal.upper()} {data_type} - Dataset is empty, assigning None dataloader")
                 self._assign_dataloader(modal, data_type, None, None)
     
     def _assign_dataloader(self, modal: str, data_type: str, dataloader, dataset):
@@ -227,7 +238,7 @@ class DataLoaderManager:
             validation_phase: Phase for validation ("unet", "resnet", "gsn", "network")
             include_test: Whether to also prepare test dataloaders
         """
-        # Handle legacy include_test parameter
+        # Handle include_test parameter
         if include_test and "test" not in data_types:
             data_types = data_types + ["test"]
         

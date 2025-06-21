@@ -183,35 +183,44 @@ class DataPreprocessor:
         else:
             return processed_preds
     
-    def _filter_unlabeled_slices(self, seg_pred_list, seg_true_list, modal, threshold=0.1):
+    def _filter_unlabeled_slices(self, img, seg):
         """
-        Filter out slices with minimal foreground content to focus training on informative slices.
+        Filter out slices without labels between the first and last labeled slice.
+        Maintains corresponding slices in both halves of the data.
         
         Args:
-            seg_pred_list: List of prediction tensors
-            seg_true_list: List of ground truth tensors
-            modal: Modal type ("ct" or "mr")
-            threshold: Minimum foreground ratio to keep a slice
-        
-        Returns:
-            Filtered lists of predictions and ground truth tensors
-        """
-        filtered_pred_list = []
-        filtered_true_list = []
-        
-        for seg_pred, seg_true in zip(seg_pred_list, seg_true_list):
-            # Calculate foreground ratio
-            if seg_true.dim() == 4:  # (C, D, H, W)
-                foreground_ratio = (seg_true > 0).float().mean().item()
-            else:
-                foreground_ratio = (seg_true > 0).float().mean().item()
+            img: Input image tensor
+            seg: Input segmentation tensor
             
-            # Keep slice if it has sufficient foreground content
-            if foreground_ratio >= threshold:
-                filtered_pred_list.append(seg_pred)
-                filtered_true_list.append(seg_true)
+        Returns:
+            Filtered image and segmentation tensors
+        """
+        half_size = seg.shape[0]//2
+        mask = seg[:half_size] > 0
+        has_label = mask.any(dim=1).any(dim=1).any(dim=1)
         
-        return filtered_pred_list, filtered_true_list
+        if has_label.sum() > 0:  # Only process if at least one slice has a label
+            start_idx = torch.where(has_label)[0].min()
+            end_idx = torch.where(has_label)[0].max()
+            
+            # Create a full mask: keep slices outside [start_idx, end_idx] and labeled slices within range
+            full_mask = torch.ones_like(has_label, device=img.device, dtype=torch.bool)
+            full_mask[start_idx:end_idx+1] = has_label[start_idx:end_idx+1]  # Only filter unlabeled slices within range
+            
+            # Get valid indices from first half
+            first_half_indices = torch.where(full_mask)[0]
+            
+            # Create corresponding indices for the second half
+            second_half_indices = first_half_indices + half_size
+            
+            # Combine indices from both halves
+            valid_indices = torch.cat([first_half_indices, second_half_indices])
+            
+            # Apply the mask
+            img = img[valid_indices]
+            seg = seg[valid_indices]
+            
+        return img, seg
     
     def _convert_to_onehot(self, seg_tensor, num_classes):
         """
@@ -268,3 +277,4 @@ class DataPreprocessor:
             slice_viz = (slice_norm * 255).astype(np.uint8)
         
         return slice_viz
+    
