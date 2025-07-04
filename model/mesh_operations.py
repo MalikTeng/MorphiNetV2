@@ -103,12 +103,40 @@ class MeshOperations:
 
         mesh_true = []
         for seg_true_ in seg_true_multi:
+            # DEBUG: Log the tensor transformation for coordinate tracing
+            original_shape = seg_true_.shape
+            squeezed_shape = seg_true_.squeeze(1).shape
+            permuted_tensor = seg_true_.squeeze(1).permute(0, 3, 1, 2)
+            permuted_shape = permuted_tensor.shape  # Using permutated tensor with shape (N, D, H, W)
+            
+            print(f"\n🔍 SURFACE_EXTRACTOR DEBUG:")
+            print(f"📊 Original tensor shape: {original_shape}")
+            print(f"📊 After squeeze(1): {squeezed_shape}")  
+            print(f"📊 Interpretation: (N, H, W, D) → (N, D, H, W) → marching_cubes input")
+            print(f"📊 Axis mapping for marching_cubes:")
+            print(f"    - Axis 1 (D) → Z coordinate in output mesh")
+            print(f"    - Axis 2 (H) → Y coordinate in output mesh")  
+            print(f"    - Axis 3 (W) → X coordinate in output mesh")
+            
             # Apply marching cubes to extract surface
             verts, faces = marching_cubes(
-                seg_true_.squeeze(1).permute(0, 3, 1, 2).to(torch.float32), 
+                permuted_tensor.to(torch.float32),  # ✅ FIXED: Use permuted tensor with correct axis order (N, D, H, W)
                 isolevel=0.1,
                 return_local_coords=True,
             )
+            
+            # DEBUG: Log the output mesh properties
+            if len(verts) > 0:
+                first_verts = verts[0].detach().cpu().numpy()
+                print(f"🔍 MARCHING_CUBES OUTPUT:")
+                print(f"📊 Number of meshes: {len(verts)}")
+                print(f"📊 First mesh vertices shape: {first_verts.shape}")
+                print(f"📊 Vertex coordinate ranges:")
+                print(f"    - X: [{first_verts[:, 0].min():.3f}, {first_verts[:, 0].max():.3f}]")
+                print(f"    - Y: [{first_verts[:, 1].min():.3f}, {first_verts[:, 1].max():.3f}]")
+                print(f"    - Z: [{first_verts[:, 2].min():.3f}, {first_verts[:, 2].max():.3f}]")
+                print(f"📊 Mesh centroid: [{first_verts[:, 0].mean():.3f}, {first_verts[:, 1].mean():.3f}, {first_verts[:, 2].mean():.3f}]")
+            
             # Apply Taubin smoothing to the extracted mesh
             mesh_true.append(taubin_smoothing(Meshes(verts, faces), 0.77, -0.34, 30))
 

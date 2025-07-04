@@ -24,6 +24,7 @@ from monai.transforms import (
 )
 
 from data.components import *
+import data_check.transformation
 
 __all__ = ["pre_transform"]
 
@@ -33,6 +34,12 @@ def pre_transform(
         crop_window_size: list, pixdim: list, spacing: float = 2.0,
         phase: str = "validation",  # "unet", "resnet", "gsn", "ndf", "validation"
         upscale_ratio: int = 2,  # Add upscale_ratio parameter for decoder-sized distance field
+        custom_translation: tuple = (0, 0, 0),
+        custom_rotation_axis: str = None,
+        custom_rotation_direction: str = 'cw',
+        custom_rotation_count: int = 0,
+        custom_flip_plane: str = None,
+        custom_affine_matrix: np.ndarray = None,
         **kwargs
 ):
     """
@@ -48,6 +55,9 @@ def pre_transform(
         pixdim: the spatial distance of the downsampled images and labels.
         spacing: target spacing for isotropic resampling.
         phase: current processing phase, determining which keys are generated.
+        custom_translation: custom translation parameters (multiples of 32 pixels).
+        custom_rotation_axis: custom rotation axis ('x', 'y', 'z', or None).
+        custom_rotation_direction: custom rotation direction ('cw' or 'ccw').
     """
     target = kwargs.get("target")   # this flag is used for ACDC dataset specifically, because of its unique data configuration
     target = target.lower() if target is not None else None
@@ -81,16 +91,18 @@ def pre_transform(
                     [spacing] * 3 if modal == "ct" else [spacing, spacing, -1], 
                     mode=("bilinear", "nearest"), 
                     allow_missing_keys=True),
-            Orientationd(keys, axcodes="RAS", allow_missing_keys=True),     # (D, W, H)
-            # Add DynUNet padding after spacing and orientation - only for main image and label
-            # CT uses 3D DynUNet, MR uses 2D DynUNet
-            DynUNetPaddingd([keys[0], keys[1]], strides=strides, 
-                           spatial_dims=3 if modal == "ct" else 2, 
-                           allow_missing_keys=True),
+            # Apply custom transformation if matrix is provided
+            *([data_check.transformation.CustomTransformationd(keys, custom_affine_matrix, allow_missing_keys=True)] 
+              if custom_affine_matrix is not None else []),
+            # # Add DynUNet padding after spacing and orientation - only for main image and label
+            # # CT uses 3D DynUNet, MR uses 2D DynUNet
+            # DynUNetPaddingd([keys[0], keys[1]], strides=strides, 
+            #                spatial_dims=3 if modal == "ct" else 2, 
+            #                allow_missing_keys=True),
         ])
 
-    # Only load distance fields for validation (distance fields are only needed for @valid)
-    load_distance_fields = (section == "valid")
+    # Only load distance fields for GSN/full network validation (not needed for UNet or ResNet phases)
+    load_distance_fields = (section == "valid" and phase in ["gsn", "validation"])
 
     if load_distance_fields:
         # Calculate target size for distance field (decoder-sized for validation)

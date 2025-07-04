@@ -9,7 +9,7 @@ from monai.transforms.utils import distance_transform_edt
 import nibabel as nib
 
 
-__all__ = ["Maskd", "DFConvertd", "Adjustd", "FlexResized", "Probd", "DynUNetPaddingd"]
+__all__ = ["Maskd", "DFConvertd", "Adjustd", "FlexResized", "Probd", "DynUNetPaddingd", "CustomTransformationd"]
 
 
 class Maskd(MapTransform):
@@ -101,11 +101,13 @@ class FlexResized(MapTransform):
         keys: Keys to apply the transform to (e.g., ["pred", "label"])
         size: Target size tuple, -1 preserves original dimension (e.g., (-1, 128, -1))
         allow_missing_keys: Whether to allow missing keys
+        force_nearest: Whether to force nearest interpolation for all keys (useful for labels)
     """
-    def __init__(self, keys: KeysCollection, size: tuple, allow_missing_keys: bool = False) -> None:
+    def __init__(self, keys: KeysCollection, size: tuple, allow_missing_keys: bool = False, force_nearest: bool = False) -> None:
         super().__init__(keys, allow_missing_keys)
         self.target_size = np.array([int(s) for s in size])
         self.allow_missing_keys = allow_missing_keys
+        self.force_nearest = force_nearest
 
     def __call__(self, data):
         # Determine available keys and their roles
@@ -162,11 +164,20 @@ class FlexResized(MapTransform):
         # Apply resize transformation
         if pred_key and label_key:
             # Both prediction and label available
-            data = Resized([pred_key, label_key], new_shape, size_mode="all", 
-                          mode=("bilinear", "nearest"))(data)
+            if self.force_nearest:
+                # Force nearest interpolation for all keys (label-safe)
+                data = Resized([pred_key, label_key], new_shape, size_mode="all", 
+                              mode="nearest")(data)
+            else:
+                # Use appropriate interpolation for each key type
+                data = Resized([pred_key, label_key], new_shape, size_mode="all", 
+                              mode=("bilinear", "nearest"))(data)
         elif available_keys:
             # Only one key available - determine appropriate mode
-            mode = "nearest" if "label" in available_keys[0] else "bilinear"
+            if self.force_nearest:
+                mode = "nearest"  # Force nearest when requested
+            else:
+                mode = "nearest" if "label" in available_keys[0] else "bilinear"
             data = Resized(available_keys, new_shape, size_mode="all", mode=mode)(data)
         
         return data
@@ -378,6 +389,75 @@ class DynUNetPaddingd(MapTransform):
                 if not self.allow_missing_keys:
                     raise KeyError(f"Error processing key '{key}' in DynUNetPaddingd: {str(e)}")
                 print(f"Warning: Skipping key '{key}' due to error: {str(e)}")
+        
+        return data_dict
+
+
+class CustomTransformationd(MapTransform):
+    """
+    Apply a 4×4 affine (index-space) matrix to MetaTensor data with proper affine compensation.
+    Only supports flip operations on 4D data (C,D,H,W) for MONAI pipeline compatibility.
+    
+    Mathematical framework:
+    - Input coordinates: X, Original affine: M, Transformation: M'
+    - Target coordinates: X' = M @ X (patient coordinate system)  
+    - After transformation: X' = M @ P @ M' @ X, where P = M'^(-1) is compensation matrix
+    - Final affine: M @ P, Final data: M' @ X
+    
+    Args:
+        keys: Keys to apply the transformation to (must contain MetaTensor data)
+        matrix: 4x4 transformation matrix in index space
+        allow_missing_keys: Whether to allow missing keys
+    """
+    
+    def __init__(self, keys: KeysCollection, matrix: np.ndarray, allow_missing_keys: bool = False):
+        super().__init__(keys, allow_missing_keys)
+        self.compensation_matrix = np.linalg.inv(matrix)
+        
+        # Pre-compute flip axes from transformation matrix
+        R = matrix[:3, :3]
+        self.flip_dims = [i + 1 for i in range(3) if R[i, i] < 0]  # +1 for (C,D,H,W) indexing
+
+    def __call__(self, data):
+        data_dict = dict(data)
+        
+        for key in self.keys:
+            if key not in data_dict:
+                if self.allow_missing_keys:
+                    continue
+                raise KeyError(f"Key '{key}' not found in data")
+            
+            metatensor = data_dict[key]
+            if not isinstance(metatensor, MetaTensor):
+                raise TypeError(f"Expected MetaTensor for key '{key}', got {type(metatensor)}")
+            
+            # Ensure CPU processing
+            if metatensor.is_cuda:
+                metatensor = metatensor.cpu()
+            
+            # Get tensor data and validate shape
+            tensor_data = metatensor.get_array()
+            if tensor_data.ndim != 4:
+                raise ValueError(f"Expected 4D tensor (C,D,H,W), got shape {tensor_data.shape}")
+            
+            # Ensure tensor data is a torch tensor
+            if isinstance(tensor_data, np.ndarray):
+                tensor_data = torch.from_numpy(tensor_data)
+            
+            # Apply flips to spatial dimensions (M' @ X)
+            if self.flip_dims:
+                tensor_data = torch.flip(tensor_data, dims=self.flip_dims)
+            
+            # Compute compensated affine: M @ P = M @ M'^(-1)
+            original_affine = metatensor.affine.cpu().numpy() if metatensor.affine.is_cuda else metatensor.affine.numpy()
+            compensated_affine = torch.from_numpy(original_affine @ self.compensation_matrix).to(metatensor.affine.dtype)
+            
+            # Create new MetaTensor with compensated affine
+            data_dict[key] = MetaTensor(
+                tensor_data, 
+                affine=compensated_affine,
+                applied_operations=metatensor.applied_operations if hasattr(metatensor, 'applied_operations') else None
+            )
         
         return data_dict
 

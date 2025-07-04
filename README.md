@@ -1,284 +1,331 @@
-# Adaptive Bi-ventricle Surface Reconstruction from Cardiovascular Imaging
+# MorphiNet Data Orientation Interactive Workflow
 
-This repository contains scripts and tools for the paper "Adaptive Bi-ventricle Surface Reconstruction from Cardiovascular Imaging". 
+**🫀 Cardiac AI System**: MorphiNet reconstructs 3D cardiac surface meshes from CT/CMR images using a three-stage neural pipeline (UNet → ResNet → GSN).
 
-**🔄 Major Update (June 2025)**: The codebase has been completely refactored into a **modular architecture** for better maintainability, extensibility, and ease of use. The original monolithic implementation has been preserved in the `legacy_code/` folder for reference.
+This repository provides an **interactive data orientation workflow** via `data_check/orientation.py` to ensure your cardiac imaging data is correctly oriented before training or inference.
 
-![Figure 1](figure/Fig-1.png)
+## 🎯 Quick Start - Data Orientation Workflow
+
+The `orientation.py` script provides a **5-section interactive notebook** to:
+1. **Process** your cardiac dataset (baseline)
+2. **Visualize** the raw orientation 
+3. **Configure** custom transformations (rotation/flip)
+4. **Apply** transformations and re-process data
+5. **Validate** the corrected orientation
+
+### Prerequisites
+
+1. **Install MorphiNet Environment**:
+   ```bash
+   git clone https://github.com/MalikTeng/MorphiNet
+   cd MorphiNet
+   conda env create -f environment.yml
+   conda activate morphinet
+   ```
+
+2. **Required Dependencies**:
+   - PyTorch 2.1.0 with CUDA 11.8
+   - `ipywidgets` (for interactive interface)
+   - `plotly` (for 3D visualization)
+   - `trimesh` (for mesh operations)
+
+3. **Verify Project Structure**:
+   ```
+   MorphiNet/
+   ├── data/                    # Data processing modules
+   ├── model/                   # Neural network models  
+   ├── dataset/                 # Dataset JSON configurations
+   ├── template/                # Template mesh files
+   └── data_check/              # Interactive workflow tools
+       └── orientation.py       # Main orientation script
+   ```
+
+### How to Launch
+
+**Option 1 - Jupyter Notebook (Recommended)**:
+```bash
+# Open in JupyterLab
+jupyter lab data_check/orientation.py
+
+# Or VS Code with Jupyter extension
+code data_check/orientation.py
+```
+
+**Option 2 - Command Line**:
+```bash
+# Convert and execute as notebook
+jupyter nbconvert --to notebook --execute data_check/orientation.py
+```
+
+## 📋 Section-by-Section Workflow
+
+### Section 1: 📋 Preparation
+**Purpose**: Environment setup and dependency loading
+
+**What happens**:
+- Automatically detects MorphiNet root directory
+- Loads heavy dependencies (torch, plotly, trimesh, widgets)
+- Runs environment checks for required folders
+- Configures optimized processing parameters
+
+**Expected output**:
+```
+✅ All dependencies loaded successfully
+✅ MorphiNet project structure verified
+✅ Interactive widgets available
+✅ Preparation completed in X.XX seconds
+```
+
+**If you see errors**: Install missing dependencies or verify folder structure.
+
+---
+
+### Section 2: 📂 Data Processing (Baseline)
+**Purpose**: Process cardiac dataset with default orientation
+
+**Interactive interface**:
+- **Dataset dropdown**: Choose SCOTHEART (CT), ACDC (MR), CAP (MR), or MMWHS (CT)
+- **Max samples slider**: Start with 1 sample for testing
+- **Process button**: Begins data processing
+
+**What to do**:
+1. Select a dataset (SCT recommended for demos)
+2. Click "🔄 Process Data"
+3. Wait for processing completion
+
+**Expected output**:
+```
+✅ Successfully processed 1 sample(s)!
+📊 Dataset: SCT
+📊 Modality: CT
+📋 Image shape: [1, 200, 32, 32, 32]
+📋 Label shape: [200, 32, 32, 32]
+```
+
+**Result**: Baseline (untransformed) data ready for visualization.
+
+---
+
+### Section 3: 🎨 Initial Visualization (Baseline)
+**Purpose**: Visualize raw data orientation to identify issues
+
+**Interactive interface**:
+- **Check data button**: Loads processed data from Section 2
+- **Sample dropdown**: Select which sample to visualize
+- **Structure dropdown**: Choose Left Ventricle (1), Myocardium (2), or Right Ventricle (3)
+- **Max points slider**: Control point cloud density (5K-15K)
+
+**What to do**:
+1. Click "🔍 Check Processed Data"
+2. Select sample and structure (Myocardium recommended)
+3. Click "🎨 Create Visualization"
+
+**Expected output**:
+- Interactive 3D Plotly visualization
+- Surface point cloud + template mesh overlay
+- Colored coordinate axes (X=red, Y=green, Z=blue)
+
+**What to look for**: Note the orientation of heart structures relative to coordinate axes. This is your **baseline reference**.
+
+---
+
+### Section 4: 🔧 Custom Transformation Matrix Generation
+**Purpose**: Create rotation/flip transformations to correct orientation
+
+**Interactive controls**:
+- **Rotation Axis**: X, Y, or Z axis
+- **Direction**: Clockwise (CW) or Counter-clockwise (CCW)
+- **Count**: 0-3 quarter turns (×90°)
+- **Flip Plane**: XY, XZ, or YZ plane
+- **Sequence**: Order of operations (Flip → Rotation or Rotation → Flip)
+
+**Three-step workflow**:
+1. **Configure**: Set rotation and flip parameters
+2. **Generate**: Click "🔄 Generate Matrix" to preview transformation
+3. **Confirm**: Click "✅ Confirm Transform" to store matrix
+
+**Expected output**:
+```
+📐 PHYSICAL-SPACE MATRIX (For User Inspection):
+[[ 0.  0.  1.  0.]
+ [ 0.  1.  0.  0.]
+ [-1.  0.  0.  0.]
+ [ 0.  0.  0.  1.]]
+
+📐 Basis Vector Transformations:
+   +X direction [1, 0, 0] → [0, 0, -1]
+   +Y direction [0, 1, 0] → [0, 1, 0] 
+   +Z direction [0, 0, 1] → [1, 0, 0]
+
+✅ Transformation confirmed and stored!
+```
+
+**Result**: Custom transformation matrix ready for data processing.
+
+---
+
+### Section 4.5: 🚀 Apply Custom Transformation to Data
+**Purpose**: Re-process data with confirmed transformation matrix
+
+**What happens**:
+- Automatically detects transformation matrix from Section 4
+- Uses same dataset selected in Section 2
+- Applies custom transformation during processing
+
+**What to do**:
+1. Verify transformation matrix is confirmed
+2. Select same dataset as Section 2
+3. Click "🔄 Process Data"
+
+**Expected output**:
+```
+🔄 Applying custom transformation matrix to data processing
+✅ Successfully processed 1 sample(s) with transformation!
+🔍 Verifying transformation was applied...
+```
+
+**Result**: Transformed data ready for final validation.
+
+---
+
+### Section 5: 🎭 Visualize Transformed Data  
+**Purpose**: Validate transformation results and compare with baseline
+
+**What to do**:
+1. Click "🔍 Check Processed Data" (automatically uses transformed data)
+2. Select same sample and structure as Section 3
+3. Click "🎨 Create Visualization"
+
+**Expected output**:
+- New 3D visualization with corrected orientation
+- Same coordinate axes for easy comparison with Section 3
+
+**Validation checklist**:
+- ✅ Heart structures aligned with expected coordinate directions
+- ✅ Template mesh properly overlays point cloud
+- ✅ Coordinate axes show intuitive anatomical orientation
+
+## 🔄 Common Transformation Examples
+
+### Y-axis 90° CCW Rotation (Most Common)
+```
+Configuration:
+- Rotation Axis: Y-axis
+- Direction: Counter-clockwise  
+- Count: 1
+- Flip: None
+
+Effect: Rotates X→Z, Z→-X (frontal view correction)
+```
+
+### XY Plane Flip
+```
+Configuration:
+- Rotation: None
+- Flip Plane: XY
+
+Effect: Flips Z-axis direction (superior/inferior correction)
+```
+
+### Combined Transform
+```
+Configuration:
+- Rotation Axis: Z-axis, CW, Count: 1
+- Flip Plane: YZ  
+- Sequence: Flip → Rotation
+
+Effect: First flips X-axis, then rotates around Z-axis
+```
+
+## 🛠️ Troubleshooting
+
+### Common Issues
+
+**"No processed data found"**
+- Solution: Complete Section 2 first
+
+**"Interactive widgets not available"**
+- Solution: `pip install ipywidgets`, restart kernel
+
+**"No surface mesh extracted"**
+- Solution: Try different label value (1, 2, or 3) or different dataset
+
+**Visualization shows no transformation**
+- Solution: Check Section 4 confirmation message, ensure matrix was stored
+
+**"Files not found" during processing**
+- Solution: Verify dataset paths in `dataset/` folder and data directories
+
+### Performance Tips
+
+- Start with 1 sample for testing
+- SCT dataset is most reliable for demos
+- Use 8,000 points for good quality/speed balance
+- Processing typically takes 1-2 minutes per sample
+
+## 🎯 Expected Final Result
+
+After completing all sections, you will have:
+
+1. ✅ **Baseline data** processed and visualized (Sections 2 & 3)
+2. ✅ **Custom transformation matrix** defined and confirmed (Section 4)  
+3. ✅ **Transformed data** processed with new orientation (Section 4.5)
+4. ✅ **Validation visualization** showing corrected alignment (Section 5)
+5. ✅ **Reusable transformation matrix** for training/inference workflows
+
+The confirmed transformation matrix can be applied to your entire dataset during MorphiNet training or inference using the `custom_affine_matrix` parameter.
+
+## 📚 Next Steps
+
+Once data orientation is validated:
+
+1. **Training**: Use the transformation matrix in main MorphiNet training pipeline
+2. **Inference**: Apply same transformation to new data for consistent results  
+3. **Batch Processing**: Scale the confirmed transformation to process entire datasets
+
+For full MorphiNet training and inference instructions, see the complete documentation in the repository.
 
 ## 🏗️ Architecture Overview
 
-MorphiNet now features a clean, modular architecture:
+MorphiNet features a modular architecture:
 
 ```
 MorphiNet/
 ├── data/                    # Data processing and loading
-│   ├── loaders.py          # DataLoaderManager 
-│   └── preprocessors.py    # DataPreprocessor
-├── model/                   # Neural network models
-│   ├── networks.py         # UNet, ResNet, GSN definitions
-│   ├── mesh_operations.py  # Mesh processing operations
-│   └── inference.py        # Model inference utilities
-├── training/                # Training components
-│   ├── trainer.py          # MorphiNetTrainer
-│   ├── validators.py       # MorphiNetValidator
-│   └── losses.py           # LossManager (optimizers, schedulers, losses)
+├── model/                   # Neural network models (UNet, ResNet, GSN)
+├── training/                # Training components and losses
 ├── evaluation/              # Evaluation and metrics
-│   └── metrics.py          # MorphiNetMetrics
 ├── pipeline/                # Pipeline orchestration
-│   └── orchestrator.py     # MorphiNetOrchestrator (main coordinator)
-├── utils/                   # Utilities
-│   ├── checkpoint_manager.py # Model checkpointing
-│   └── tools.py            # General utilities
+├── utils/                   # Utilities and checkpoint management
+├── data_check/              # Interactive orientation workflow
+│   └── orientation.py       # Main orientation validation script
 ├── main.py                  # Main training script (modular)
 ├── run.py                   # Backward compatibility layer
 └── legacy_code/             # Original monolithic implementation
 ```
 
-### Key Improvements
-
-- **🔧 Modular Design**: Clean separation of concerns with focused components
-- **📚 Better Documentation**: Comprehensive inline documentation and type hints
-- **🔄 Backward Compatibility**: Existing workflows continue to work unchanged
-- **🧪 Comprehensive Testing**: Full test coverage for all components
-- **📈 Enhanced Maintainability**: Easier to extend and modify individual components
-
-## Contact
-
-Connect with the author: [Malik Teng on LinkedIn](https://www.linkedin.com/in/malik-teng-86085149/)
-
 ## Installation
 
-Tested environment: Ubuntu 20.04.6 LTS, Python 3.10, PyTorch 2.1.0, CUDA 11.8
-
-To install:
-
-1. Clone the repository:
-```
-git clone https://github.com/MalikTeng/MorphiNet
-```
-
-2. Install the conda environment using one of these methods:
-
 ### Method 1: Using environment.yml (Basic installation)
-```
+```bash
 conda env create -f environment.yml
 conda activate morphinet
 ```
 
 ### Method 2: Using the installation script (Recommended)
-This script will create the conda environment and handle all dependencies including PyTorch3D:
-```
+```bash
 chmod +x install_morphinet.sh
 ./install_morphinet.sh
 ```
 
-### Environment Requirements and Compatibility Notes
-
-- **Python**: Version 3.10 (compatible with all required packages)
+### Environment Requirements
+- **Python**: Version 3.10
 - **PyTorch**: Version 2.1.0 with CUDA 11.8 support
 - **PyTorch3D**: Installed from conda using the pytorch3d channel
-- **PyTorch Geometric**: Version 2.4.0 with corresponding extensions
-- **CUDA**: Version 11.8 (must match the PyTorch CUDA version)
+- **CUDA**: Version 11.8 (must match PyTorch CUDA version)
 
-If you encounter issues with PyTorch3D installation, please refer to the [PyTorch3D installation guide](https://github.com/facebookresearch/pytorch3d/blob/main/INSTALL.md).
+---
 
-## Preprocessing
+**Contact**: [Malik Teng on LinkedIn](https://www.linkedin.com/in/malik-teng-86085149/)
 
-Data preprocessing is required to ensure images, segmentations, and template meshes are in the same space.
-
-1. For new CMR data, use `data_preprocessing.py`. Follow the instructions in the script to produce `.seq.nrrd` files from `.dcm` data.
-
-    _If you have image & segmentation mask for your data, you may check if your data is in the same orientation as required using the Jupyter Notebook `orientation.ipynb`._
-
-    __Please be noted that ensuring your data is in the same orientation is crucial for the network to learn the correct features.__
-
-2. Create a data list JSON file:
-```
-$ python utils/create_datalist.py \
-    --input_dir /path/to/your/preprocessed/data \
-    --file_extension .nrrd \    # or .nii.gz based on your data format
-    --task_name name_of_your_data \
-    --description \             # a description of your data for reference
-    --labels {'0': 'background', '1': 'lv', '2': 'lv-myo', '3'; 'rv', '4': 'rv-myo'} \                 
-                                # default segmentation labels for left and right ventricular cavity and myocardium
-    --modality CT \             # or 'MR' based on your data modality
-
-    # By default, the script will create a crossvalidation list based on the whole dataset provided, if you would like to create a json file only for inference, add the following flag
-    --inference
-```
-
-## Data Organization
-
-### Data
-
-The data used in the paper is available upon request (details in the paper). Organize your data as follows:
-
-```
-DATASET_NAME
-├── imagesTr
-│   ├── 1.nii.gz (or 1*.nrrd)
-│   ├── 2.nii.gz ...
-│   └── ...
-├── labelsTr
-│   ├── 1.nii.gz (or 1*.nrrd)
-│   ├── 2.nii.gz ...
-│   └── ...
-├── imagesTs
-│   ├── 1.nii.gz (or 1*.nrrd)
-│   ├── 2.nii.gz ...
-│   └── ...
-└── labelsTs
-    ├── 1.nii.gz (or 1*.nrrd)
-    ├── 2.nii.gz ...
-    └── ...
-```
-
-`*Tr` folders contain training and validation data, while `*Ts` folders contain test data.
-
-### Template Meshes
-
-Organize template meshes as follows:
-
-```
-template
-├── template_mesh-myo.obj   
-├── control_mesh-lv.obj
-├── control_mesh-myo.obj
-└── control_mesh-rv.obj
-```
-
-Note: The `template_mesh` is derived from the shape atlas method in [Charlène et al., JCMR 2019](https://www.sciencedirect.com/science/article/pii/S1097664723002144).
-
-## Training
-
-The training process consists of three stages:
-1. UNet: Optimizing segmentation UNets
-2. ResNet: Learning a continuous distance field
-3. GSN: Deforming and refining the template mesh
-
-### Modular Training (Recommended)
-
-To run the training process with the new modular architecture:
-
-```bash
-python main.py \
-    --save_on sct \
-    --mr_json_dir ./dataset/dataset_task11_f0.json \
-    --mr_data_dir /path/to/preprocessed/MR/data \
-    --ct_json_dir ./dataset/dataset_task20_f0.json \
-    --ct_data_dir /path/to/preprocessed/CT/data \
-    --template_mesh_dir ./template/template_mesh-myo.obj \
-    --max_epochs 200 \
-    --pretrain_epochs 100 \
-    --train_epochs 150 \
-    --val_interval 10
-```
-
-### Legacy Training
-
-For users who prefer the original epoch-by-epoch training approach, the legacy implementation is available in the `legacy_code/` folder:
-
-```bash
-# Use the legacy control script
-cd legacy_code
-chmod +x control.sh
-./control.sh
-```
-
-### Training Parameters
-```
-$ python main.py \
-    --save_on sct \             # option to run the network on either CT ('sct') or CMR ('mr') data
-    --mr_json_dir ./dataset/dataset_taskXX_f0.json # dataset file for CMR data \
-    --mr_data_dir /path/to/preprocessed/CMR/data \
-
-    --template_mesh_dir ./template/template_mesh-myo.obj \
-    --subdiv_levels 2 \         # the number of GSN layers equates the subdivision level in a Loop surface subdivision method
-
-    --use_ckpt /path/to/your/network/check_point/ \
-    --pretrain_epochs 100 \     # 100 epochs to train segmentation UNets
-    --train_epochs 150 \        # 50 epochs to train ResNet
-    --max_epochs 200 \          # 50 epochs to train GSN
-    --val_interval 10 \         # evaluate the network after every 10 epochs
-
-    --hidden_features_gsn 64 \  # size of hidden features for GSN layers
-    --pixdim 4 4 4 \            # volume spacing of downsized latent feature from the last UNet layer
-    --lambda_0 2.07 \           # coefficient for Chamfer distance term in loss
-    --lambda_1 0.89 \           # for Laplacian smoothing term
-    --iteration 5 \             # iterations for warping template mesh in the learnt distance field
-    --lr 0.001 \                # learning rate
-    --batch_size 1 \            # batch size, unfortunately, only support batch size of 1
-    --mode online \             # online mode for wandb, can be 'online', 'offline', or 'disabled'
-
-    # add the following if
-    --_4d \                     # if your data is 4D, add this flag
-    --_mr                       # if you want to train the network solely on MR image data, add this flag
-```
-
-## Inference
-
-Use the provided network checkpoint `pretrained/trained_weights/best*.pth` for inference on CMR or CT image data.
-
-Ensure your data is preprocessed and organized similarly to the training data. Use 4D CMR image data in `.nrrd` format or 4D CMR/3D CT image data in `.nii` or `.nii.gz` format. 3D CMR image data in `.nii` or `.nii.gz` is supported but 4D CMR data is not tested.
-
-### Modular Inference
-
-```bash
-python -c "
-from run import create_inference_pipeline
-import argparse
-
-# Create minimal config for inference
-config = argparse.Namespace(
-    save_on='sct',
-    mr_json_dir='./dataset/dataset_task11_f0.json',
-    ct_json_dir='./dataset/dataset_task20_f0.json',
-    template_mesh_dir='./template/template_mesh-myo.obj',
-    ckpt_dir='/path/to/your/checkpoint',
-    output_dir='/path/to/output'
-)
-
-# Create and run inference pipeline
-pipeline = create_inference_pipeline(config, seed=42, num_workers=4)
-pipeline.run_inference()
-"
-```
-
-### Legacy Inference
-
-For legacy inference, use the original test script:
-
-```bash
-cd legacy_code
-python test.py \
-    --save_on sct \
-    --ct_json_dir ../dataset/dataset_task20_f0.json \
-    --ct_data_dir /path/to/preprocessed/CT/data \
-    --output_dir /path/to/your/output/directory \
-    --ckpt_dir /path/to/your/network/check_point \
-    --template_mesh_dir ../template/template_mesh-myo.obj
-```
-
-## 📚 Legacy Code Preservation
-
-The original monolithic implementation has been preserved in the `legacy_code/` folder for:
-
-- **Reference**: Users familiar with the original implementation
-- **Reproducibility**: Ensuring exact replication of published results
-- **Backward Compatibility**: Supporting existing workflows
-
-### Legacy Code Structure
-
-```
-legacy_code/
-├── main.py                  # Original monolithic training script
-├── test.py                  # Original inference script  
-├── control.sh               # Original control script
-├── data_preprocessing.py    # Original data preprocessing
-├── data/                    # Original data components
-├── utils/                   # Original utility functions
-└── help_code/               # Development utilities
-```
-
-For detailed migration information, see `CLAUDE.md`.
+**Repository**: MorphiNet - Adaptive Bi-ventricle Surface Reconstruction from Cardiovascular Imaging

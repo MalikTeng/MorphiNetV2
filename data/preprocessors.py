@@ -77,9 +77,59 @@ class DataPreprocessor:
             EnsureTyped(keys, device=target_device, allow_missing_keys=True),
         ])
     
+    def _create_label_post_transform(self, keys=["label"], modal="ct", to_gpu=True, decoder_size=False):
+        """
+        Create a label-specific post-transform pipeline that uses nearest interpolation throughout
+        to preserve discrete label values and prevent corruption during resizing operations.
+        
+        Args:
+            keys: Keys to transform (should be label keys only)
+            modal: Modal type ("ct" or "mr")
+            to_gpu: Whether to move final output to GPU
+            decoder_size: Whether to use decoder-sized transform (upscaled) or regular transform
+        
+        Returns:
+            Composed transform pipeline with nearest interpolation for labels
+        """
+        # Calculate target size based on decoder_size flag
+        if decoder_size:
+            target_size = int(self.super_params.crop_window_size[0] // self.super_params.pixdim[0] * self.super_params.upscale_ratio)
+        else:
+            target_size = int(self.super_params.crop_window_size[0] // self.super_params.pixdim[0])
+        
+        # Choose target device
+        target_device = DEVICE if to_gpu else "cpu"
+        
+        return Compose([
+            # Use nearest interpolation for all spatial transforms to preserve discrete labels
+            Spacingd(keys, [2.0, 2.0, 2.0], mode="nearest", allow_missing_keys=True),
+            CropForegroundd(keys, source_key=keys[0], allow_missing_keys=True),
+            # Skip Maskd transform for labels - it's not needed and causes key issues
+            FlexResized(
+                keys, 
+                (-1, self.super_params.crop_window_size[0], -1), 
+                allow_missing_keys=True,
+                force_nearest=True  # Force nearest interpolation for labels
+            ),
+            Resized(
+                keys, 
+                target_size, 
+                size_mode="longest", mode="nearest-exact",  # Nearest for labels
+                allow_missing_keys=True
+            ),
+            ResizeWithPadOrCropd(
+                keys,
+                target_size, 
+                mode="constant", value=0,
+                allow_missing_keys=True
+            ),
+            EnsureTyped(keys, device=target_device, allow_missing_keys=True),
+        ])
+    
     def _generate_downsampled_gt(self, seg_true, modal, decoder_size=False):
         """
         Generate downsampled ground truth on-the-fly from full resolution ground truth.
+        Uses label-specific transform with nearest interpolation to preserve discrete label values.
         
         Args:
             seg_true: Full resolution ground truth tensor (4D or 5D)
@@ -87,15 +137,34 @@ class DataPreprocessor:
             decoder_size: Whether to generate decoder-sized output
         
         Returns:
-            Downsampled ground truth tensor (preserving original dimensionality)
+            Downsampled ground truth tensor (preserving original dimensionality and discrete values)
         """
-        result = self._memory_efficient_post_transform(
-            seg_pred_list=[seg_true], 
-            seg_true_list=[seg_true], 
+        # Create label-specific transform to prevent corruption of discrete values
+        label_transform = self._create_label_post_transform(
+            keys=["label"], 
             modal=modal, 
             to_gpu=True, 
             decoder_size=decoder_size
         )
+        
+        # Apply transform directly to ground truth with proper key mapping
+        # Convert tensor to dict format expected by MONAI transforms
+        data_dict = {"label": seg_true, modal: seg_true}
+        
+        # Apply label-preserving transform
+        transformed_dict = label_transform(data_dict)
+        
+        # Return the transformed label
+        result = transformed_dict["label"]
+        
+        # Safety check: Ensure discrete values are preserved (optional validation)
+        if hasattr(result, 'unique'):
+            unique_vals = result.unique()
+            if len(unique_vals) > 10:  # Too many unique values suggests interpolation corruption
+                import warnings
+                warnings.warn(f"Warning: Ground truth downsampling may have corrupted discrete labels. "
+                            f"Found {len(unique_vals)} unique values: {unique_vals.tolist()[:10]}...")
+        
         return result
     
     def _memory_efficient_post_transform(self, seg_pred_list, seg_true_list, modal, to_gpu=True, decoder_size=False):

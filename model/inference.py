@@ -193,17 +193,25 @@ class ModelInference:
             One-hot encoded tensor
         """
         if is_prediction:
-            # For predictions, apply argmax first
-            if tensor.dim() == 5:  # (B, C, H, W, D)
+            # For predictions, apply argmax first to get class indices
+            if tensor.dim() == 5:  # (B, C, H, W, D) - 3D case
                 tensor = torch.argmax(tensor, dim=1, keepdim=True)
-            elif tensor.dim() == 4 and tensor.shape[0] > 1:  # (C, H, W, D) with multiple channels
-                tensor = torch.argmax(tensor, dim=0, keepdim=True)
+            elif tensor.dim() == 4:  # Could be (B, C, H, W) for 2D MR slices or (C, H, W, D) for 3D
+                # Check if this looks like batched 2D slices (batch_size > 1, multiple classes)
+                if tensor.shape[1] > 1:  # (B, C, H, W) - batched 2D slices with multiple classes
+                    tensor = torch.argmax(tensor, dim=1, keepdim=True)
+                else:  # (C, H, W, D) - single 3D volume with multiple channels
+                    tensor = torch.argmax(tensor, dim=0, keepdim=True)
         
-        # Ensure tensor is in the right format for one-hot encoding
+        # Prepare tensor for one-hot encoding (remove singleton channel dimension)
         if tensor.dim() == 5:  # (B, 1, H, W, D)
             tensor = tensor.squeeze(1)  # (B, H, W, D)
-        elif tensor.dim() == 4 and tensor.shape[0] == 1:  # (1, H, W, D)
-            tensor = tensor.squeeze(0)  # (H, W, D)
+        elif tensor.dim() == 4:
+            # Check if we have a singleton batch or channel dimension
+            if tensor.shape[1] == 1:  # (B, 1, H, W) - batched 2D with singleton channel
+                tensor = tensor.squeeze(1)  # (B, H, W)
+            elif tensor.shape[0] == 1:  # (1, H, W, D) - singleton batch
+                tensor = tensor.squeeze(0)  # (H, W, D)
         
         # Convert to long tensor for one-hot encoding
         tensor = tensor.long()
@@ -214,8 +222,10 @@ class ModelInference:
         # Rearrange dimensions to put channel dimension first
         if one_hot.dim() == 5:  # (B, H, W, D, C) -> (B, C, H, W, D)
             one_hot = one_hot.permute(0, 4, 1, 2, 3)
-        elif one_hot.dim() == 4:  # (H, W, D, C) -> (C, H, W, D)
-            one_hot = one_hot.permute(3, 0, 1, 2)
+        elif one_hot.dim() == 4:  # (B, H, W, C) -> (B, C, H, W) for 2D batched
+            one_hot = one_hot.permute(0, 3, 1, 2)
+        elif one_hot.dim() == 3:  # (H, W, C) -> (C, H, W) for 2D single  
+            one_hot = one_hot.permute(2, 0, 1)
         
         return one_hot.float()
     

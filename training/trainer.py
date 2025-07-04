@@ -6,6 +6,7 @@ from collections import OrderedDict
 from monai.inferers import sliding_window_inference
 from monai.transforms.utils import distance_transform_edt
 from pytorch3d.loss import chamfer_distance, mesh_laplacian_smoothing
+from monai.transforms import AsDiscrete
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -15,7 +16,7 @@ class MorphiNetTrainer:
     """Handles training for different phases of MorphiNet: UNet, ResNet, and GSN."""
     
     def __init__(self, super_params, models, optimizers, schedulers, scalers, loss_functions, 
-                 dataloaders, preprocessor, mesh_ops, inference, target=None):
+                 dataloaders, preprocessor, mesh_ops, inference, orchestrator=None, target=None):
         """
         Initialize the trainer.
         
@@ -30,10 +31,12 @@ class MorphiNetTrainer:
             preprocessor: Data preprocessor instance
             mesh_ops: Mesh operations instance
             inference: Model inference instance
+            orchestrator: Reference to orchestrator for step management
             target: Training target
         """
         self.super_params = super_params
         self.target = target
+        self.orchestrator = orchestrator
         
         # Models
         self.encoder_mr = models['encoder_mr']
@@ -73,7 +76,7 @@ class MorphiNetTrainer:
         self.inference = inference
         
         # Loss tracking
-        self.unet_loss = OrderedDict({k: np.asarray([]) for k in ["total", "seg"]})
+        self.unet_loss = OrderedDict({k: np.asarray([]) for k in ["total", "ct", "mr", "seg"]})
         self.resnet_loss = OrderedDict({k: np.asarray([]) for k in ["total", "df"]})
         self.gsn_loss = OrderedDict({k: np.asarray([]) for k in ["total", "chmf", "smooth"]})
         
@@ -82,7 +85,6 @@ class MorphiNetTrainer:
         self.mask_threshold = super_params.mask_threshold
         
         # Prediction transform
-        from monai.transforms import AsDiscrete
         self.pred_transform = AsDiscrete(argmax=True, to_onehot=self.super_params.num_classes)
     
     @property
@@ -95,6 +97,29 @@ class MorphiNetTrainer:
         """Dynamic access to MR training loader."""
         return getattr(self.dataloader_manager, 'mr_train_loader', None)
     
+    def _prepare_slice_for_wandb(self, slice_tensor, is_segmentation, num_classes=None):
+        """
+        Prepares a 2D tensor slice for logging to Weights & Biases as an image.
+        Handles normalization for input images and scaling for segmentation masks.
+        """
+        slice_np = slice_tensor.cpu().numpy().astype(np.float32)
+        
+        if is_segmentation:
+            if num_classes is None:
+                raise ValueError("num_classes must be provided for segmentation masks.")
+            scale_factor = 255.0 / (num_classes - 1) if num_classes > 1 else 255.0
+            slice_viz = (slice_np * scale_factor).astype(np.uint8)
+        else: # Input image
+            min_val = slice_np.min()
+            max_val = slice_np.max()
+            if max_val - min_val > 1e-6:
+                slice_norm = (slice_np - min_val) / (max_val - min_val)
+            else:
+                slice_norm = np.zeros_like(slice_np)
+            slice_viz = (slice_norm * 255.0).astype(np.uint8)
+            
+        return slice_viz
+
     def train_iter(self, epoch, phase, commit_log=True):
         """
         Main training iteration for different phases.
@@ -137,7 +162,7 @@ class MorphiNetTrainer:
                 )
 
                 self.optimzer_ct_unet.zero_grad()
-                with torch.autocast(device_type=DEVICE):
+                with torch.autocast(device_type=DEVICE, enabled=False):
                     seg_pred_ct = sliding_window_inference(
                         img_ct, 
                         roi_size=self.super_params.crop_window_size,
@@ -154,26 +179,25 @@ class MorphiNetTrainer:
                 
                 loss_value = loss.item()
                 train_loss_epoch["ct"] += loss_value
-
-                # Logging for CT
+                train_loss_epoch["total"] += loss_value
+                
+                # Log wandb data for single random step per epoch
                 if step == log_ct_step:
-                    case_id_ct = os.path.basename(self.ct_train_loader.dataset.data[step]["ct_label"]).replace(".nii.gz", '').replace(".seg.nrrd", '')
-
-                    if img_ct.dim() == 5 and img_ct.shape[2] > 0:
-                        depth_slice_idx_ct = img_ct.shape[2] // 2
-                        
-                        input_img_ct_slice = img_ct[0, 0, depth_slice_idx_ct, :, :]
-                        input_img_ct_viz = self.preprocessor._prepare_slice_for_wandb(input_img_ct_slice, is_segmentation=False)
-
-                        gt_slice_ct = seg_true_ct[0, 0, depth_slice_idx_ct, :, :]
-                        gt_slice_ct_viz = self.preprocessor._prepare_slice_for_wandb(gt_slice_ct, is_segmentation=True, num_classes=self.super_params.num_classes)
-
-                        pred_slice_ct = torch.argmax(seg_pred_ct[0, :, depth_slice_idx_ct, :, :].to(DEVICE), dim=0)
-                        pred_slice_ct_viz = self.preprocessor._prepare_slice_for_wandb(pred_slice_ct, is_segmentation=True, num_classes=self.super_params.num_classes)
-                        
-                        log_data_unet["unet/ct_input_image"] = wandb.Image(input_img_ct_viz, caption=f"Case ID: {case_id_ct}")
-                        log_data_unet["unet/ct_ground_truth"] = wandb.Image(gt_slice_ct_viz, caption=f"Case ID: {case_id_ct}")
-                        log_data_unet["unet/ct_prediction"] = wandb.Image(pred_slice_ct_viz, caption=f"Case ID: {case_id_ct}")
+                    # Prepare visualization data for CT (shape: [N,C,H,W,D])
+                    input_img_ct_slice = img_ct[0, 0, :, :, img_ct.shape[4] // 2] 
+                    gt_slice_ct = seg_true_ct[0, 0, :, :, seg_true_ct.shape[4] // 2] 
+                    pred_slice_ct = torch.argmax(seg_pred_ct[0, :, :, :, seg_pred_ct.shape[4] // 2], dim=0)
+                    
+                    # Convert to numpy arrays for wandb logging using _prepare_slice_for_wandb
+                    input_img_ct_viz = self._prepare_slice_for_wandb(input_img_ct_slice, is_segmentation=False)
+                    gt_slice_ct_viz = self._prepare_slice_for_wandb(gt_slice_ct, is_segmentation=True, num_classes=self.super_params.num_classes)
+                    pred_slice_ct_viz = self._prepare_slice_for_wandb(pred_slice_ct, is_segmentation=True, num_classes=self.super_params.num_classes)
+                    
+                    log_data_unet.update({
+                        "unet/ct_input_slice": wandb.Image(input_img_ct_viz, caption=f"CT Input - Epoch {epoch+1}"),
+                        "unet/ct_gt_slice": wandb.Image(gt_slice_ct_viz, caption=f"CT Ground Truth - Epoch {epoch+1}"),
+                        "unet/ct_pred_slice": wandb.Image(pred_slice_ct_viz, caption=f"CT Prediction - Epoch {epoch+1}"),
+                    })
 
         train_loss_epoch["ct"] = train_loss_epoch["ct"] / ct_step_count if self.ct_train_loader is not None and ct_step_count > 0 else 0.0
         
@@ -197,7 +221,7 @@ class MorphiNetTrainer:
                 img_mr, seg_true_mr = self.preprocessor._filter_unlabeled_slices(img_mr, seg_true_mr)
 
                 self.optimzer_mr_unet.zero_grad()
-                with torch.autocast(device_type=DEVICE):
+                with torch.autocast(device_type=DEVICE, enabled=False):
                     seg_pred_mr = sliding_window_inference(
                         img_mr,
                         roi_size=self.super_params.crop_window_size[:2],
@@ -214,26 +238,27 @@ class MorphiNetTrainer:
                 
                 loss_value = loss.item()
                 train_loss_epoch["mr"] += loss_value
-
-                # Logging for MR
+                train_loss_epoch["total"] += loss_value
+                
+                # Log wandb data for single random step per epoch  
                 if step == log_mr_step:
-                    case_id_mr = os.path.basename(self.mr_train_loader.dataset.data[step]["mr_label"]).replace(".nii.gz", '').replace(".seg.nrrd", '')
-                    case_id_mr = case_id_mr.split('-')[0]
-                    
-                    slice_idx_mr = seg_true_mr.shape[0] // 4
-
-                    input_img_mr_slice = img_mr[slice_idx_mr, 0]
-                    input_img_mr_viz = self.preprocessor._prepare_slice_for_wandb(input_img_mr_slice, is_segmentation=False)
-
-                    gt_slice_mr = seg_true_mr[slice_idx_mr, 0]
-                    gt_slice_mr_viz = self.preprocessor._prepare_slice_for_wandb(gt_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
-
-                    pred_slice_mr = torch.argmax(seg_pred_mr[slice_idx_mr].to(DEVICE), dim=0)
-                    pred_slice_mr_viz = self.preprocessor._prepare_slice_for_wandb(pred_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
-
-                    log_data_unet["unet/mr_input_image"] = wandb.Image(input_img_mr_viz, caption=f"Case ID: {case_id_mr}")
-                    log_data_unet["unet/mr_ground_truth"] = wandb.Image(gt_slice_mr_viz, caption=f"Case ID: {case_id_mr}")
-                    log_data_unet["unet/mr_prediction"] = wandb.Image(pred_slice_mr_viz, caption=f"Case ID: {case_id_mr}")
+                    if img_mr.shape[0] > 0:
+                        # Get middle slice for visualization
+                        slice_idx = img_mr.shape[0] // 4
+                        input_img_mr_slice = img_mr[slice_idx, 0, :, :]
+                        gt_slice_mr = seg_true_mr[slice_idx, 0, :, :]
+                        pred_slice_mr = torch.argmax(seg_pred_mr[slice_idx, :, :, :], dim=0)
+                        
+                        # Convert to numpy arrays for wandb logging using _prepare_slice_for_wandb
+                        input_img_mr_viz = self._prepare_slice_for_wandb(input_img_mr_slice, is_segmentation=False)
+                        gt_slice_mr_viz = self._prepare_slice_for_wandb(gt_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
+                        pred_slice_mr_viz = self._prepare_slice_for_wandb(pred_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
+                        
+                        log_data_unet.update({
+                            "unet/mr_input_slice": wandb.Image(input_img_mr_viz, caption=f"MR Input - Epoch {epoch+1}"),
+                            "unet/mr_gt_slice": wandb.Image(gt_slice_mr_viz, caption=f"MR Ground Truth - Epoch {epoch+1}"),
+                            "unet/mr_pred_slice": wandb.Image(pred_slice_mr_viz, caption=f"MR Prediction - Epoch {epoch+1}"),
+                        })
 
         train_loss_epoch["mr"] = train_loss_epoch["mr"] / mr_step_count if self.mr_train_loader is not None and mr_step_count > 0 else 0.0
         
@@ -256,8 +281,10 @@ class MorphiNetTrainer:
         print(f"UNet Total Loss: {train_loss_epoch['total']:.4f} (CT: {train_loss_epoch['ct']:.4f}, MR: {train_loss_epoch['mr']:.4f})")
         print(f"{'='*60}")
 
+        # Always log to the same step to ensure consistency
         if log_data_unet:
-            wandb.log(log_data_unet, step=epoch + 1, commit=commit_log)
+            step = self.orchestrator.get_next_step() if self.orchestrator else epoch + 1
+            wandb.log(log_data_unet, step=step, commit=commit_log)
     
     def _train_resnet_phase(self, epoch, commit_log=True):
         """Train ResNet for distance field prediction."""
@@ -275,7 +302,7 @@ class MorphiNetTrainer:
                 )
                 
                 self.optimizer_resnet.zero_grad()
-                with torch.autocast(device_type=DEVICE):
+                with torch.autocast(device_type=DEVICE, enabled=False):
                     seg_pred_ct = sliding_window_inference(
                         img_ct,
                         roi_size=self.super_params.crop_window_size,
@@ -328,9 +355,10 @@ class MorphiNetTrainer:
         print(f"ResNet Training - Loss: {train_loss_epoch['total']:.4f}, LR: {self.optimizer_resnet.param_groups[0]['lr']:.6f}")
         print(f"{'='*60}")
 
+        step = self.orchestrator.get_next_step() if self.orchestrator else epoch + 1
         wandb.log({
             "resnet/train_loss_total": train_loss_epoch["total"]
-        }, step=epoch + 1, commit=commit_log)
+        }, step=step, commit=commit_log)
 
         self.lr_scheduler_resnet.step(train_loss_epoch["total"])
     
@@ -358,7 +386,7 @@ class MorphiNetTrainer:
                 mesh_true_ct = self.mesh_ops.surface_extractor(seg_true_ct_ds.to(DEVICE), labels=2)
 
                 self.optimizer_gsn.zero_grad()
-                with torch.autocast(device_type=DEVICE):
+                with torch.autocast(device_type=DEVICE, enabled=False):
                     seg_pred_ct = sliding_window_inference(
                         img_ct,
                         roi_size=self.super_params.crop_window_size,
@@ -421,7 +449,7 @@ class MorphiNetTrainer:
                             mesh_true_ct[0].verts_padded(),
                             point_reduction="mean", batch_reduction="mean"
                         )[0] 
-                        loss_smooth += mesh_laplacian_smoothing(subdiv_mesh, method="cot")
+                        loss_smooth += mesh_laplacian_smoothing(subdiv_mesh.update_padded(subdiv_mesh.verts_padded().to(torch.float32)), method="cot")
                     
                     loss = self.super_params.lambda_0 * loss_chmf + self.super_params.lambda_1 * loss_smooth
 
@@ -455,11 +483,12 @@ class MorphiNetTrainer:
         print(f"{'='*60}")
 
         # Log to WandB
+        step = self.orchestrator.get_next_step() if self.orchestrator else epoch + 1
         wandb.log({
             "gsn/train_loss_total": finetune_loss_epoch["total"],
             "gsn/train_loss_chamfer": finetune_loss_epoch["chmf"],
             "gsn/train_loss_smooth": finetune_loss_epoch["smooth"]
-        }, step=epoch + 1, commit=commit_log)
+        }, step=step, commit=commit_log)
 
         # Update learning rate scheduler
         if self.ct_train_loader is not None and gsn_step_count > 0:

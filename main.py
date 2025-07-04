@@ -53,7 +53,7 @@ def config():
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--cache_rate", type=float, default=1.0, help="Cache rate")
-    parser.add_argument("--max_samples", type=int, default=0, 
+    parser.add_argument("--max_samples", type=int, default=5, 
                        help="Maximum number of samples per dataset (0 for full dataset)")
     parser.add_argument("--crop_window_size", type=int, nargs='+', 
                        default=[128, 128, 128], help="Crop window size")
@@ -87,8 +87,8 @@ def config():
                        help="MR data directory")
 
     # Model parameters
-    parser.add_argument("--num_classes", type=int, default=5, 
-                       help="Number of segmentation classes")
+    parser.add_argument("--num_classes", type=int, default=4, 
+                       help="Number of segmentation classes (after preprocessing: background, LV, MYO, RV)")
     parser.add_argument("--filters", type=int, nargs='+', 
                        default=[8, 16, 32, 64, 128], 
                        help="UNet filter sizes")

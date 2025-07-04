@@ -34,3 +34,8 @@ test_*.py
 CLAUDE.md
 CLAUDE.local.md
 
+# exclude development tools and custom data transformation scripts
+.claude/
+.cursor/
+custom_data_transform/
+

@@ -17,20 +17,21 @@ TEMPLATE_MESH_DIR="./template/template_mesh-myo.obj"
 CKPT_DIR="/mnt/data/Experiment/MorphiNet/Checkpoint/"
 
 # Training parameters
-MAX_EPOCHS=3
-PRETRAIN_EPOCHS=1
-TRAIN_EPOCHS=2
+MAX_EPOCHS=4
+PRETRAIN_EPOCHS=4
+TRAIN_EPOCHS=6
 VAL_INTERVAL=1
 BATCH_SIZE=1
 LR=0.001
-MAX_SAMPLES=2  # Set to 0 for full dataset, or positive number to limit samples for testing
+MAX_SAMPLES=5  # Set to 0 for full dataset, or positive number to limit samples for testing
+WANDB_MODE="offline"  # 'offline' for local logging, 'online' for cloud sync, 'disabled' to turn off
 
 # Model parameters
 SUBDIV_LEVELS=2
 HIDDEN_FEATURES_GSN=64
-LAMBDA_0=2.07
-LAMBDA_1=0.89
-ITERATION=5
+LAMBDA_0=1.0
+LAMBDA_1=1.0
+ITERATION=10
 
 # Run the modular training
 python main.py \
@@ -53,7 +54,7 @@ python main.py \
     --lambda_0 $LAMBDA_0 \
     --lambda_1 $LAMBDA_1 \
     --iteration $ITERATION \
-    --mode online
+    --mode $WANDB_MODE
 
 echo "================================================="
 echo "Training completed!"

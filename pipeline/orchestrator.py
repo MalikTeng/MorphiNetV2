@@ -31,7 +31,12 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class MorphiNetOrchestrator:
-    """Main orchestrator for MorphiNet training pipeline."""
+    """
+    Centralized orchestrator for MorphiNet training pipeline.
+    
+    Coordinates all training components including data loading, model training,
+    validation, and checkpoint management in a clean, modular architecture.
+    """
     
     def __init__(self, super_params, seed=42, num_workers=4, is_training=True, **kwargs):
         """
@@ -39,16 +44,19 @@ class MorphiNetOrchestrator:
         
         Args:
             super_params: Configuration parameters
-            seed: Random seed
+            seed: Random seed for reproducibility  
             num_workers: Number of data loading workers
             is_training: Whether this is for training or inference
             **kwargs: Additional arguments
         """
         self.super_params = super_params
+        self.is_training = is_training
         self.seed = seed
         self.num_workers = num_workers
-        self.is_training = is_training
-        self.target = kwargs.get("target")
+        self.target = kwargs.get('target', None)
+        
+        # Global step counter for wandb logging consistency
+        self.global_step = 0
         
         # Set deterministic behavior
         set_determinism(seed=seed)
@@ -60,6 +68,11 @@ class MorphiNetOrchestrator:
         
         # Initialize components
         self._initialize_components()
+        
+        if is_training:
+            self._initialize_training_components()
+        
+        print("MorphiNet Orchestrator initialized successfully!")
     
     def _initialize_components(self):
         """Initialize all pipeline components."""
@@ -74,10 +87,6 @@ class MorphiNetOrchestrator:
         # Initialize model components
         self._initialize_models()
         self.inference = ModelInference(self.super_params)
-        
-        # Initialize training components (only if training)
-        if self.is_training:
-            self._initialize_training_components()
         
         # Initialize checkpoint manager
         self.checkpoint_manager = CheckpointManager(
@@ -210,6 +219,7 @@ class MorphiNetOrchestrator:
             preprocessor=self.preprocessor,
             mesh_ops=self.mesh_ops,
             inference=self.inference,
+            orchestrator=self,
             target=self.target
         )
         
@@ -221,7 +231,8 @@ class MorphiNetOrchestrator:
             preprocessor=self.preprocessor,
             mesh_ops=self.mesh_ops,
             inference=self.inference,
-            ckpt_dir=self.ckpt_dir
+            ckpt_dir=self.ckpt_dir,
+            orchestrator=self
         )
         
         print("Training components initialized successfully!")
@@ -275,6 +286,8 @@ class MorphiNetOrchestrator:
         # Prepare appropriate data loaders
         if phase == "unet":
             self.prepare_dataloaders(["train", "valid"], training_phase="unet", validation_phase="unet")
+        elif phase == "resnet":
+            self.prepare_dataloaders(["train", "valid"], training_phase=phase, validation_phase="resnet")
         else:
             self.prepare_dataloaders(["train", "valid"], training_phase=phase, validation_phase="network")
         
@@ -288,8 +301,12 @@ class MorphiNetOrchestrator:
             # Validation step (every val_interval epochs)
             if (epoch + 1) % self.super_params.val_interval == 0:
                 if phase == "unet":
-                    # For UNet phase, validate segmentation only
-                    self.validator.validate_segmentation(epoch, self.super_params.validation_modality)
+                    # For UNet phase, validate both CT and MR segmentation
+                    # Use sequential validation with proper step management to avoid wandb step inconsistency
+                    self.validator.validate_segmentation(epoch, "ct")
+                    if hasattr(self.dataloader_manager, 'mr_valid_loader') and self.dataloader_manager.mr_valid_loader is not None:
+                        # Validate MR with same epoch to maintain step consistency
+                        self.validator.validate_segmentation(epoch, "mr")
                 elif phase == "resnet":
                     # For ResNet phase, validate UNet + ResNet pipeline
                     self.validator.validate_resnet(epoch, self.super_params.validation_modality)
@@ -379,3 +396,16 @@ class MorphiNetOrchestrator:
             torch.cuda.empty_cache()
         
         print("Pipeline cleanup completed!")
+    
+    def get_next_step(self):
+        """Get the next global step for wandb logging."""
+        self.global_step += 1
+        return self.global_step
+    
+    def get_current_step(self):
+        """Get the current global step."""
+        return self.global_step
+    
+    def set_step(self, step):
+        """Set the global step counter (for synchronization)."""
+        self.global_step = step

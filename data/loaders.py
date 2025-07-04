@@ -146,12 +146,9 @@ class DataLoaderManager:
             data_json = json.load(f)
             data_list = self._remap_abs_path(data_json[data_split], modal, phase_suffix)
             
-            print(f"DEBUG: {modal.upper()} {data_type} - JSON split '{data_split}' contains {len(data_list)} samples")
-            
             # Apply sample limiting if specified
             if self.super_params.max_samples > 0:
                 data_list = data_list[:self.super_params.max_samples]
-                print(f"  Limited to {len(data_list)} samples for {modal.upper()} {data_type} data")
             
             # Create dataset
             dataset = Dataset(
@@ -160,16 +157,13 @@ class DataLoaderManager:
             )
             
             # Create and assign dataloader
-            print(f"DEBUG: {modal.upper()} {data_type} - Dataset created with {dataset.__len__()} samples")
             if dataset.__len__() > 0:
                 dataloader = DataLoader(
                     dataset, batch_size=batch_size, shuffle=shuffle, 
                     num_workers=self.num_workers, collate_fn=collate_4D_batch
                 )
-                print(f"DEBUG: {modal.upper()} {data_type} - DataLoader created with {len(dataloader)} batches")
                 self._assign_dataloader(modal, data_type, dataloader, dataset)
             else:
-                print(f"WARNING: {modal.upper()} {data_type} - Dataset is empty, assigning None dataloader")
                 self._assign_dataloader(modal, data_type, None, None)
     
     def _assign_dataloader(self, modal: str, data_type: str, dataloader, dataset):

@@ -73,7 +73,7 @@ def draw_plotly(
         num_classes = len(torch.unique(seg_true))
         if num_classes == 2:
             mesh = matrix_to_marching_cubes(seg_true[0].cpu().numpy())
-            y, x, z = mesh.vertices.T
+            x, y, z = mesh.vertices.T
             I, J, K = mesh.faces.T
             fig.add_trace(go.Mesh3d(
                 x=x, y=y, z=z,
@@ -84,7 +84,7 @@ def draw_plotly(
             ))
         else:
             mesh = matrix_to_marching_cubes((seg_true[0] == 2).cpu().numpy())
-            y, x, z = mesh.vertices.T
+            x, y, z = mesh.vertices.T
             I, J, K = mesh.faces.T
             fig.add_trace(go.Mesh3d(
                 x=x, y=y, z=z,
@@ -101,7 +101,7 @@ def draw_plotly(
         # nib.save(seg_pred_nii, 'seg_pred.nii.gz')
         if num_classes == 2:
             mesh = matrix_to_marching_cubes(seg_pred[0].cpu().numpy())
-            y, x, z = mesh.vertices.T
+            x, y, z = mesh.vertices.T
             I, J, K = mesh.faces.T
             fig.add_trace(go.Mesh3d(
                 x=x, y=y, z=z,
@@ -112,7 +112,7 @@ def draw_plotly(
             ))
         else:
             mesh = matrix_to_marching_cubes((seg_pred[0] == 2).cpu().numpy())
-            y, x, z = mesh.vertices.T
+            x, y, z = mesh.vertices.T
             I, J, K = mesh.faces.T
             fig.add_trace(go.Mesh3d(
                 x=x, y=y, z=z,
