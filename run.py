@@ -16,6 +16,7 @@ from collections import OrderedDict
 # Import modular components
 from pipeline.orchestrator import MorphiNetOrchestrator
 from evaluation.metrics import MorphiNetMetrics
+from pipeline.testing import run_full_test
 
 # Configure device
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -133,38 +134,25 @@ class MorphiNetPipeline:
     
     def test(self, test_data_dir=None, output_dir=None):
         """
-        Run inference on test data.
+        Run inference on test data using the modular testing pipeline.
         
         Args:
-            test_data_dir: Directory containing test data
-            output_dir: Directory to save results
+            test_data_dir: Directory containing test data (optional, uses super_params)
+            output_dir: Directory to save results (optional, uses checkpoint dir)
+        
+        Returns:
+            Dictionary containing test results
         """
-        if test_data_dir is None:
-            test_data_dir = getattr(self.super_params, 'test_data_dir', None)
-        
-        if output_dir is None:
-            output_dir = os.path.join(self.orchestrator.ckpt_dir, 'test_results')
-        
-        os.makedirs(output_dir, exist_ok=True)
-        
         print(f"\n--- TESTING PHASE ---")
-        print(f"Test data: {test_data_dir}")
-        print(f"Output dir: {output_dir}")
         
-        # Prepare test data loaders
-        self.orchestrator.prepare_dataloaders(["test"], include_test=True)
+        # Model weights should already be loaded by the calling code
+        # Skip additional checkpoint loading during testing to avoid confusion
+        print("Using current model weights for testing")
         
-        # Load best model weights
-        try:
-            checkpoint_data = self.orchestrator.checkpoint_manager.load_checkpoint(load_best=True)
-            self.orchestrator.checkpoint_manager.load_models(checkpoint_data)
-            print("Loaded best model weights for testing")
-        except FileNotFoundError:
-            print("Warning: No best model found, using current weights")
+        # Run comprehensive testing using the testing module
+        test_results = run_full_test(self, self.super_params)
         
-        # Run testing through the orchestrator's inference components
-        # This would be implemented based on specific testing requirements
-        print("Testing functionality to be implemented based on specific requirements")
+        return test_results
     
     def load_pretrained_weights(self, weights_dir, phase=None):
         """
@@ -306,6 +294,28 @@ def create_inference_pipeline(super_params, **kwargs):
     
     Returns:
         Configured MorphiNetPipeline instance for inference
+    """
+    return MorphiNetPipeline(
+        super_params=super_params,
+        is_training=False,
+        **kwargs
+    )
+
+
+def create_testing_pipeline(super_params, **kwargs):
+    """
+    Factory function to create a MorphiNet testing pipeline.
+    
+    This factory creates a MorphiNetPipeline instance specifically configured
+    for testing/inference operations. It mirrors the pattern used by
+    create_training_pipeline and create_inference_pipeline.
+    
+    Args:
+        super_params: Configuration parameters
+        **kwargs: Additional arguments for pipeline initialization
+    
+    Returns:
+        Configured MorphiNetPipeline instance for testing
     """
     return MorphiNetPipeline(
         super_params=super_params,

@@ -53,6 +53,9 @@ class MorphiNetValidator:
         self.eval_df_score = {"myo": np.asarray([])}
         self.eval_msh_score = {"myo": np.asarray([])}
         
+        # Set validation modality from super_params
+        self.validation_modality = super_params.validation_modality
+        
         # Prediction transform
         self.pred_transform = AsDiscrete(argmax=True, to_onehot=self.super_params.num_classes)
         
@@ -120,9 +123,10 @@ class MorphiNetValidator:
                 if modal == 'mr':
                     seg_true = seg_true.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
                 
-                # Generate downsampled ground truth at decoder size
+                # Generate downsampled ground truth at decoder size with custom sequential transformation
+                CUSTOM_SEQUENCE = "s:xy f:x f:z"
                 seg_true_ds = torch.stack([
-                    self.preprocessor._generate_downsampled_gt(seg_true_item, modal, decoder_size=True)
+                    self.preprocessor._generate_downsampled_gt(seg_true_item, modal, decoder_size=True, sequence=CUSTOM_SEQUENCE)
                     for seg_true_item in seg_true
                 ])
                 
@@ -143,12 +147,12 @@ class MorphiNetValidator:
                 if modal == 'mr':
                     seg_pred = seg_pred.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
                 
-                # Process predictions through ResNet pipeline
+                # Process predictions through ResNet pipeline with custom sequential transformation
                 seg_pred_ds_decoder_size = self.preprocessor._memory_efficient_post_transform(
-                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=True)
+                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=True, sequence=CUSTOM_SEQUENCE)
                 
                 seg_pred_ds = self.preprocessor._memory_efficient_post_transform(
-                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=False)
+                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=False, sequence=CUSTOM_SEQUENCE)
                 
                 # Calculate mask for refinement
                 binary_mask_pred = (torch.argmax(seg_pred_ds_decoder_size, dim=1, keepdim=True) == 0)
@@ -380,6 +384,50 @@ class MorphiNetValidator:
         except Exception as e:
             print(f"Warning: Could not generate visualizations: {e}")
     
+    def _save_unet_checkpoints(self, epoch, modal):
+        """Save UNet model checkpoints for current epoch."""
+        ckpt_weight_path = os.path.join(self.ckpt_dir, "trained_weights")
+        os.makedirs(ckpt_weight_path, exist_ok=True)
+        
+        # Save both CT and MR UNet models
+        torch.save(self.encoder_ct.state_dict(), os.path.join(ckpt_weight_path, f"{epoch + 1}_UNet_CT.pth"))
+        torch.save(self.encoder_mr.state_dict(), os.path.join(ckpt_weight_path, f"{epoch + 1}_UNet_MR.pth"))
+    
+    def _save_best_unet(self, epoch, modal, dice_score):
+        """Save best UNet model when validation score improves."""
+        ckpt_weight_path = os.path.join(self.ckpt_dir, "trained_weights")
+        os.makedirs(ckpt_weight_path, exist_ok=True)
+        
+        # Save best UNet models
+        torch.save(self.encoder_ct.state_dict(), os.path.join(ckpt_weight_path, f"best_UNet_CT.pth"))
+        torch.save(self.encoder_mr.state_dict(), os.path.join(ckpt_weight_path, f"best_UNet_MR.pth"))
+        
+        print(f"New best UNet model saved! {modal.upper()} Dice: {dice_score:.4f}")
+        wandb.run.summary[f"best_unet_{modal}_dice"] = dice_score
+    
+    def _save_resnet_checkpoints(self, epoch, modal):
+        """Save ResNet model checkpoints for current epoch."""
+        ckpt_weight_path = os.path.join(self.ckpt_dir, "trained_weights")
+        os.makedirs(ckpt_weight_path, exist_ok=True)
+        
+        # Save UNet and ResNet models
+        torch.save(self.encoder_ct.state_dict(), os.path.join(ckpt_weight_path, f"{epoch + 1}_UNet_CT.pth"))
+        torch.save(self.encoder_mr.state_dict(), os.path.join(ckpt_weight_path, f"{epoch + 1}_UNet_MR.pth"))
+        torch.save(self.decoder.state_dict(), os.path.join(ckpt_weight_path, f"{epoch + 1}_ResNet.pth"))
+    
+    def _save_best_resnet(self, epoch, modal, dice_score):
+        """Save best ResNet model when validation score improves."""
+        ckpt_weight_path = os.path.join(self.ckpt_dir, "trained_weights")
+        os.makedirs(ckpt_weight_path, exist_ok=True)
+        
+        # Save best UNet and ResNet models
+        torch.save(self.encoder_ct.state_dict(), os.path.join(ckpt_weight_path, f"best_UNet_CT.pth"))
+        torch.save(self.encoder_mr.state_dict(), os.path.join(ckpt_weight_path, f"best_UNet_MR.pth"))
+        torch.save(self.decoder.state_dict(), os.path.join(ckpt_weight_path, f"best_ResNet.pth"))
+        
+        print(f"New best ResNet model saved! {modal.upper()} Dice: {dice_score:.4f}")
+        wandb.run.summary[f"best_resnet_{modal}_dice"] = dice_score
+    
     def validate_segmentation(self, epoch, save_on):
         """
         Validate segmentation performance only (UNet phase).
@@ -485,6 +533,19 @@ class MorphiNetValidator:
             f"unet/val_{modal}_dice_avg": avg_dice
         }, step=step, commit=True)
         
+        # Save UNet checkpoints during validation
+        self._save_unet_checkpoints(epoch, modal)
+        
+        # Check for best model and save if improved (UNet-specific)
+        if modal == self.validation_modality:  # Only track best score for primary validation modality
+            current_best_key = f"best_unet_{modal}_dice"
+            if not hasattr(self, current_best_key):
+                setattr(self, current_best_key, 0.0)
+            
+            if avg_dice > getattr(self, current_best_key):
+                setattr(self, current_best_key, avg_dice)
+                self._save_best_unet(epoch, modal, avg_dice)
+        
         return avg_dice
     
     def validate_resnet(self, epoch, save_on):
@@ -501,6 +562,9 @@ class MorphiNetValidator:
         """
         print(f"\n--- RESNET VALIDATION ---")
         print(f"Phase: UNet + ResNet Only, Modal: {save_on.upper()}")
+        
+        # Define custom sequence for sequential transformations
+        CUSTOM_SEQUENCE = "s:xy f:x f:z"
         
         self.decoder.eval()
         
@@ -553,12 +617,12 @@ class MorphiNetValidator:
                 if modal == 'mr':
                     seg_pred = seg_pred.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
                 
-                # Process predictions through ResNet pipeline
+                # Process predictions through ResNet pipeline with custom sequential transformation
                 seg_pred_ds_decoder_size = self.preprocessor._memory_efficient_post_transform(
-                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=True)
+                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=True, sequence=CUSTOM_SEQUENCE)
                 
                 seg_pred_ds = self.preprocessor._memory_efficient_post_transform(
-                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=False)
+                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=False, sequence=CUSTOM_SEQUENCE)
                 
                 # Calculate mask for refinement
                 binary_mask_pred = (torch.argmax(seg_pred_ds_decoder_size, dim=1, keepdim=True) == 0)
@@ -575,9 +639,9 @@ class MorphiNetValidator:
                 # Combine predictions (ResNet refined segmentation)
                 seg_pred_ds_refined = seg_pred_ds_decoder_size + mask * resnet_output
                 
-                # Generate downsampled ground truth at decoder size for fair comparison
+                # Generate downsampled ground truth at decoder size for fair comparison with custom sequential transformation
                 seg_true_ds_decoder_size = torch.stack([
-                    self.preprocessor._generate_downsampled_gt(seg_true_item, modal, decoder_size=True)
+                    self.preprocessor._generate_downsampled_gt(seg_true_item, modal, decoder_size=True, sequence=CUSTOM_SEQUENCE)
                     for seg_true_item in seg_true
                 ])
                 
@@ -611,5 +675,18 @@ class MorphiNetValidator:
             f"resnet/val_{modal}_dice_rv": rv_dice,
             f"resnet/val_{modal}_dice_avg": avg_dice
         }, step=step, commit=True)
+        
+        # Save ResNet checkpoints during validation
+        self._save_resnet_checkpoints(epoch, modal)
+        
+        # Check for best model and save if improved (ResNet-specific)
+        if modal == self.validation_modality:  # Only track best score for primary validation modality
+            current_best_key = f"best_resnet_{modal}_dice"
+            if not hasattr(self, current_best_key):
+                setattr(self, current_best_key, 0.0)
+            
+            if avg_dice > getattr(self, current_best_key):
+                setattr(self, current_best_key, avg_dice)
+                self._save_best_resnet(epoch, modal, avg_dice)
         
         return avg_dice

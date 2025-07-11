@@ -23,7 +23,14 @@ def collate_4D_batch(data: List[Dict[str, Union[torch.Tensor, np.ndarray]]]) -> 
             if "mr" not in key or "df" in key:
                 # Handle CT data and distance fields normally
                 batch[key] = torch.concat([d[key] for d in data], dim=0)
-                if batch[key].dim() == 4:
+                # Ensure CT data has proper dimensions: add batch dim if needed, then channel dim
+                if batch[key].dim() == 3:  # [H*B, W, D] -> [B, 1, H, W, D]
+                    # Reshape to separate batch and spatial dimensions
+                    original_shape = batch[key].shape
+                    batch_size = len(data)
+                    spatial_dims = (original_shape[0] // batch_size, original_shape[1], original_shape[2])
+                    batch[key] = batch[key].view(batch_size, *spatial_dims).unsqueeze(1)
+                elif batch[key].dim() == 4:  # [B, H, W, D] -> [B, 1, H, W, D]
                     batch[key] = batch[key].unsqueeze(1)
             else:
                 # For MR data, the input shape for each sample is [N, H, W, D].

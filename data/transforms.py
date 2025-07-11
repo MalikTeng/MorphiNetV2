@@ -1,30 +1,19 @@
 import torch
 import numpy as np
 from monai.transforms import (
-    AdjustContrastd,
     Compose,
-    LoadImaged,
     CropForegroundd,
     CopyItemsd,
-    Orientationd,
-    RandAdjustContrastd,
-    RandScaleIntensityd,
     RandGaussianNoised,
     RandGaussianSmoothd,
-    RandRotate90d,
     RandZoomd,
-    RandFlipd,
     Resized,
     ResizeWithPadOrCropd,
-    ScaleIntensityd,
-    ScaleIntensityRangePercentilesd,
     Spacingd,
-    SpatialPadd,
     EnsureTyped
 )
 
 from data.components import *
-import data_check.transformation
 
 __all__ = ["pre_transform"]
 
@@ -34,12 +23,8 @@ def pre_transform(
         crop_window_size: list, pixdim: list, spacing: float = 2.0,
         phase: str = "validation",  # "unet", "resnet", "gsn", "ndf", "validation"
         upscale_ratio: int = 2,  # Add upscale_ratio parameter for decoder-sized distance field
-        custom_translation: tuple = (0, 0, 0),
-        custom_rotation_axis: str = None,
-        custom_rotation_direction: str = 'cw',
-        custom_rotation_count: int = 0,
-        custom_flip_plane: str = None,
-        custom_affine_matrix: np.ndarray = None,
+        dataset: str = None,
+        custom_sequence: str = None,  # Optional custom transformation sequence (e.g., "s:xy f:x f:z")
         **kwargs
 ):
     """
@@ -53,53 +38,48 @@ def pre_transform(
         section: identifier of either train, valid or test set.
         crop_window_size: image and label will be cropped to match the size of network input.
         pixdim: the spatial distance of the downsampled images and labels.
+        custom_sequence: optional transformation sequence string (e.g., "s:xy f:x f:z") applied before distance field generation.
         spacing: target spacing for isotropic resampling.
         phase: current processing phase, determining which keys are generated.
-        custom_translation: custom translation parameters (multiples of 32 pixels).
-        custom_rotation_axis: custom rotation axis ('x', 'y', 'z', or None).
-        custom_rotation_direction: custom rotation direction ('cw' or 'ccw').
+        dataset: dataset name for specific handling (e.g., 'acdc', 'cap', 'scotheart', 'mmwhs').
     """
-    target = kwargs.get("target")   # this flag is used for ACDC dataset specifically, because of its unique data configuration
-    target = target.lower() if target is not None else None
+    # Handle backward compatibility for target parameter
+    if dataset is None:
+        dataset = kwargs.get("target")
+    if dataset is not None:
+        dataset = dataset.lower()
     
     # Get stride configuration for DynUNet padding
     strides = kwargs.get("strides", (1, 2, 2, 2, 2))  # Default stride configuration
     
     # Removed UNet transform logging as per cleanup requirements
     
-    # data loading
+    # Unified loading, canonicalization, and resampling
     transforms = [
-        LoadImaged(keys, ensure_channel_first=False if modal == "mr" and target != 'acdc' else True, image_only=True, allow_missing_keys=True),
+        UniversalCanonicalResampled(
+            keys, 
+            dataset=dataset, 
+            modal=modal, 
+            target_spacing=(spacing, spacing, spacing)
+        )
     ]
 
-    # pre-transformation
-    if target == "acdc":
-        # ACDC data is with different orientation
-        transforms.extend([
-            # isotropic resampling
-            Adjustd(keys, allow_missing_keys=True, target="acdc"),
-            Spacingd(keys, [-1, spacing, spacing],
-                     mode=("bilinear", "nearest"), 
-                     allow_missing_keys=True),
-            # Add DynUNet padding after spacing for ACDC (3D) - only for main image and label
-            DynUNetPaddingd([keys[0], keys[1]], strides=strides, spatial_dims=3, allow_missing_keys=True),
-        ])
-    else:
-        transforms.extend([
-            Adjustd(keys, allow_missing_keys=True),
-            Spacingd(keys, 
-                    [spacing] * 3 if modal == "ct" else [spacing, spacing, -1], 
-                    mode=("bilinear", "nearest"), 
-                    allow_missing_keys=True),
-            # Apply custom transformation if matrix is provided
-            *([data_check.transformation.CustomTransformationd(keys, custom_affine_matrix, allow_missing_keys=True)] 
-              if custom_affine_matrix is not None else []),
-            # # Add DynUNet padding after spacing and orientation - only for main image and label
-            # # CT uses 3D DynUNet, MR uses 2D DynUNet
-            # DynUNetPaddingd([keys[0], keys[1]], strides=strides, 
-            #                spatial_dims=3 if modal == "ct" else 2, 
-            #                allow_missing_keys=True),
-        ])
+    # Add histogram matching transform for automatic intensity normalization
+    transforms.append(
+        HistogramMatchd([keys[0]], modal=modal, dataset=dataset, cdf_dir="./cdf_cache", allow_missing_keys=True)
+    )
+
+    # Add DynUNet-compatible padding based on modality
+    if modal == "ct":
+        # Apply 3D padding for all CT datasets
+        transforms.append(
+            DynUNetPaddingd([keys[0], keys[1]], strides=strides, spatial_dims=3, allow_missing_keys=True)
+        )
+    elif modal == "mr":
+        # Apply 2D padding for all MR datasets
+        transforms.append(
+            DynUNetPaddingd([keys[0], keys[1]], strides=strides, spatial_dims=2, allow_missing_keys=True)
+        )
 
     # Only load distance fields for GSN/full network validation (not needed for UNet or ResNet phases)
     load_distance_fields = (section == "valid" and phase in ["gsn", "validation"])
@@ -108,7 +88,12 @@ def pre_transform(
         # Calculate target size for distance field (decoder-sized for validation)
         df_target_size = int(crop_window_size[0] // pixdim[0] * upscale_ratio)
         
-        transforms.extend([
+        # Add custom sequential transformation if specified
+        df_transforms = []
+        if custom_sequence:
+            df_transforms.append(SequentialTransformd(keys[1], sequence=custom_sequence))
+        
+        df_transforms.extend([
             CopyItemsd(keys[1], names=f"{keys[1]}_ds"),
             Spacingd(f"{keys[1]}_ds", [spacing] * 3,
                     mode="nearest", padding_mode="zeros"),
@@ -131,6 +116,8 @@ def pre_transform(
                 ),
             DFConvertd(f"{keys[1]}_ds"),
         ])
+        
+        transforms.extend(df_transforms)
 
     # keys_to_ensure = list(keys)
     # if load_full_data:
@@ -141,20 +128,19 @@ def pre_transform(
             # spatial augmentation
             RandZoomd(
                 keys,
-                min_zoom=0.7 if modal == "ct" else [1.0, 0.7, 0.7], 
-                max_zoom=1.4 if modal == "ct" else [1.0, 1.4, 1.4],
+                min_zoom=0.3 if modal == "ct" else [1.0, 0.3, 0.3], 
+                max_zoom=1.2 if modal == "ct" else [1.0, 1.2, 1.2],
                 mode=("trilinear", "nearest-exact"),
-                align_corners=(True, None), prob=0.15,
+                align_corners=(True, None), prob=0.5,
             ),
-            RandGaussianNoised(keys[0], std=0.01, prob=0.15),
+            RandGaussianNoised(keys[0], std=0.01, prob=0.5),
             RandGaussianSmoothd(
                 keys[0], sigma_x=(0.5, 1.15), sigma_y=(0.5, 1.15),
-                sigma_z=(0.5, 1.15), prob=0.15,
+                sigma_z=(0.5, 1.15), prob=0.5,
             ),
-            RandAdjustContrastd(keys[0], gamma=(0.65, 1.5), prob=0.15),
-            RandScaleIntensityd(keys[0], factors=0.3, prob=0.15),
-            # normalize the image intensity to 0-1
-            ScaleIntensityRangePercentilesd(keys[0], lower=1, upper=99, b_min=0.0, b_max=1.0, clip=True, allow_missing_keys=True),
+            # RandAdjustContrastd(keys[0], gamma=(0.65, 1.5), prob=0.5),
+            # RandScaleIntensityd(keys[0], factors=0.3, prob=0.5),
+            # Note: ThresholdIntensityd, HistogramNormalized, and ScaleIntensityd are now handled by HistogramMatchd
         ])
         float_keys_train = [keys[0]]
         int_keys_train = [keys[1]]
@@ -166,7 +152,7 @@ def pre_transform(
         ])
     else: # "valid" or "test" section
         transforms.extend([
-            ScaleIntensityRangePercentilesd(keys[0], lower=1, upper=99, b_min=0.0, b_max=1.0, clip=True, allow_missing_keys=True),
+        # Note: ThresholdIntensityd, HistogramNormalized, and ScaleIntensityd are now handled by HistogramMatchd
         ])
         float_keys_valid = [keys[0]]
         int_keys_valid = [keys[1]]

@@ -11,18 +11,20 @@ from data.dataset_utils import collate_4D_batch
 class DataLoaderManager:
     """Manages data loading for MorphiNet training, validation, and testing."""
     
-    def __init__(self, super_params, num_workers=4, target=None):
+    def __init__(self, super_params, num_workers=4, target=None, dataset=None):
         """
         Initialize the DataLoader Manager.
         
         Args:
             super_params: Configuration parameters
             num_workers: Number of workers for data loading
-            target: Target for transformation
+            target: Target for transformation (deprecated, use dataset)
+            dataset: Dataset name for transformation
         """
         self.super_params = super_params
         self.num_workers = num_workers
-        self.target = target
+        # Handle backward compatibility
+        self.dataset = dataset if dataset is not None else target
         
         # Initialize dataloader attributes
         self.mr_train_loader, self.mr_valid_loader, self.mr_test_loader = None, None, None
@@ -135,12 +137,12 @@ class DataLoaderManager:
             if data_type == "train":
                 transform, _ = self._prepare_transform(
                     [f"{modal}_image", f"{modal}_label"], modal, 
-                    target=self.target, training_phase=transform_phase
+                    dataset=self.dataset, training_phase=transform_phase
                 )
             else:  # valid or test
                 _, transform = self._prepare_transform(
                     [f"{modal}_image", f"{modal}_label"], modal, 
-                    target=self.target, training_phase=transform_phase
+                    dataset=self.dataset, training_phase=transform_phase
                 )
             
             data_json = json.load(f)

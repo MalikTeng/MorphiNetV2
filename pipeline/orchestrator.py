@@ -53,7 +53,8 @@ class MorphiNetOrchestrator:
         self.is_training = is_training
         self.seed = seed
         self.num_workers = num_workers
-        self.target = kwargs.get('target', None)
+        # Handle backward compatibility for target parameter
+        self.dataset = kwargs.get('dataset', kwargs.get('target', None))
         
         # Global step counter for wandb logging consistency
         self.global_step = 0
@@ -80,7 +81,7 @@ class MorphiNetOrchestrator:
         
         # Initialize data components
         self.dataloader_manager = DataLoaderManager(
-            self.super_params, self.num_workers, self.target
+            self.super_params, self.num_workers, dataset=self.dataset
         )
         self.preprocessor = DataPreprocessor(self.super_params)
         
@@ -220,7 +221,7 @@ class MorphiNetOrchestrator:
             mesh_ops=self.mesh_ops,
             inference=self.inference,
             orchestrator=self,
-            target=self.target
+            dataset=self.dataset
         )
         
         # Initialize validator
@@ -331,14 +332,33 @@ class MorphiNetOrchestrator:
         print("STARTING FULL MORPHINET TRAINING PIPELINE")
         print("="*80)
         
-        # Phase 1: UNet Training
-        self.train_phase("unet", 0, self.super_params.pretrain_epochs)
+        # Phase 1: UNet Training (only if pretrain_epochs > 0)
+        if self.super_params.pretrain_epochs > 0:
+            print(f"UNet phase: epochs 0 to {self.super_params.pretrain_epochs}")
+            self.train_phase("unet", 0, self.super_params.pretrain_epochs)
+        else:
+            print("UNet phase: SKIPPED (pretrain_epochs = 0)")
         
-        # Phase 2: ResNet Training
-        self.train_phase("resnet", self.super_params.pretrain_epochs, self.super_params.train_epochs)
+        # Phase 2: ResNet Training (only if train_epochs > pretrain_epochs)
+        if self.super_params.train_epochs > self.super_params.pretrain_epochs:
+            print(f"ResNet phase: epochs {self.super_params.pretrain_epochs} to {self.super_params.train_epochs}")
+            self.train_phase("resnet", self.super_params.pretrain_epochs, self.super_params.train_epochs)
+        else:
+            print(f"ResNet phase: SKIPPED (train_epochs={self.super_params.train_epochs} <= pretrain_epochs={self.super_params.pretrain_epochs})")
         
-        # Phase 3: GSN Training
-        self.train_phase("gsn", self.super_params.train_epochs, self.super_params.max_epochs)
+        # Phase 3: GSN Training (only if max_epochs > train_epochs AND train_epochs > pretrain_epochs)
+        if self.super_params.max_epochs > self.super_params.train_epochs and self.super_params.train_epochs > self.super_params.pretrain_epochs:
+            print(f"GSN phase: epochs {self.super_params.train_epochs} to {self.super_params.max_epochs}")
+            self.train_phase("gsn", self.super_params.train_epochs, self.super_params.max_epochs)
+        else:
+            if self.super_params.train_epochs <= self.super_params.pretrain_epochs:
+                print(f"GSN phase: SKIPPED (train_epochs={self.super_params.train_epochs} <= pretrain_epochs={self.super_params.pretrain_epochs})")
+            else:
+                print(f"GSN phase: SKIPPED (max_epochs={self.super_params.max_epochs} <= train_epochs={self.super_params.train_epochs})")
+        
+        # Save final checkpoint after all training phases
+        print("\nSaving final checkpoint...")
+        self._save_final_checkpoint()
         
         print("\n" + "="*80)
         print("FULL MORPHINET TRAINING PIPELINE COMPLETED!")
@@ -378,6 +398,37 @@ class MorphiNetOrchestrator:
             additional_data=additional_data,
             is_best=is_best
         )
+    
+    def _save_final_checkpoint(self):
+        """Save final model checkpoint after all training phases complete."""
+        ckpt_weight_path = os.path.join(self.ckpt_dir, "trained_weights")
+        os.makedirs(ckpt_weight_path, exist_ok=True)
+        
+        # Determine the last trained epoch based on which phases were executed
+        last_epoch = 0
+        if self.super_params.max_epochs > self.super_params.train_epochs and self.super_params.train_epochs > self.super_params.pretrain_epochs:
+            last_epoch = self.super_params.max_epochs - 1
+        elif self.super_params.train_epochs > self.super_params.pretrain_epochs:
+            last_epoch = self.super_params.train_epochs - 1
+        elif self.super_params.pretrain_epochs > 0:
+            last_epoch = self.super_params.pretrain_epochs - 1
+        
+        # Save final models
+        if hasattr(self.models['encoder_ct'], 'state_dict'):
+            torch.save(self.models['encoder_ct'].state_dict(), os.path.join(ckpt_weight_path, f"final_UNet_CT.pth"))
+        if hasattr(self.models['encoder_mr'], 'state_dict'):
+            torch.save(self.models['encoder_mr'].state_dict(), os.path.join(ckpt_weight_path, f"final_UNet_MR.pth"))
+        if hasattr(self.models['decoder'], 'state_dict'):
+            torch.save(self.models['decoder'].state_dict(), os.path.join(ckpt_weight_path, f"final_ResNet.pth"))
+        if hasattr(self.models['GSN'], 'state_dict'):
+            torch.save(self.models['GSN'].state_dict(), os.path.join(ckpt_weight_path, f"final_GSN.pth"))
+        
+        # Save subdivision faces if available
+        if hasattr(self, 'mesh_ops') and hasattr(self.mesh_ops, 'subdivided_faces'):
+            for level, faces in enumerate(self.mesh_ops.subdivided_faces.faces_levels):
+                torch.save(faces, os.path.join(ckpt_weight_path, f"final_subdivided_faces_l{level}.pth"))
+        
+        print(f"Final checkpoints saved to {ckpt_weight_path}")
     
     def cleanup(self):
         """Clean up resources."""

@@ -17,14 +17,14 @@ TEMPLATE_MESH_DIR="./template/template_mesh-myo.obj"
 CKPT_DIR="/mnt/data/Experiment/MorphiNet/Checkpoint/"
 
 # Training parameters
-MAX_EPOCHS=4
-PRETRAIN_EPOCHS=4
-TRAIN_EPOCHS=6
-VAL_INTERVAL=1
+MAX_EPOCHS=80
+PRETRAIN_EPOCHS=80
+TRAIN_EPOCHS=0
+VAL_INTERVAL=5
 BATCH_SIZE=1
 LR=0.001
-MAX_SAMPLES=5  # Set to 0 for full dataset, or positive number to limit samples for testing
-WANDB_MODE="offline"  # 'offline' for local logging, 'online' for cloud sync, 'disabled' to turn off
+MAX_SAMPLES=50  # Set to 0 for full dataset, or positive number to limit samples for testing
+WANDB_MODE="online"  # 'offline' for local logging, 'online' for cloud sync, 'disabled' to turn off
 
 # Model parameters
 SUBDIV_LEVELS=2

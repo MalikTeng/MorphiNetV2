@@ -249,7 +249,27 @@ class CheckpointManager:
                 if os.path.exists(weight_path):
                     try:
                         state_dict = torch.load(weight_path, map_location='cpu')
-                        model.load_state_dict(state_dict, strict=False)
+                        
+                        # Check if keys match between model and checkpoint
+                        model_keys = set(model.state_dict().keys())
+                        checkpoint_keys = set(state_dict.keys())
+                        
+                        missing_keys = model_keys - checkpoint_keys
+                        unexpected_keys = checkpoint_keys - model_keys
+                        
+                        if missing_keys:
+                            print(f"WARNING: Missing keys in checkpoint for {model_name}: {len(missing_keys)} keys")
+                        if unexpected_keys:
+                            print(f"WARNING: Unexpected keys in checkpoint for {model_name}: {len(unexpected_keys)} keys")
+                        
+                        # Load with strict=False to handle architecture mismatches
+                        missing_keys_actual, unexpected_keys_actual = model.load_state_dict(state_dict, strict=False)
+                        
+                        if missing_keys_actual:
+                            print(f"INFO: {model_name} missing keys: {len(missing_keys_actual)}")
+                        if unexpected_keys_actual:
+                            print(f"INFO: {model_name} unexpected keys: {len(unexpected_keys_actual)}")
+                        
                         print(f"Loaded pretrained weights for {model_name}: {weight_file}")
                         loaded = True
                         break

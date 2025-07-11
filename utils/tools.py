@@ -7,18 +7,67 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 from pytorch3d.structures import Meshes
-from trimesh.voxel.ops import matrix_to_marching_cubes
 import matplotlib.pyplot as plt
 import seaborn as sns
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
-from monai.transforms import RemoveSmallObjects
 
 __all__ = ["draw_plotly", "draw_train_loss", "draw_eval_score"]
 
 
+
+
+def extract_surface_vertices_pytorch3d(volume, isolevel=0.5):
+    """Extract surface vertices using PyTorch3D marching cubes.
+    
+    Args:
+        volume: 3D volume tensor or numpy array
+        isolevel: Threshold for surface extraction
+        
+    Returns:
+        tuple: (vertices, faces) as numpy arrays, or (empty_array, empty_array) if extraction fails
+    """
+    try:
+        from pytorch3d.ops.marching_cubes import marching_cubes
+    except ImportError:
+        raise ImportError("PyTorch3D not available. Install with: pip install pytorch3d")
+    
+    # Convert to tensor if needed
+    if isinstance(volume, np.ndarray):
+        volume_tensor = torch.from_numpy(volume).float()
+    elif hasattr(volume, 'float'):
+        volume_tensor = volume.float()
+    else:
+        try:
+            volume_array = np.array(volume)
+            volume_tensor = torch.from_numpy(volume_array).float()
+        except Exception as e:
+            print(f"Failed to convert volume to tensor: {e}")
+            return np.array([]), np.array([])
+    
+    # Ensure 4D tensor (batch dimension)
+    if volume_tensor.dim() == 3:
+        volume_tensor = volume_tensor.unsqueeze(0)
+    
+    try:
+        verts, faces = marching_cubes(volume_tensor, isolevel=isolevel, return_local_coords=False)
+        
+        # Handle case where marching cubes returns empty results
+        if isinstance(verts, list):
+            if len(verts) == 0 or (len(verts) > 0 and isinstance(verts[0], list)):
+                return np.array([]), np.array([])
+            else:
+                verts_np = verts[0].numpy()
+                faces_np = faces[0].numpy()
+        else:
+            verts_np = verts[0].numpy()
+            faces_np = faces[0].numpy()
+            
+        return verts_np, faces_np
+        
+    except Exception as e:
+        print(f"PyTorch3D marching cubes failed: {e}")
+        return np.array([]), np.array([])
 
 
 def draw_plotly(
@@ -28,7 +77,7 @@ def draw_plotly(
     save_dir: str = None, filename: str = None, export_static: bool = True, 
     export_png_filename: str = None, **kwargs
     ):
-    """Draw the plotly figure for visualization.
+    """Draw the plotly figure for visualization using PyTorch3D marching cubes.
     
     Args:
         seg_true: ground truth segmentation, shape (C, H, W, D)
@@ -72,20 +121,15 @@ def draw_plotly(
     if seg_true is not None:
         num_classes = len(torch.unique(seg_true))
         if num_classes == 2:
-            mesh = matrix_to_marching_cubes(seg_true[0].cpu().numpy())
-            x, y, z = mesh.vertices.T
-            I, J, K = mesh.faces.T
-            fig.add_trace(go.Mesh3d(
-                x=x, y=y, z=z,
-                i=I, j=J, k=K,
-                color="pink",
-                opacity=0.25,
-                name="seg_true"
-            ))
+            vertices, faces = extract_surface_vertices_pytorch3d(seg_true[0].cpu().numpy(), isolevel=0.5)
         else:
-            mesh = matrix_to_marching_cubes((seg_true[0] == 2).cpu().numpy())
-            x, y, z = mesh.vertices.T
-            I, J, K = mesh.faces.T
+            # Extract myocardium (class 2) surface
+            myocardium_mask = (seg_true[0] == 2).cpu().numpy().astype(np.float32)
+            vertices, faces = extract_surface_vertices_pytorch3d(myocardium_mask, isolevel=0.5)
+        
+        if len(vertices) > 0 and len(faces) > 0:
+            x, y, z = vertices.T
+            I, J, K = faces.T
             fig.add_trace(go.Mesh3d(
                 x=x, y=y, z=z,
                 i=I, j=J, k=K,
@@ -96,24 +140,16 @@ def draw_plotly(
     
     if seg_pred is not None:
         num_classes = len(torch.unique(seg_pred))
-        # # Save seg_pred as nifti file
-        # seg_pred_nii = nib.Nifti1Image(seg_pred[0].cpu().numpy(), np.eye(4))
-        # nib.save(seg_pred_nii, 'seg_pred.nii.gz')
         if num_classes == 2:
-            mesh = matrix_to_marching_cubes(seg_pred[0].cpu().numpy())
-            x, y, z = mesh.vertices.T
-            I, J, K = mesh.faces.T
-            fig.add_trace(go.Mesh3d(
-                x=x, y=y, z=z,
-                i=I, j=J, k=K,
-                color="blue",
-                opacity=0.25,
-                name="seg_pred"
-            ))
+            vertices, faces = extract_surface_vertices_pytorch3d(seg_pred[0].cpu().numpy(), isolevel=0.5)
         else:
-            mesh = matrix_to_marching_cubes((seg_pred[0] == 2).cpu().numpy())
-            x, y, z = mesh.vertices.T
-            I, J, K = mesh.faces.T
+            # Extract myocardium (class 2) surface
+            myocardium_mask = (seg_pred[0] == 2).cpu().numpy().astype(np.float32)
+            vertices, faces = extract_surface_vertices_pytorch3d(myocardium_mask, isolevel=0.5)
+        
+        if len(vertices) > 0 and len(faces) > 0:
+            x, y, z = vertices.T
+            I, J, K = faces.T
             fig.add_trace(go.Mesh3d(
                 x=x, y=y, z=z,
                 i=I, j=J, k=K,
@@ -190,18 +226,21 @@ def draw_plotly(
             ))
         else:
             # draw the zero-level set from the df_pred
-            mesh = matrix_to_marching_cubes((df_pred[-1].cpu().numpy() <= 1))
-            verts, faces = mesh.vertices, mesh.faces
-            # Use consistent scaling - no need to adjust if df_pred is already correctly sized
-            y, x, z = verts.T
-            I, J, K = faces.T
-            fig.add_trace(go.Mesh3d(
-                x=x, y=y, z=z,
-                i=I, j=J, k=K,
-                color="gray",
-                opacity=0.25,
-                name="df_pred"
-            ))
+            df_mask = (df_pred[-1].cpu().numpy() <= 1).astype(np.float32)
+            vertices, faces = extract_surface_vertices_pytorch3d(df_mask, isolevel=0.5)
+            
+            if len(vertices) > 0 and len(faces) > 0:
+                # Use consistent coordinate ordering: y, x, z -> x, y, z
+                y, x, z = vertices.T
+                I, J, K = faces.T
+                fig.add_trace(go.Mesh3d(
+                    x=x, y=y, z=z,
+                    i=I, j=J, k=K,
+                    color="gray",
+                    opacity=0.25,
+                    name="df_pred"
+                ))
+
 
         if seg_true is not None:
             # plot the center of lv and rv from the distance field
@@ -306,7 +345,7 @@ def draw_eval_score(eval_score: dict, super_params: Namespace, task_code: str, m
     df_melted = df.melt(id_vars="Epoch", var_name="Label", value_name="Score")
     mean_scores = df.drop("Epoch", axis=1).mean(axis=1)
     mean_scores.name = 'Average Score'
-    sns.set(style="whitegrid")
+    sns.set_theme(style="whitegrid")
     fig, ax = plt.subplots(figsize=(10, 8))
     sns.boxplot(x=df_melted["Epoch"], y=df_melted["Score"], ax=ax, color="skyblue", showfliers=False, width=0.2)
     sns.lineplot(x=mean_scores.index.values, y=mean_scores, ax=ax, color="green", label="Average")

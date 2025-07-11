@@ -5,6 +5,7 @@ from trimesh.convex import convex_hull
 from pytorch3d.structures import Meshes
 from pytorch3d.ops import taubin_smoothing
 from pytorch3d.ops.marching_cubes import marching_cubes
+from pytorch3d.io import load_objs_as_meshes
 from model.networks import LocalMeshWarper
 
 
@@ -103,39 +104,12 @@ class MeshOperations:
 
         mesh_true = []
         for seg_true_ in seg_true_multi:
-            # DEBUG: Log the tensor transformation for coordinate tracing
-            original_shape = seg_true_.shape
-            squeezed_shape = seg_true_.squeeze(1).shape
-            permuted_tensor = seg_true_.squeeze(1).permute(0, 3, 1, 2)
-            permuted_shape = permuted_tensor.shape  # Using permutated tensor with shape (N, D, H, W)
-            
-            print(f"\n🔍 SURFACE_EXTRACTOR DEBUG:")
-            print(f"📊 Original tensor shape: {original_shape}")
-            print(f"📊 After squeeze(1): {squeezed_shape}")  
-            print(f"📊 Interpretation: (N, H, W, D) → (N, D, H, W) → marching_cubes input")
-            print(f"📊 Axis mapping for marching_cubes:")
-            print(f"    - Axis 1 (D) → Z coordinate in output mesh")
-            print(f"    - Axis 2 (H) → Y coordinate in output mesh")  
-            print(f"    - Axis 3 (W) → X coordinate in output mesh")
-            
             # Apply marching cubes to extract surface
             verts, faces = marching_cubes(
-                permuted_tensor.to(torch.float32),  # ✅ FIXED: Use permuted tensor with correct axis order (N, D, H, W)
+                seg_true_.squeeze(1).to(torch.float32),
                 isolevel=0.1,
                 return_local_coords=True,
             )
-            
-            # DEBUG: Log the output mesh properties
-            if len(verts) > 0:
-                first_verts = verts[0].detach().cpu().numpy()
-                print(f"🔍 MARCHING_CUBES OUTPUT:")
-                print(f"📊 Number of meshes: {len(verts)}")
-                print(f"📊 First mesh vertices shape: {first_verts.shape}")
-                print(f"📊 Vertex coordinate ranges:")
-                print(f"    - X: [{first_verts[:, 0].min():.3f}, {first_verts[:, 0].max():.3f}]")
-                print(f"    - Y: [{first_verts[:, 1].min():.3f}, {first_verts[:, 1].max():.3f}]")
-                print(f"    - Z: [{first_verts[:, 2].min():.3f}, {first_verts[:, 2].max():.3f}]")
-                print(f"📊 Mesh centroid: [{first_verts[:, 0].mean():.3f}, {first_verts[:, 1].mean():.3f}, {first_verts[:, 2].mean():.3f}]")
             
             # Apply Taubin smoothing to the extracted mesh
             mesh_true.append(taubin_smoothing(Meshes(verts, faces), 0.77, -0.34, 30))
@@ -181,11 +155,11 @@ class MeshOperations:
 
             return R
 
-        # Load template mesh
-        template_mesh = load(self.super_params.template_mesh_dir)
+        # Load template mesh using PyTorch3D
+        template_mesh_pt3d = load_objs_as_meshes([self.super_params.template_mesh_dir], device=DEVICE)
         template_mesh = Meshes(
-            verts=[torch.tensor(template_mesh.vertices, dtype=torch.float64)], 
-            faces=[torch.tensor(template_mesh.faces, dtype=torch.int64)]
+            verts=[template_mesh_pt3d.verts_packed().to(dtype=torch.float64)], 
+            faces=[template_mesh_pt3d.faces_packed().to(dtype=torch.int64)]
         ).to(DEVICE).extend(b)
         
         # Stage 1: Smooth global offset with rotation alignment
@@ -203,7 +177,7 @@ class MeshOperations:
         # Ensure verts are in double precision before matrix multiplication
         verts = verts.to(torch.float64)
         verts = torch.bmm(R, verts.transpose(1, 2)).transpose(1, 2)
-
+        
         template_mesh = template_mesh.update_padded(verts)
 
         # Stage 2: Local offset using LocalMeshWarper
@@ -220,8 +194,9 @@ class MeshOperations:
             template_mesh_path: Path to template mesh file
         
         Returns:
-            Loaded template mesh object
+            Loaded template mesh object (trimesh object for vertex color access)
         """
+        # Load with trimesh for vertex color processing (required by _mesh_label)
         template_mesh = load(template_mesh_path)
         self._mesh_label(template_mesh)
         return template_mesh

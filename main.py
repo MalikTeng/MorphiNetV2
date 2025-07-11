@@ -37,6 +37,14 @@ def config():
     parser.add_argument("--template_mesh_dir", type=str,
                        default="./template/template_mesh-myo.obj",
                        help="Path to template mesh file")
+    parser.add_argument("--inference_only", action="store_true",
+                       help="Run inference only (no training)")
+    parser.add_argument("--test_phase", type=str, default="unet",
+                       choices=["unet", "resnet", "both"],
+                       help="Which phase to test: 'unet', 'resnet', or 'both'")
+    parser.add_argument("--test_dataset", type=str, default="both",
+                       choices=["acdc", "mmwhs", "cap", "scotheart", "both"],
+                       help="Which dataset to test: 'acdc', 'mmwhs', 'cap', 'scotheart', or 'both'")
 
     # Training parameters
     parser.add_argument("--max_epochs", type=int, default=5, 
@@ -53,7 +61,7 @@ def config():
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--cache_rate", type=float, default=1.0, help="Cache rate")
-    parser.add_argument("--max_samples", type=int, default=5, 
+    parser.add_argument("--max_samples", type=int, default=0, 
                        help="Maximum number of samples per dataset (0 for full dataset)")
     parser.add_argument("--crop_window_size", type=int, nargs='+', 
                        default=[128, 128, 128], help="Crop window size")
@@ -111,7 +119,7 @@ def config():
     # Checkpoint parameters
     parser.add_argument("--use_ckpt", type=str, default="n", 
                        help="Checkpoint directory to resume from")
-    parser.add_argument("--ckpt_dir", type=str, default="./Checkpoint", 
+    parser.add_argument("--ckpt_dir", type=str, default="/mnt/data/Experiment/MorphiNet/Checkpoint/", 
                        help="Directory to save checkpoints")
     parser.add_argument("--run_id", type=str, default="", 
                        help="Run identifier")
@@ -122,9 +130,97 @@ def config():
     parser.add_argument("--target", type=str, default=None,
                        help="Target dataset for testing (exact dataset identifier)")
     
+    # Note: Histogram matching parameters removed - functionality now handled automatically by HistogramMatchd transform
+    
     # Backward compatibility removed - use --validation_modality only
 
     return parser.parse_args()
+
+
+def test_morphinet(super_params):
+    """
+    Test trained MorphiNet models using the modular architecture.
+    
+    Args:
+        super_params: Parsed command line arguments
+    """
+    print("="*80)
+    print("MORPHINET INFERENCE PIPELINE")
+    print("="*80)
+    print(f"Testing phase: {super_params.test_phase}")
+    print(f"Testing dataset: {super_params.test_dataset}")
+    
+    # Generate run ID for testing
+    run_id = f"test-{super_params.test_phase}-{super_params.test_dataset}-{time.strftime('%Y-%m-%d-%H%M', time.localtime(time.time()))}"
+    
+    # Initialize Weights & Biases for logging test results
+    with wandb.init(config=super_params, mode=super_params.mode, 
+                   project="MorphiNet-Testing", name=run_id, resume="allow"):
+        
+        try:
+            # Import the modular pipeline
+            from run import create_testing_pipeline
+            
+            # Create testing pipeline
+            pipeline = create_testing_pipeline(
+                super_params=super_params,
+                seed=42,
+                num_workers=4,
+                dataset=super_params.test_dataset
+            )
+            
+            # Load best model weights
+            checkpoint_path = None
+            
+            # Determine checkpoint directory
+            if super_params.use_ckpt != "n" and super_params.use_ckpt is not None:
+                checkpoint_path = super_params.use_ckpt
+                print(f"Using specified checkpoint path: {checkpoint_path}")
+            else:
+                # Auto-detect latest checkpoint if no specific path provided
+                dynamic_dir = os.path.join(super_params.ckpt_dir, "dynamic")
+                if os.path.exists(dynamic_dir):
+                    # Find the most recent checkpoint directory
+                    checkpoint_dirs = [d for d in os.listdir(dynamic_dir) 
+                                     if os.path.isdir(os.path.join(dynamic_dir, d))]
+                    if checkpoint_dirs:
+                        # Sort by modification time, get most recent
+                        checkpoint_dirs.sort(key=lambda x: os.path.getmtime(os.path.join(dynamic_dir, x)), reverse=True)
+                        checkpoint_path = os.path.join(dynamic_dir, checkpoint_dirs[0])
+                        print(f"Auto-detected latest checkpoint: {checkpoint_path}")
+                    else:
+                        print(f"Warning: No checkpoint directories found in {dynamic_dir}")
+                        return
+                else:
+                    print(f"Warning: Checkpoint directory {dynamic_dir} does not exist")
+                    return
+            
+            # Determine weights path (support both direct weights dir and checkpoint/trained_weights structure)
+            if os.path.exists(os.path.join(checkpoint_path, "trained_weights")):
+                weights_path = os.path.join(checkpoint_path, "trained_weights")
+            elif os.path.exists(os.path.join(checkpoint_path, "best_UNet_CT.pth")):
+                weights_path = checkpoint_path
+            else:
+                print(f"Warning: Could not find trained weights in {checkpoint_path}")
+                print("Expected structure: {checkpoint_path}/trained_weights/ or weights directly in {checkpoint_path}/")
+                return
+            
+            print(f"Loading trained weights from {weights_path}")
+            pipeline.load_pretrained_weights(weights_path)
+            
+            # Execute inference testing using the new modular approach
+            test_results = pipeline.test()
+            
+        except Exception as e:
+            print(f"Testing failed with error: {e}")
+            raise e
+        
+        finally:
+            # Cleanup
+            if 'pipeline' in locals():
+                del pipeline
+            torch.cuda.empty_cache()
+            gc.collect()
 
 
 def train_morphinet(super_params):
@@ -206,17 +302,28 @@ def train_morphinet(super_params):
 
 
 def main():
-    """Main entry point for MorphiNet training."""
+    """Main entry point for MorphiNet training and testing."""
     super_params = config()
     
-    print("MorphiNet Training Pipeline")
+    print("MorphiNet Pipeline")
     print(f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     print(f"Mode: {super_params.mode}")
-    print(f"Validation modality: {super_params.validation_modality}")
-    print(f"Max epochs: {super_params.max_epochs}")
     
-    # Train using modular architecture
-    train_morphinet(super_params)
+    if super_params.inference_only:
+        print("Running in INFERENCE mode")
+        print(f"Test phase: {super_params.test_phase}")
+        print(f"Test dataset: {super_params.test_dataset}")
+        print(f"Max samples: {super_params.max_samples}")
+        
+        # Run inference testing
+        test_morphinet(super_params)
+    else:
+        print("Running in TRAINING mode")
+        print(f"Validation modality: {super_params.validation_modality}")
+        print(f"Max epochs: {super_params.max_epochs}")
+        
+        # Train using modular architecture
+        train_morphinet(super_params)
 
 
 if __name__ == '__main__':
