@@ -9,6 +9,8 @@ from monai.transforms import (
     RandZoomd,
     Resized,
     ResizeWithPadOrCropd,
+    RandAdjustContrastd,
+    RandScaleIntensityd,
     Spacingd,
     EnsureTyped
 )
@@ -64,10 +66,7 @@ def pre_transform(
         )
     ]
 
-    # Add histogram matching transform for automatic intensity normalization
-    transforms.append(
-        HistogramMatchd([keys[0]], modal=modal, dataset=dataset, cdf_dir="./cdf_cache", allow_missing_keys=True)
-    )
+    # Histogram matching removed - functionality archived
 
     # Add DynUNet-compatible padding based on modality
     if modal == "ct":
@@ -81,20 +80,30 @@ def pre_transform(
             DynUNetPaddingd([keys[0], keys[1]], strides=strides, spatial_dims=2, allow_missing_keys=True)
         )
 
-    # Only load distance fields for GSN/full network validation (not needed for UNet or ResNet phases)
-    load_distance_fields = (section == "valid" and phase in ["gsn", "validation"])
+    # Add dynamic intensity rescaling with dataset-specific background detection
+    transforms.append(
+        DynamicIntensityRangeScalesd(
+            keys=[keys[0]], 
+            dataset=dataset,
+            dual_background_threshold=200.0,
+            upper_percentile=99.0, 
+            b_min=0.0, 
+            b_max=1.0, 
+            clip=True, 
+            allow_missing_keys=True
+        )
+    )
+    
+    # Only load distance fields for full network validation phase (not needed for UNet or ResNet phases)
+    load_distance_fields = (section == "valid" and phase == "validation")
 
     if load_distance_fields:
         # Calculate target size for distance field (decoder-sized for validation)
         df_target_size = int(crop_window_size[0] // pixdim[0] * upscale_ratio)
         
-        # Add custom sequential transformation if specified
-        df_transforms = []
-        if custom_sequence:
-            df_transforms.append(SequentialTransformd(keys[1], sequence=custom_sequence))
-        
-        df_transforms.extend([
+        df_transforms = [
             CopyItemsd(keys[1], names=f"{keys[1]}_ds"),
+            SequentialTransformd(f"{keys[1]}_ds", sequence="s:xy f:x f:z"),
             Spacingd(f"{keys[1]}_ds", [spacing] * 3,
                     mode="nearest", padding_mode="zeros"),
             CropForegroundd(f"{keys[1]}_ds", source_key=f"{keys[1]}_ds"),
@@ -115,13 +124,9 @@ def pre_transform(
                 mode="constant", value=0
                 ),
             DFConvertd(f"{keys[1]}_ds"),
-        ])
+        ]
         
         transforms.extend(df_transforms)
-
-    # keys_to_ensure = list(keys)
-    # if load_full_data:
-    #     keys_to_ensure.extend([f"{keys[0][:2]}_df", f"{keys[1]}_ds"])
 
     if section == "train":
         transforms.extend([
@@ -131,17 +136,17 @@ def pre_transform(
                 min_zoom=0.3 if modal == "ct" else [1.0, 0.3, 0.3], 
                 max_zoom=1.2 if modal == "ct" else [1.0, 1.2, 1.2],
                 mode=("trilinear", "nearest-exact"),
-                align_corners=(True, None), prob=0.5,
+                padding_mode="constant",
+                align_corners=(True, None), prob=0.15,
             ),
-            RandGaussianNoised(keys[0], std=0.01, prob=0.5),
+            RandGaussianNoised(keys[0], std=0.01, prob=0.15),
             RandGaussianSmoothd(
                 keys[0], sigma_x=(0.5, 1.15), sigma_y=(0.5, 1.15),
-                sigma_z=(0.5, 1.15), prob=0.5,
+                sigma_z=(0.5, 1.15), prob=0.15,
             ),
-            # RandAdjustContrastd(keys[0], gamma=(0.65, 1.5), prob=0.5),
-            # RandScaleIntensityd(keys[0], factors=0.3, prob=0.5),
-            # Note: ThresholdIntensityd, HistogramNormalized, and ScaleIntensityd are now handled by HistogramMatchd
+            RandAdjustContrastd(keys[0], gamma=(0.65, 1.5), prob=0.15),
         ])
+        
         float_keys_train = [keys[0]]
         int_keys_train = [keys[1]]
         if load_distance_fields:
@@ -151,9 +156,6 @@ def pre_transform(
             EnsureTyped(int_keys_train, data_type="tensor", dtype=torch.int8, allow_missing_keys=True),
         ])
     else: # "valid" or "test" section
-        transforms.extend([
-        # Note: ThresholdIntensityd, HistogramNormalized, and ScaleIntensityd are now handled by HistogramMatchd
-        ])
         float_keys_valid = [keys[0]]
         int_keys_valid = [keys[1]]
         if load_distance_fields:

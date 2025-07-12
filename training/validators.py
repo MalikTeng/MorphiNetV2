@@ -123,10 +123,9 @@ class MorphiNetValidator:
                 if modal == 'mr':
                     seg_true = seg_true.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
                 
-                # Generate downsampled ground truth at decoder size with custom sequential transformation
-                CUSTOM_SEQUENCE = "s:xy f:x f:z"
+                # Generate downsampled ground truth at decoder size
                 seg_true_ds = torch.stack([
-                    self.preprocessor._generate_downsampled_gt(seg_true_item, modal, decoder_size=True, sequence=CUSTOM_SEQUENCE)
+                    self.preprocessor._generate_downsampled_gt(seg_true_item, modal, decoder_size=True)
                     for seg_true_item in seg_true
                 ])
                 
@@ -147,12 +146,12 @@ class MorphiNetValidator:
                 if modal == 'mr':
                     seg_pred = seg_pred.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
                 
-                # Process predictions through ResNet pipeline with custom sequential transformation
+                # Process predictions through ResNet pipeline
                 seg_pred_ds_decoder_size = self.preprocessor._memory_efficient_post_transform(
-                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=True, sequence=CUSTOM_SEQUENCE)
+                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=True)
                 
                 seg_pred_ds = self.preprocessor._memory_efficient_post_transform(
-                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=False, sequence=CUSTOM_SEQUENCE)
+                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=False)
                 
                 # Calculate mask for refinement
                 binary_mask_pred = (torch.argmax(seg_pred_ds_decoder_size, dim=1, keepdim=True) == 0)
@@ -617,12 +616,12 @@ class MorphiNetValidator:
                 if modal == 'mr':
                     seg_pred = seg_pred.unflatten(0, (num_items_for_unflatten, -1)).swapaxes(1, 2)
                 
-                # Process predictions through ResNet pipeline with custom sequential transformation
+                # Process predictions through ResNet pipeline
                 seg_pred_ds_decoder_size = self.preprocessor._memory_efficient_post_transform(
-                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=True, sequence=CUSTOM_SEQUENCE)
+                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=True)
                 
                 seg_pred_ds = self.preprocessor._memory_efficient_post_transform(
-                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=False, sequence=CUSTOM_SEQUENCE)
+                    seg_pred, seg_true, modal, to_gpu=True, decoder_size=False)
                 
                 # Calculate mask for refinement
                 binary_mask_pred = (torch.argmax(seg_pred_ds_decoder_size, dim=1, keepdim=True) == 0)
@@ -641,7 +640,7 @@ class MorphiNetValidator:
                 
                 # Generate downsampled ground truth at decoder size for fair comparison with custom sequential transformation
                 seg_true_ds_decoder_size = torch.stack([
-                    self.preprocessor._generate_downsampled_gt(seg_true_item, modal, decoder_size=True, sequence=CUSTOM_SEQUENCE)
+                    self.preprocessor._generate_downsampled_gt(seg_true_item, modal, decoder_size=True)
                     for seg_true_item in seg_true
                 ])
                 

@@ -315,17 +315,16 @@ class MorphiNetTrainer:
                     )
                     
                     # Process predictions and generate ground truth at decoder size with custom sequential transformation
-                    CUSTOM_SEQUENCE = "s:xy f:x f:z"
                     seg_pred_ct_ds_decoder_size = self.preprocessor._memory_efficient_post_transform(
-                        seg_pred_ct, seg_true_ct, "ct", to_gpu=True, decoder_size=True, sequence=CUSTOM_SEQUENCE)
+                        seg_pred_ct, seg_true_ct, "ct", to_gpu=True, decoder_size=True)
                     
                     seg_true_ct_ds_decoder_size = torch.stack([
-                        self.preprocessor._generate_downsampled_gt(seg_true_item, "ct", decoder_size=True, sequence=CUSTOM_SEQUENCE)
+                        self.preprocessor._generate_downsampled_gt(seg_true_item, "ct", decoder_size=True)
                         for seg_true_item in seg_true_ct
                     ])
                     
                     seg_pred_ct_ds = self.preprocessor._memory_efficient_post_transform(
-                        seg_pred_ct, seg_true_ct, "ct", to_gpu=True, decoder_size=False, sequence=CUSTOM_SEQUENCE)
+                        seg_pred_ct, seg_true_ct, "ct", to_gpu=True, decoder_size=False)
                     
                     # Calculate mask for refinement
                     binary_mask_pred = (torch.argmax(seg_pred_ct_ds_decoder_size, dim=1, keepdim=True) == 0)
@@ -381,10 +380,8 @@ class MorphiNetTrainer:
                     data_ct["ct_label"].to(DEVICE)
                 )
                 
-                # Generate ground truth mesh with custom sequential transformation
-                CUSTOM_SEQUENCE = "s:xy f:x f:z"
                 seg_true_ct_ds = torch.stack([
-                    self.preprocessor._generate_downsampled_gt(seg_true_item, "ct", decoder_size=False, sequence=CUSTOM_SEQUENCE)
+                    self.preprocessor._generate_downsampled_gt(seg_true_item, "ct", decoder_size=False)
                     for seg_true_item in seg_true_ct
                 ])
                 mesh_true_ct = self.mesh_ops.surface_extractor(seg_true_ct_ds.to(DEVICE), labels=2)
@@ -405,10 +402,10 @@ class MorphiNetTrainer:
                     
                     # Process predictions through full pipeline with custom sequential transformation
                     seg_pred_ct_ds_decoder_size = self.preprocessor._memory_efficient_post_transform(
-                        seg_pred_ct, seg_true_ct, "ct", to_gpu=True, decoder_size=True, sequence=CUSTOM_SEQUENCE)
+                        seg_pred_ct, seg_true_ct, "ct", to_gpu=True, decoder_size=True)
                     
                     seg_pred_ct_ds = self.preprocessor._memory_efficient_post_transform(
-                        seg_pred_ct, seg_true_ct, "ct", to_gpu=True, decoder_size=False, sequence=CUSTOM_SEQUENCE)
+                        seg_pred_ct, seg_true_ct, "ct", to_gpu=True, decoder_size=False)
                     
                     # Calculate mask and apply ResNet
                     binary_mask_pred = (torch.argmax(seg_pred_ct_ds_decoder_size, dim=1, keepdim=True) == 0)

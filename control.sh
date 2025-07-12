@@ -16,15 +16,15 @@ CT_DATA_DIR="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset020_SCOTHEART"
 TEMPLATE_MESH_DIR="./template/template_mesh-myo.obj"
 CKPT_DIR="/mnt/data/Experiment/MorphiNet/Checkpoint/"
 
-# Training parameters
-MAX_EPOCHS=80
+# Training parameters - Quick test configuration
+MAX_EPOCHS=200
 PRETRAIN_EPOCHS=80
-TRAIN_EPOCHS=0
-VAL_INTERVAL=5
+TRAIN_EPOCHS=120
+VAL_INTERVAL=10
 BATCH_SIZE=1
 LR=0.001
-MAX_SAMPLES=50  # Set to 0 for full dataset, or positive number to limit samples for testing
-WANDB_MODE="online"  # 'offline' for local logging, 'online' for cloud sync, 'disabled' to turn off
+MAX_SAMPLES=50  # Reduced for quick testing
+WANDB_MODE="online"  # Disabled for quick testing
 
 # Model parameters
 SUBDIV_LEVELS=2

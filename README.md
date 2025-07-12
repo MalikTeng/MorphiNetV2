@@ -10,14 +10,13 @@ This repository provides a **modular, production-ready** implementation of Morph
 - **Modular Architecture**: Clean separation of concerns across specialized modules
 - **Phase-Specific Checkpoint Saving**: UNet, ResNet, and GSN models saved independently
 - **Advanced Testing Pipeline**: Automatic checkpoint detection with comprehensive validation
-- **Cross-Dataset Training**: Histogram matching for robust multi-dataset training
+
 - **Interactive Data Orientation**: Widget-based workflow for data validation
 - **Comprehensive Documentation**: Updated guides for all major features
 
 ### 🚀 Recent Major Updates
 - **Enhanced Checkpoint System**: Automatic detection, phase-specific saving, best model tracking
 - **Improved Testing Infrastructure**: Real model inference with WandB integration
-- **Histogram Matching Fixes**: Production-ready cross-dataset intensity normalization
 - **Sequential Transformations**: Generic flip/swap sequences with affine compensation
 - **Memory-Efficient Processing**: Optimized data loading and GPU memory management
 
@@ -56,8 +55,7 @@ MorphiNet/
 │   ├── orchestrator.py     # MorphiNetOrchestrator - main coordinator
 │   └── testing.py          # MorphiNetTester - inference testing
 ├── utils/                   # Utilities and tools
-│   ├── checkpoint_manager.py # Model persistence
-│   └── histogram_preprocessor.py # Cross-dataset normalization
+│   └── checkpoint_manager.py # Model persistence
 ├── data_check/              # Interactive data validation
 │   └── orientation.py      # 5-section orientation workflow
 └── docs/                    # Comprehensive documentation
@@ -158,31 +156,7 @@ code data_check/orientation.py
 - **Final Checkpoint**: Models saved after training completion
 - **Backward Compatibility**: Supports legacy checkpoint formats
 
-## 🔄 Cross-Dataset Training
 
-### Histogram Matching System
-MorphiNet includes production-ready histogram matching for cross-dataset intensity normalization:
-
-```bash
-# Generate histogram cache files (run once)
-python -m utils.histogram_preprocessor /path/to/data
-
-# Validate histogram matching effectiveness
-python -m utils.histogram_preprocessor /path/to/data --analyze-histograms
-```
-
-### Supported Dataset Mappings
-- **MR Datasets**: ACDC → CAP (normalize ACDC intensities to CAP distribution)
-- **CT Datasets**: SCOTHEART → MMWHS (normalize SCOTHEART intensities to MMWHS distribution)
-
-### Cache Files Generated
-```
-cdf_cache/
-├── cap_reference_cdf.npy           # CAP MR target reference
-├── mmwhs_reference_cdf.npy         # MMWHS CT target reference
-├── acdc_to_cap_lut.npy             # ACDC→CAP mapping
-└── scotheart_to_mmwhs_lut.npy      # SCOTHEART→MMWHS mapping
-```
 
 ## 🧪 Testing & Validation
 
@@ -258,10 +232,9 @@ python -c "from data.components import UniversalCanonicalResampled; print('✅ I
 
 ### Recent Updates (2025)
 - Enhanced checkpoint system with automatic detection
-- Production-ready histogram matching implementation
 - Comprehensive testing pipeline documentation
 - Interactive data orientation workflow guide
-- Cross-dataset training best practices
+- Advanced data processing capabilities
 
 ## 🛠️ Environment Requirements
 
@@ -284,7 +257,7 @@ python -c "from data.components import UniversalCanonicalResampled; print('✅ I
 - **Modular Architecture Refactoring**: Complete separation of concerns
 - **Enhanced Checkpoint System**: Phase-specific saving with automatic detection
 - **Testing Pipeline Rewrite**: Real model inference with comprehensive validation
-- **Histogram Matching Fixes**: Production-ready cross-dataset normalization
+
 - **Interactive Data Validation**: 5-section orientation workflow
 - **Sequential Transformation System**: Generic flip/swap sequences
 - **WandB Hyperparameter Sweeps**: Bayesian optimization with 19 searchable parameters

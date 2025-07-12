@@ -31,7 +31,7 @@ class DataPreprocessor:
         """
         self.super_params = super_params
     
-    def _create_post_transform(self, keys=["pred", "label"], modal="ct", to_gpu=True, decoder_size=False, sequence=None):
+    def _create_post_transform(self, keys=["pred", "label"], modal="ct", to_gpu=True, decoder_size=False):
         """
         Create a unified post-transform pipeline that can handle both CPU/GPU and regular/decoder-sized outputs.
         
@@ -40,7 +40,6 @@ class DataPreprocessor:
             modal: Modal type ("ct" or "mr")
             to_gpu: Whether to move final output to GPU
             decoder_size: Whether to use decoder-sized transform (upscaled) or regular transform
-            sequence: Optional transformation sequence string (e.g., "s:xy f:x f:z") applied as first step
         
         Returns:
             Composed transform pipeline
@@ -55,11 +54,8 @@ class DataPreprocessor:
         target_device = DEVICE if to_gpu else "cpu"
         
         # Build transform list with optional sequential transformation as first step
-        transforms = []
-        if sequence:
-            transforms.append(SequentialTransformd(keys, sequence=sequence, allow_missing_keys=True))
-        
-        transforms.extend([
+        transforms = [
+            SequentialTransformd(keys, sequence="s:xy f:x f:z", allow_missing_keys=True),
             Spacingd(keys, [2.0, 2.0, 2.0], mode=("bilinear", "nearest"), allow_missing_keys=True),
             CropForegroundd(keys, source_key=keys[1] if len(keys) > 1 else keys[0], allow_missing_keys=True),
             Maskd(keys + [modal], allow_missing_keys=True),
@@ -81,11 +77,11 @@ class DataPreprocessor:
                 allow_missing_keys=True
             ),
             EnsureTyped(keys, device=target_device, allow_missing_keys=True),
-        ])
+        ]
         
         return Compose(transforms)
     
-    def _create_label_post_transform(self, keys=["label"], modal="ct", to_gpu=True, decoder_size=False, sequence=None):
+    def _create_label_post_transform(self, keys=["label"], modal="ct", to_gpu=True, decoder_size=False):
         """
         Create a label-specific post-transform pipeline that uses nearest interpolation throughout
         to preserve discrete label values and prevent corruption during resizing operations.
@@ -95,7 +91,6 @@ class DataPreprocessor:
             modal: Modal type ("ct" or "mr")
             to_gpu: Whether to move final output to GPU
             decoder_size: Whether to use decoder-sized transform (upscaled) or regular transform
-            sequence: Optional transformation sequence string (e.g., "s:xy f:x f:z") applied as first step
         
         Returns:
             Composed transform pipeline with nearest interpolation for labels
@@ -109,12 +104,9 @@ class DataPreprocessor:
         # Choose target device
         target_device = DEVICE if to_gpu else "cpu"
         
-        # Build transform list with optional sequential transformation as first step
-        transforms = []
-        if sequence:
-            transforms.append(SequentialTransformd(keys, sequence=sequence, allow_missing_keys=True))
-        
-        transforms.extend([
+        transforms = [
+            # Build transform list with optional sequential transformation as first step
+            SequentialTransformd(keys, sequence="s:xy f:x f:z", allow_missing_keys=True),
             # Use nearest interpolation for all spatial transforms to preserve discrete labels
             Spacingd(keys, [2.0, 2.0, 2.0], mode="nearest", allow_missing_keys=True),
             CropForegroundd(keys, source_key=keys[0], allow_missing_keys=True),
@@ -138,11 +130,11 @@ class DataPreprocessor:
                 allow_missing_keys=True
             ),
             EnsureTyped(keys, device=target_device, allow_missing_keys=True),
-        ])
+        ]
         
         return Compose(transforms)
     
-    def _generate_downsampled_gt(self, seg_true, modal, decoder_size=False, sequence=None):
+    def _generate_downsampled_gt(self, seg_true, modal, decoder_size=False):
         """
         Generate downsampled ground truth on-the-fly from full resolution ground truth.
         Uses label-specific transform with nearest interpolation to preserve discrete label values.
@@ -151,7 +143,6 @@ class DataPreprocessor:
             seg_true: Full resolution ground truth tensor (4D or 5D)
             modal: Modal type ("ct" or "mr")
             decoder_size: Whether to generate decoder-sized output
-            sequence: Optional transformation sequence string (e.g., "s:xy f:x f:z") applied as first step
         
         Returns:
             Downsampled ground truth tensor (preserving original dimensionality and discrete values)
@@ -162,7 +153,6 @@ class DataPreprocessor:
             modal=modal, 
             to_gpu=True, 
             decoder_size=decoder_size,
-            sequence=sequence
         )
         
         # Apply transform directly to ground truth with proper key mapping
@@ -185,7 +175,7 @@ class DataPreprocessor:
         
         return result
     
-    def _memory_efficient_post_transform(self, seg_pred_list, seg_true_list, modal, to_gpu=True, decoder_size=False, sequence=None):
+    def _memory_efficient_post_transform(self, seg_pred_list, seg_true_list, modal, to_gpu=True, decoder_size=False):
         """
         Memory-efficient post-transform processing that handles tensors individually.
         
@@ -195,7 +185,6 @@ class DataPreprocessor:
             modal: Modal type ("ct" or "mr")
             to_gpu: Whether to move final output to GPU
             decoder_size: Whether to use decoder-sized transform (upscaled) or regular transform
-            sequence: Optional transformation sequence string (e.g., "s:xy f:x f:z") applied as first step
         """
         # Handle single tensor inputs by converting to list
         if not isinstance(seg_pred_list, (list, tuple)):
@@ -211,7 +200,6 @@ class DataPreprocessor:
             modal=modal, 
             to_gpu=False,  # Always process on CPU first to save memory
             decoder_size=decoder_size,
-            sequence=sequence
         )
         
         # Process each tensor individually to avoid large batch processing

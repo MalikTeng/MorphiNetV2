@@ -38,3 +38,10 @@ CLAUDE.local.md
 .claude/
 .cursor/
 custom_data_transform/
+
+# exclude archived histogram matching functionality
+archive_histogram_matching/
+
+# exclude test files and documentation
+tests/
+docs/
