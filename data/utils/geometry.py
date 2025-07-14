@@ -37,7 +37,7 @@ def create_flip_matrix(mask_shape, axis='z'):
     For axis 'x' (width): M[2,2] = -1, M[2,3] = W-1
     
     Args:
-        mask_shape: Shape tuple (D, H, W) or (..., D, H, W)
+        mask_shape: Shape tuple (H, W, D) or (..., H, W, D)
         axis: Axis to flip ('x', 'y', or 'z')
         
     Returns:
@@ -48,18 +48,18 @@ def create_flip_matrix(mask_shape, axis='z'):
         >>> matrix = create_flip_matrix(shape, 'z')
         >>> # matrix[0,0] = -1, matrix[0,3] = 63
     """
-    D, H, W = mask_shape[-3:]
+    H, W, D = mask_shape[-3:]
     M_index = np.eye(4, dtype=np.float64)
     
     if axis.lower() == 'x':
         M_index[2, 2] = -1
-        M_index[2, 3] = W - 1
+        M_index[2, 3] = D - 1
     elif axis.lower() == 'y':
         M_index[1, 1] = -1
-        M_index[1, 3] = H - 1
+        M_index[1, 3] = W - 1
     elif axis.lower() == 'z':
         M_index[0, 0] = -1
-        M_index[0, 3] = D - 1
+        M_index[0, 3] = H - 1
     else:
         raise ValueError(f"Invalid axis: {axis}. Must be 'x', 'y', or 'z'")
     
@@ -76,14 +76,14 @@ def create_swap_matrix(mask_shape=None, pair='xy'):
     to reorder coordinate axes.
     
     Coordinate mappings:
-    - xy: (d,h,w) → (d,w,h) - swap X ↔ Y (W ↔ H)
-    - xz: (d,h,w) → (w,h,d) - swap X ↔ Z (W ↔ D)  
-    - yz: (d,h,w) → (h,d,w) - swap Y ↔ Z (H ↔ D)
+    - xy: (h,w,d) → (h,d,w) - swap X ↔ Y (D ↔ W)
+    - xz: (h,w,d) → (d,w,h) - swap X ↔ Z (D ↔ H)  
+    - yz: (h,w,d) → (w,h,d) - swap Y ↔ Z (W ↔ H)
     
     Matrix operations must match manual tensor operations exactly:
-    - xy: transpose(0,2,1) → (d,h,w) → (d,w,h)
-    - xz: transpose(2,1,0) → (d,h,w) → (w,h,d)
-    - yz: transpose(1,0,2) → (d,h,w) → (h,d,w)
+    - xy: transpose(0,2,1) → (h,w,d) → (h,d,w)
+    - xz: transpose(2,1,0) → (h,w,d) → (d,w,h)
+    - yz: transpose(1,0,2) → (h,w,d) → (w,h,d)
     
     Args:
         mask_shape: Shape tuple (optional, kept for API compatibility)
@@ -96,27 +96,31 @@ def create_swap_matrix(mask_shape=None, pair='xy'):
         >>> matrix = create_swap_matrix(pair='xy')
         >>> # matrix[1,2] = 1, matrix[2,1] = 1 (swap Y and X axes)
     """
-    M_index = np.eye(4, dtype=np.float64)
-    
-    if pair == 'xy':   # (d,h,w) -> (d,w,h) - swap X <-> Y (W <-> H)
-        M_index[1, 1] = 0
-        M_index[1, 2] = 1  # new_h = old_w
-        M_index[2, 2] = 0
-        M_index[2, 1] = 1  # new_w = old_h
-    elif pair == 'xz': # (d,h,w) -> (w,h,d) - swap X <-> Z (W <-> D)
-        M_index[0, 0] = 0
-        M_index[0, 2] = 1  # new_d = old_w
-        M_index[2, 2] = 0
-        M_index[2, 0] = 1  # new_w = old_d
-    elif pair == 'yz': # (d,h,w) -> (h,d,w) - swap Y <-> Z (H <-> D)
-        M_index[0, 0] = 0
-        M_index[0, 1] = 1  # new_d = old_h
-        M_index[1, 1] = 0
-        M_index[1, 0] = 1  # new_h = old_d
+    if pair == 'xy':   # (h,w,d) -> (h,d,w) - swap X <-> Y (D <-> W)
+        M = np.array([
+            [1, 0, 0, 0],
+            [0, 0, 1, 0],
+            [0, 1, 0, 0],
+            [0, 0, 0, 1]
+        ], dtype=np.float64)
+    elif pair == 'xz': # (h,w,d) -> (d,w,h) - swap X <-> Z (D <-> H)
+        M = np.array([
+            [0, 0, 1, 0],
+            [0, 1, 0, 0],
+            [1, 0, 0, 0],
+            [0, 0, 0, 1]
+        ], dtype=np.float64)
+    elif pair == 'yz': # (h,w,d) -> (w,h,d) - swap Y <-> Z (W <-> H)
+        M = np.array([
+            [0, 1, 0, 0],
+            [1, 0, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ], dtype=np.float64)
     else:
         raise ValueError(f"Invalid pair: {pair}. Must be 'xy', 'xz', or 'yz'")
     
-    return M_index
+    return M
 
 
 def get_swap_output_shape(mask_shape, pair='xy'):
@@ -129,12 +133,12 @@ def get_swap_output_shape(mask_shape, pair='xy'):
     dimensions may differ from input dimensions.
     
     Shape Transformations:
-    - xy: (D, H, W) → (D, W, H) - swap height and width
-    - xz: (D, H, W) → (W, H, D) - swap depth and width
-    - yz: (D, H, W) → (H, D, W) - swap depth and height
+    - xy: (H, W, D) → (H, D, W) - swap height and width
+    - xz: (H, W, D) → (D, W, H) - swap depth and width
+    - yz: (H, W, D) → (W, H, D) - swap depth and height
     
     Args:
-        mask_shape: Input shape tuple (D, H, W) or (..., D, H, W)
+        mask_shape: Input shape tuple (H, W, D) or (..., H, W, D)
         pair: Axis pair being swapped ('xy', 'xz', or 'yz')
         
     Returns:
@@ -144,14 +148,14 @@ def get_swap_output_shape(mask_shape, pair='xy'):
         >>> get_swap_output_shape((64, 128, 96), 'xy')
         (64, 96, 128)  # swapped H and W
     """
-    D, H, W = mask_shape[-3:]
+    H, W, D = mask_shape[-3:]
     
-    if pair == 'xy':   # swap X <-> Y (W <-> H) → (D, W, H)
-        return (D, W, H)
-    elif pair == 'xz': # swap X <-> Z (W <-> D) → (W, H, D)
-        return (W, H, D)
-    elif pair == 'yz': # swap Y <-> Z (H <-> D) → (H, D, W)
+    if pair == 'xy':   # swap X <-> Y (D <-> W) → (H, D, W)
         return (H, D, W)
+    elif pair == 'xz': # swap X <-> Z (D <-> H) → (D, W, H)
+        return (D, W, H)
+    elif pair == 'yz': # swap Y <-> Z (W <-> H) → (W, H, D)
+        return (W, H, D)
     else:
         raise ValueError(f"Invalid pair: {pair}. Must be 'xy', 'xz', or 'yz'")
 
@@ -299,7 +303,7 @@ def compose_sequence_matrix(steps, initial_shape):
         steps: List of (kind, arg) tuples from parse_transform_sequence
                kind: 'f' for flip, 's' for swap
                arg: axis ('x','y','z') for flip, pair ('xy','xz','yz') for swap
-        initial_shape: Initial shape tuple (D, H, W)
+        initial_shape: Initial shape tuple (H, W, D)
         
     Returns:
         composite_matrix: 4x4 numpy array representing the full transformation
@@ -342,21 +346,21 @@ def apply_tensor_sequence(tensor, steps):
     - Swap operations: tensor.transpose(dim1, dim2)
     
     Dimension Mapping:
-    For 4D tensors (C, D, H, W):
-    - 'x' flip/axis → dim 3 (W)
-    - 'y' flip/axis → dim 2 (H)  
-    - 'z' flip/axis → dim 1 (D)
+    For 4D tensors (C, H, W, D):
+    - 'x' flip/axis → dim 3 (D)
+    - 'y' flip/axis → dim 2 (W)  
+    - 'z' flip/axis → dim 1 (H)
     
-    For 3D tensors (D, H, W):
-    - 'x' flip/axis → dim 2 (W)
-    - 'y' flip/axis → dim 1 (H)
-    - 'z' flip/axis → dim 0 (D)
+    For 3D tensors (H, W, D):
+    - 'x' flip/axis → dim 2 (D)
+    - 'y' flip/axis → dim 1 (W)
+    - 'z' flip/axis → dim 0 (H)
     
     This implementation mirrors the matrix-based transformation exactly but uses
     direct tensor manipulation for efficiency and numerical precision.
     
     Args:
-        tensor: Input tensor/array with shape (C, D, H, W) or (D, H, W)
+        tensor: Input tensor/array with shape (C, H, W, D) or (H, W, D)
         steps: List of (kind, arg) tuples from parse_transform_sequence
                kind: 'f' for flip, 's' for swap
                arg: axis ('x','y','z') for flip, pair ('xy','xz','yz') for swap
@@ -365,7 +369,7 @@ def apply_tensor_sequence(tensor, steps):
         Transformed tensor with potentially different spatial dimensions
         
     Example:
-        >>> tensor = torch.randn(1, 64, 128, 128)  # (C, D, H, W)
+        >>> tensor = torch.randn(1, 64, 128, 128)  # (C, H, W, D)
         >>> steps = [('s', 'yz'), ('f', 'z')]
         >>> result = apply_tensor_sequence(tensor, steps)
         >>> # Applies swap Y↔Z, then flip Z (same as matrix version)
@@ -377,36 +381,36 @@ def apply_tensor_sequence(tensor, steps):
     for kind, arg in steps:
         if kind == 'f':  # Flip operation
             if arg == 'x':  # Flip along width (last spatial dim)
-                if result.dim() == 4:  # (C, D, H, W)
+                if result.dim() == 4:  # (C, H, W, D)
                     result = torch.flip(result, dims=[3])
-                else:  # (D, H, W)
+                else:  # (H, W, D)
                     result = torch.flip(result, dims=[2])
             elif arg == 'y':  # Flip along height
-                if result.dim() == 4:  # (C, D, H, W)
+                if result.dim() == 4:  # (C, H, W, D)
                     result = torch.flip(result, dims=[2])
-                else:  # (D, H, W)
+                else:  # (H, W, D)
                     result = torch.flip(result, dims=[1])
             elif arg == 'z':  # Flip along depth
-                if result.dim() == 4:  # (C, D, H, W)
+                if result.dim() == 4:  # (C, H, W, D)
                     result = torch.flip(result, dims=[1])
-                else:  # (D, H, W)
+                else:  # (H, W, D)
                     result = torch.flip(result, dims=[0])
                     
         elif kind == 's':  # Swap operation
-            if arg == 'xy':  # Swap X ↔ Y (W ↔ H)
-                if result.dim() == 4:  # (C, D, H, W) → (C, D, W, H)
+            if arg == 'xy':  # Swap X ↔ Y (D ↔ W)
+                if result.dim() == 4:  # (C, H, W, D) → (C, W, H, D)
                     result = result.transpose(2, 3)
-                else:  # (D, H, W) → (D, W, H)
+                else:  # (H, W, D) → (W, H, D)
                     result = result.transpose(1, 2)
-            elif arg == 'xz':  # Swap X ↔ Z (W ↔ D)
-                if result.dim() == 4:  # (C, D, H, W) → (C, W, H, D)
+            elif arg == 'xz':  # Swap X ↔ Z (D ↔ H)
+                if result.dim() == 4:  # (C, H, W, D) → (C, D, W, H)
                     result = result.transpose(1, 3)
-                else:  # (D, H, W) → (W, H, D)
+                else:  # (H, W, D) → (D, W, H)
                     result = result.transpose(0, 2)
-            elif arg == 'yz':  # Swap Y ↔ Z (H ↔ D)
-                if result.dim() == 4:  # (C, D, H, W) → (C, H, D, W)
+            elif arg == 'yz':  # Swap Y ↔ Z (W ↔ H)
+                if result.dim() == 4:  # (C, H, W, D) → (C, W, H, D)
                     result = result.transpose(1, 2)
-                else:  # (D, H, W) → (H, D, W)
+                else:  # (H, W, D) → (W, H, D)
                     result = result.transpose(0, 1)
     
     return result

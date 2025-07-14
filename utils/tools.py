@@ -121,11 +121,11 @@ def draw_plotly(
     if seg_true is not None:
         num_classes = len(torch.unique(seg_true))
         if num_classes == 2:
-            vertices, faces = extract_surface_vertices_pytorch3d(seg_true[0].cpu().numpy(), isolevel=0.5)
+            vertices, faces = extract_surface_vertices_pytorch3d(seg_true[0].cpu().numpy(), isolevel=0.1)
         else:
             # Extract myocardium (class 2) surface
             myocardium_mask = (seg_true[0] == 2).cpu().numpy().astype(np.float32)
-            vertices, faces = extract_surface_vertices_pytorch3d(myocardium_mask, isolevel=0.5)
+            vertices, faces = extract_surface_vertices_pytorch3d(myocardium_mask, isolevel=0.1)
         
         if len(vertices) > 0 and len(faces) > 0:
             x, y, z = vertices.T
@@ -141,11 +141,11 @@ def draw_plotly(
     if seg_pred is not None:
         num_classes = len(torch.unique(seg_pred))
         if num_classes == 2:
-            vertices, faces = extract_surface_vertices_pytorch3d(seg_pred[0].cpu().numpy(), isolevel=0.5)
+            vertices, faces = extract_surface_vertices_pytorch3d(seg_pred[0].cpu().numpy(), isolevel=0.1)
         else:
             # Extract myocardium (class 2) surface
             myocardium_mask = (seg_pred[0] == 2).cpu().numpy().astype(np.float32)
-            vertices, faces = extract_surface_vertices_pytorch3d(myocardium_mask, isolevel=0.5)
+            vertices, faces = extract_surface_vertices_pytorch3d(myocardium_mask, isolevel=0.1)
         
         if len(vertices) > 0 and len(faces) > 0:
             x, y, z = vertices.T

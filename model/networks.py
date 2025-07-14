@@ -183,6 +183,100 @@ class LocalMeshWarper(nn.Module):
     def __init__(self, num_iterations: int = 30):
         super().__init__()
         self.num_iterations = num_iterations
+    
+    def sample_gradient_field(self, direction, mesh_vertices):
+        """
+        Sample direction vectors at mesh vertex positions using compact trilinear interpolation
+        
+        Replaces torch.nn.functional.grid_sample with manual implementation for torch.gradient compatibility.
+        
+        Algorithm Sources:
+        - Trilinear interpolation theory: Standard computer graphics textbook algorithm
+        - PyTorch implementation reference: https://gist.github.com/Kulbear/af6499e83382df88c2a2c42fb3143652
+        - PyTorch3D trilinear method: pytorch3d.ops.add_pointclouds_to_volumes (fully differentiable)
+        - Research reference: "PyTorch interpolate | How to use PyTorch interpolate with Examples?"
+        
+        Key differences from grid_sample:
+        - Manual 8-corner cube sampling instead of built-in interpolation
+        - Explicit NDC-to-index conversion: index = (ndc + 1) * (size - 1) / 2
+        - Sequential lerp operations: lerp(lerp(lerp(corners, D), W), H)
+        - Direct coordinate system handling without tensor reshaping
+        
+        Args:
+            direction: [B, C, H, W, D] - gradient field with channels [dH, dW, dD]
+            mesh_vertices: [B, N, 3] - vertex positions in NDC coordinates [X, Y, Z]
+            
+        Returns:
+            sampled_directions: [B, N, 3] - interpolated vectors in [dX, dY, dZ] order
+            
+        Usage in LocalMeshWarper:
+            # Original grid_sample approach:
+            # direction_input = direction.permute(0, 1, 4, 2, 3).to(dtype=verts_dtype)
+            # grid_input = verts[:, verts_idx].unsqueeze(1).unsqueeze(1).to(dtype=verts_dtype)
+            # offset = F.grid_sample(direction_input, grid_input, ...).view(b, 3, -1).transpose(-1, -2)[:, :, [1, 0, 2]]
+            
+            # New manual approach:
+            # mesh_vertices = verts[:, verts_idx].to(dtype=verts_dtype)
+            # offset = self.sample_gradient_field(direction.to(dtype=verts_dtype), mesh_vertices)
+        """
+        B, C, H, W, D = direction.shape
+        N = mesh_vertices.shape[1]
+        
+        # Step 1: Convert NDC [-1,1] to continuous volume indices [0,size-1]
+        indices = (mesh_vertices + 1) * torch.tensor([D-1, W-1, H-1], device=mesh_vertices.device) / 2
+        
+        # Step 2: Extract floor indices and interpolation weights
+        indices_floor = torch.floor(indices).long()
+        indices_floor[..., 0] = torch.clamp(indices_floor[..., 0], 0, D-1)
+        indices_floor[..., 1] = torch.clamp(indices_floor[..., 1], 0, W-1)
+        indices_floor[..., 2] = torch.clamp(indices_floor[..., 2], 0, H-1)
+        
+        indices_ceil = indices_floor + 1
+        indices_ceil[..., 0] = torch.clamp(indices_ceil[..., 0], 0, D-1)
+        indices_ceil[..., 1] = torch.clamp(indices_ceil[..., 1], 0, W-1)
+        indices_ceil[..., 2] = torch.clamp(indices_ceil[..., 2], 0, H-1)
+        
+        weights = indices - indices_floor.float()
+        
+        # Step 3: Extract indices and weights
+        d0, w0, h0 = indices_floor[..., 0], indices_floor[..., 1], indices_floor[..., 2]
+        d1, w1, h1 = indices_ceil[..., 0], indices_ceil[..., 1], indices_ceil[..., 2]
+        wd, ww, wh = weights[..., 0], weights[..., 1], weights[..., 2]
+        
+        # Step 4: Efficient trilinear interpolation per batch
+        result = torch.zeros(B, N, C, device=direction.device, dtype=direction.dtype)
+        
+        for b in range(B):
+            # Sample 8 corners for batch b [N, C]
+            c000 = direction[b, :, h0[b], w0[b], d0[b]].T
+            c001 = direction[b, :, h0[b], w0[b], d1[b]].T
+            c010 = direction[b, :, h0[b], w1[b], d0[b]].T
+            c011 = direction[b, :, h0[b], w1[b], d1[b]].T
+            c100 = direction[b, :, h1[b], w0[b], d0[b]].T
+            c101 = direction[b, :, h1[b], w0[b], d1[b]].T
+            c110 = direction[b, :, h1[b], w1[b], d0[b]].T
+            c111 = direction[b, :, h1[b], w1[b], d1[b]].T
+            
+            # Trilinear interpolation: lerp(lerp(lerp(edges, D), W), H)
+            wd_b, ww_b, wh_b = wd[b][:, None], ww[b][:, None], wh[b][:, None]
+            
+            # Interpolate along D dimension
+            c00 = c000 * (1 - wd_b) + c001 * wd_b
+            c01 = c010 * (1 - wd_b) + c011 * wd_b
+            c10 = c100 * (1 - wd_b) + c101 * wd_b
+            c11 = c110 * (1 - wd_b) + c111 * wd_b
+            
+            # Interpolate along W dimension
+            c0 = c00 * (1 - ww_b) + c01 * ww_b
+            c1 = c10 * (1 - ww_b) + c11 * ww_b
+            
+            # Interpolate along H dimension
+            result[b] = c0 * (1 - wh_b) + c1 * wh_b
+        
+        # Step 5: Reorder channels from [dH, dW, dD] to [dX, dY, dZ] = [dW, dH, dD]
+        sampled_directions = result[..., [2, 1, 0]]
+        
+        return sampled_directions
         
     def forward(self, meshes, df_preds, vert_labels):
         """
@@ -231,15 +325,9 @@ class LocalMeshWarper(nn.Module):
             
             # Apply iterative offset
             for _ in range(self.num_iterations):
-                # Ensure consistent dtypes for grid_sample
-                direction_input = direction.permute(0, 1, 4, 2, 3).to(dtype=verts_dtype)
-                grid_input = verts[:, verts_idx].unsqueeze(1).unsqueeze(1).to(dtype=verts_dtype)
-                
-                offset = F.grid_sample(
-                    direction_input, 
-                    grid_input,
-                    align_corners=False, padding_mode="zeros"
-                ).view(b, 3, -1).transpose(-1, -2)[..., [1, 0, 2]]
+                # Use manual trilinear interpolation instead of F.grid_sample for torch.gradient compatibility
+                mesh_vertices = verts[:, verts_idx].to(dtype=verts_dtype)  # [B, N, 3] in NDC space
+                offset = self.sample_gradient_field(direction.to(dtype=verts_dtype), mesh_vertices)  # [B, N, 3]
 
                 # Transform from NDC space to pixel space
                 verts = d * (verts / 2 + 0.5)

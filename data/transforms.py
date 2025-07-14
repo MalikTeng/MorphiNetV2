@@ -10,7 +10,6 @@ from monai.transforms import (
     Resized,
     ResizeWithPadOrCropd,
     RandAdjustContrastd,
-    RandScaleIntensityd,
     Spacingd,
     EnsureTyped
 )
@@ -23,7 +22,7 @@ __all__ = ["pre_transform"]
 def pre_transform(
         keys: tuple, modal: str, section: str,
         crop_window_size: list, pixdim: list, spacing: float = 2.0,
-        phase: str = "validation",  # "unet", "resnet", "gsn", "ndf", "validation"
+        phase: str = None,  # "unet", "resnet", "gsn"
         upscale_ratio: int = 2,  # Add upscale_ratio parameter for decoder-sized distance field
         dataset: str = None,
         custom_sequence: str = None,  # Optional custom transformation sequence (e.g., "s:xy f:x f:z")
@@ -94,8 +93,8 @@ def pre_transform(
         )
     )
     
-    # Only load distance fields for full network validation phase (not needed for UNet or ResNet phases)
-    load_distance_fields = (section == "valid" and phase == "validation")
+    # Only load distance fields for full pipeline validation phase (not needed for UNet or ResNet phases)
+    load_distance_fields = (section == "valid" and phase == "gsn")
 
     if load_distance_fields:
         # Calculate target size for distance field (decoder-sized for validation)
@@ -103,7 +102,7 @@ def pre_transform(
         
         df_transforms = [
             CopyItemsd(keys[1], names=f"{keys[1]}_ds"),
-            SequentialTransformd(f"{keys[1]}_ds", sequence="s:xy f:x f:z"),
+            SequentialTransformd(f"{keys[1]}_ds", sequence=custom_sequence if custom_sequence else "s:xy f:x f:z"),
             Spacingd(f"{keys[1]}_ds", [spacing] * 3,
                     mode="nearest", padding_mode="zeros"),
             CropForegroundd(f"{keys[1]}_ds", source_key=f"{keys[1]}_ds"),
@@ -112,7 +111,7 @@ def pre_transform(
             FlexResized(
                 f"{keys[1]}_ds", 
                 (-1, crop_window_size[0], -1)
-                ),
+            ),
             Resized(
                 f"{keys[1]}_ds", 
                 df_target_size,  # Use decoder-sized target for validation
@@ -133,8 +132,8 @@ def pre_transform(
             # spatial augmentation
             RandZoomd(
                 keys,
-                min_zoom=0.3 if modal == "ct" else [1.0, 0.3, 0.3], 
-                max_zoom=1.2 if modal == "ct" else [1.0, 1.2, 1.2],
+                min_zoom=0.6 if modal == "ct" else [0.6, 0.6, 1.0], 
+                max_zoom=1.4 if modal == "ct" else [1.4, 1.4, 1.0],
                 mode=("trilinear", "nearest-exact"),
                 padding_mode="constant",
                 align_corners=(True, None), prob=0.15,
@@ -144,7 +143,7 @@ def pre_transform(
                 keys[0], sigma_x=(0.5, 1.15), sigma_y=(0.5, 1.15),
                 sigma_z=(0.5, 1.15), prob=0.15,
             ),
-            RandAdjustContrastd(keys[0], gamma=(0.65, 1.5), prob=0.15),
+            RandAdjustContrastd(keys[0], gamma=(0.65, 1.5), prob=0.5),
         ])
         
         float_keys_train = [keys[0]]

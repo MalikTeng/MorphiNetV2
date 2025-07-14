@@ -56,6 +56,10 @@ class MorphiNetOrchestrator:
         # Handle backward compatibility for target parameter
         self.dataset = kwargs.get('dataset', kwargs.get('target', None))
         
+        # Auto-detect dataset from data paths if not explicitly provided
+        if self.dataset is None:
+            self.dataset = self._auto_detect_dataset()
+        
         # Global step counter for wandb logging consistency
         self.global_step = 0
         
@@ -83,7 +87,7 @@ class MorphiNetOrchestrator:
         self.dataloader_manager = DataLoaderManager(
             self.super_params, self.num_workers, dataset=self.dataset
         )
-        self.preprocessor = DataPreprocessor(self.super_params)
+        self.preprocessor = DataPreprocessor(self.super_params, dataset=self.dataset)
         
         # Initialize model components
         self._initialize_models()
@@ -238,22 +242,19 @@ class MorphiNetOrchestrator:
         
         print("Training components initialized successfully!")
     
-    def prepare_dataloaders(self, data_types=["train"], training_phase="unet", 
-                          validation_phase="network", include_test=False):
+    def prepare_dataloaders(self, data_types=["train"], phase="unet", test_modal="ct"):
         """
         Prepare data loaders for training/validation/testing.
         
         Args:
             data_types: Types of data loaders to prepare
-            training_phase: Training phase for data preparation
-            validation_phase: Validation phase for data preparation
+            phase: Training phase for data preparation
             include_test: Whether to include test data loaders
         """
         self.dataloader_manager.prepare_all_dataloaders(
             data_types=data_types,
-            training_phase=training_phase,
-            validation_phase=validation_phase,
-            include_test=include_test
+            phase=phase,
+            test_modal=test_modal
         )
     
     def train_phase(self, phase, start_epoch=0, end_epoch=None):
@@ -286,11 +287,11 @@ class MorphiNetOrchestrator:
         
         # Prepare appropriate data loaders
         if phase == "unet":
-            self.prepare_dataloaders(["train", "valid"], training_phase="unet", validation_phase="unet")
+            self.prepare_dataloaders(["train", "valid"], phase="unet")
         elif phase == "resnet":
-            self.prepare_dataloaders(["train", "valid"], training_phase=phase, validation_phase="resnet")
+            self.prepare_dataloaders(["train", "valid"], phase=phase)
         else:
-            self.prepare_dataloaders(["train", "valid"], training_phase=phase, validation_phase="network")
+            self.prepare_dataloaders(["train", "valid"], phase=phase)
         
         # Training loop
         for epoch in range(start_epoch, end_epoch):
@@ -302,18 +303,15 @@ class MorphiNetOrchestrator:
             # Validation step (every val_interval epochs)
             if (epoch + 1) % self.super_params.val_interval == 0:
                 if phase == "unet":
-                    # For UNet phase, validate both CT and MR segmentation
-                    # Use sequential validation with proper step management to avoid wandb step inconsistency
-                    self.validator.validate_segmentation(epoch, "ct")
-                    if hasattr(self.dataloader_manager, 'mr_valid_loader') and self.dataloader_manager.mr_valid_loader is not None:
-                        # Validate MR with same epoch to maintain step consistency
-                        self.validator.validate_segmentation(epoch, "mr")
+                    # For UNet phase, validate CT & MR segmentation
+                    self.validator.validate_unet(epoch, "ct")
+                    self.validator.validate_unet(epoch, "mr")
                 elif phase == "resnet":
-                    # For ResNet phase, validate UNet + ResNet pipeline
-                    self.validator.validate_resnet(epoch, self.super_params.validation_modality)
+                    # For ResNet phase, validate UNet + ResNet pipeline on CT data only
+                    self.validator.validate_resnet(epoch)
                 else:
-                    # For GSN phase, validate full pipeline
-                    self.validator.validate(epoch, self.super_params.validation_modality)
+                    # For GSN phase, validate full pipeline on CT data (GSN is CT-trained)
+                    self.validator.validate_gsn(epoch)
             
             # Epoch timing
             epoch_time = time.time() - epoch_start_time
@@ -460,3 +458,54 @@ class MorphiNetOrchestrator:
     def set_step(self, step):
         """Set the global step counter (for synchronization)."""
         self.global_step = step
+    
+    def _auto_detect_dataset(self):
+        """
+        Auto-detect dataset from data directory paths.
+        
+        Returns:
+            str: Dataset identifier ('acdc', 'cap', 'scotheart', 'mmwhs') or None
+        """
+        print("Auto-detecting dataset from data paths...")
+        
+        # Check MR data directory for dataset identifiers
+        if hasattr(self.super_params, 'mr_data_dir') and self.super_params.mr_data_dir:
+            mr_path = self.super_params.mr_data_dir.lower()
+            if 'acdc' in mr_path or 'dataset021' in mr_path:
+                print(f"Detected ACDC dataset from MR path: {self.super_params.mr_data_dir}")
+                return "acdc"
+            elif 'cap' in mr_path or 'dataset011' in mr_path:
+                print(f"Detected CAP dataset from MR path: {self.super_params.mr_data_dir}")
+                return "cap"
+        
+        # Check CT data directory for dataset identifiers
+        if hasattr(self.super_params, 'ct_data_dir') and self.super_params.ct_data_dir:
+            ct_path = self.super_params.ct_data_dir.lower()
+            if 'scotheart' in ct_path or 'dataset020' in ct_path:
+                print(f"Detected SCOTHEART dataset from CT path: {self.super_params.ct_data_dir}")
+                return "scotheart"
+            elif 'mmwhs' in ct_path or 'dataset022' in ct_path:
+                print(f"Detected MMWHS dataset from CT path: {self.super_params.ct_data_dir}")
+                return "mmwhs"
+        
+        # Check JSON file paths as backup
+        if hasattr(self.super_params, 'mr_json_dir') and self.super_params.mr_json_dir:
+            mr_json = self.super_params.mr_json_dir.lower()
+            if 'task21' in mr_json:
+                print(f"Detected ACDC dataset from MR JSON: {self.super_params.mr_json_dir}")
+                return "acdc"
+            elif 'task11' in mr_json:
+                print(f"Detected CAP dataset from MR JSON: {self.super_params.mr_json_dir}")
+                return "cap"
+        
+        if hasattr(self.super_params, 'ct_json_dir') and self.super_params.ct_json_dir:
+            ct_json = self.super_params.ct_json_dir.lower()
+            if 'task20' in ct_json:
+                print(f"Detected SCOTHEART dataset from CT JSON: {self.super_params.ct_json_dir}")
+                return "scotheart"
+            elif 'task22' in ct_json:
+                print(f"Detected MMWHS dataset from CT JSON: {self.super_params.ct_json_dir}")
+                return "mmwhs"
+        
+        print("Warning: Could not auto-detect dataset from paths")
+        return None

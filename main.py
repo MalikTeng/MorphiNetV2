@@ -32,26 +32,24 @@ def config():
     # Mode parameters
     parser.add_argument("--mode", type=str, default="offline", 
                        help="Wandb mode: 'disabled', 'offline', 'online'")
-    parser.add_argument("--validation_modality", type=str, default="ct", 
-                       help="Modality for validation/test: 'ct' (CT data) or 'mr' (MR data)")
     parser.add_argument("--template_mesh_dir", type=str,
                        default="./template/template_mesh-myo.obj",
                        help="Path to template mesh file")
     parser.add_argument("--inference_only", action="store_true",
                        help="Run inference only (no training)")
     parser.add_argument("--test_phase", type=str, default="unet",
-                       choices=["unet", "resnet", "both"],
-                       help="Which phase to test: 'unet', 'resnet', or 'both'")
+                       choices=["unet", "resnet", "gsn", "both", "all"],
+                       help="Which phase to test: 'unet', 'resnet', 'gsn', 'both' (unet+resnet), or 'all' (unet+resnet+gsn)")
     parser.add_argument("--test_dataset", type=str, default="both",
                        choices=["acdc", "mmwhs", "cap", "scotheart", "both"],
                        help="Which dataset to test: 'acdc', 'mmwhs', 'cap', 'scotheart', or 'both'")
 
     # Training parameters
-    parser.add_argument("--max_epochs", type=int, default=5, 
+    parser.add_argument("--max_epochs", type=int, default=3, 
                        help="Maximum number of epochs")
-    parser.add_argument("--pretrain_epochs", type=int, default=2, 
+    parser.add_argument("--pretrain_epochs", type=int, default=1, 
                        help="Number of epochs for UNet training")
-    parser.add_argument("--train_epochs", type=int, default=3, 
+    parser.add_argument("--train_epochs", type=int, default=2, 
                        help="Number of epochs for ResNet training")
     parser.add_argument("--reduce_count_down", type=int, default=-1, 
                        help="Countdown for mesh face reduction")
@@ -61,17 +59,17 @@ def config():
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--cache_rate", type=float, default=1.0, help="Cache rate")
-    parser.add_argument("--max_samples", type=int, default=0, 
+    parser.add_argument("--max_samples", type=int, default=1, 
                        help="Maximum number of samples per dataset (0 for full dataset)")
     parser.add_argument("--crop_window_size", type=int, nargs='+', 
                        default=[128, 128, 128], help="Crop window size")
     parser.add_argument("--pixdim", type=float, nargs='+', default=[8, 8, 8], 
                        help="Pixel dimensions")
-    parser.add_argument("--lambda_0", type=float, default=0.86, 
+    parser.add_argument("--lambda_0", type=float, default=1.0, 
                        help="Chamfer distance loss coefficient")
-    parser.add_argument("--lambda_1", type=float, default=0.75, 
+    parser.add_argument("--lambda_1", type=float, default=1.0, 
                        help="Laplacian smoothing loss coefficient")
-    parser.add_argument("--iteration", type=int, default=20, 
+    parser.add_argument("--iteration", type=int, default=10, 
                        help="Distance field warping iterations")
     parser.add_argument("--sigmoid_scale_factor", type=float, default=0.19, 
                        help="Sigmoid mask scale factor")
@@ -132,8 +130,6 @@ def config():
     
     # Note: Histogram matching parameters removed - functionality now handled automatically by HistogramMatchd transform
     
-    # Backward compatibility removed - use --validation_modality only
-
     return parser.parse_args()
 
 
@@ -237,7 +233,7 @@ def train_morphinet(super_params):
     # Generate run ID
     run_id = f"{time.strftime('%Y-%m-%d-%H%M', time.localtime(time.time()))}"
     if not super_params.run_id:
-        super_params.run_id = f"{super_params.validation_modality}--" + \
+        super_params.run_id = f"ct--" + \
             f"{os.path.basename(super_params.template_mesh_dir).split('-')[-1][:-4]}--" + \
                 f"{os.path.basename(super_params.ct_json_dir).split('_')[-1][:-5]}--{run_id}"
 
@@ -319,7 +315,7 @@ def main():
         test_morphinet(super_params)
     else:
         print("Running in TRAINING mode")
-        print(f"Validation modality: {super_params.validation_modality}")
+        print(f"Training validation: UNet(CT+MR) -> ResNet(CT) -> GSN(CT)")
         print(f"Max epochs: {super_params.max_epochs}")
         
         # Train using modular architecture

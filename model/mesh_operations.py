@@ -161,17 +161,18 @@ class MeshOperations:
             verts=[template_mesh_pt3d.verts_packed().to(dtype=torch.float64)], 
             faces=[template_mesh_pt3d.faces_packed().to(dtype=torch.int64)]
         ).to(DEVICE).extend(b)
-        
+
         # Stage 1: Smooth global offset with rotation alignment
         verts = template_mesh.verts_padded()
         
         # Find the rotation matrix that makes the centroid vectors align
         # Use RV distance field (channel 2) for RV center calculation
         df_c = torch.stack([2 * (torch.nonzero(df <= 1).to(torch.float64).mean(0) / d - 0.5) 
-                            for df in df_preds[:, 2]])[:, [1, 0, 2]]   # reorder dimensions, using RV channel
+                            for df in df_preds[:, 2]])[:, [2, 1, 0]]   # reorder dimensions, using RV channel
         
         # Use only the RV center as the reference center
         mesh_c = self.mesh_c[1].unsqueeze(0).expand(b, -1).to(torch.float64)
+        
         R = find_rotation_matrix_xz(mesh_c, df_c)
         
         # Ensure verts are in double precision before matrix multiplication

@@ -84,7 +84,7 @@ conda activate morphinet
 ./control.sh
 
 # Custom training configuration
-python main.py --validation_modality ct --max_epochs 10 --batch_size 2
+python main.py --test_modality ct --max_epochs 10 --batch_size 2
 
 # Quick development test
 python main.py --max_samples 2 --max_epochs 5 --mode disabled

@@ -1,5 +1,7 @@
+import os
 import torch
 import numpy as np
+from typing import Union, Optional, List, Dict, Sequence, Hashable
 import gc
 from monai.transforms import (
     Compose, 
@@ -9,11 +11,13 @@ from monai.transforms import (
     CropForegroundd,
     Resized,
     Spacingd,
-    SpatialPadd,
     ResizeWithPadOrCropd,
     EnsureTyped, 
 )
+from monai.config.type_definitions import KeysCollection
+from monai.data import MetaTensor
 from data.components import Maskd, FlexResized, SequentialTransformd
+from einops import rearrange
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -22,14 +26,16 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 class DataPreprocessor:
     """Handles data preprocessing and post-processing for MorphiNet."""
     
-    def __init__(self, super_params):
+    def __init__(self, super_params, dataset=None):
         """
         Initialize the data preprocessor.
         
         Args:
             super_params: Configuration parameters containing crop_window_size, pixdim, etc.
+            dataset: Dataset identifier for dataset-specific handling
         """
         self.super_params = super_params
+        self.dataset = dataset
     
     def _create_post_transform(self, keys=["pred", "label"], modal="ct", to_gpu=True, decoder_size=False):
         """
@@ -53,10 +59,29 @@ class DataPreprocessor:
         # Choose target device
         target_device = DEVICE if to_gpu else "cpu"
         
-        # Build transform list with optional sequential transformation as first step
+        # Define spacing vector for this modal - ISOTROPIC for all modalities
+        spacing_vector = [2.0, 2.0, 2.0]
+                
+        # Dynamic mode configuration based on key types
+        mode_list = []
+        for key in keys:
+            if 'pred' in key.lower() or 'image' in key.lower():
+                mode_list.append('bilinear')
+            elif 'label' in key.lower():
+                mode_list.append('nearest')
+            else:
+                mode_list.append('bilinear')
+        
+        # Convert to appropriate format for MONAI
+        if len(mode_list) == 1:
+            spacing_mode = mode_list[0]
+        else:
+            spacing_mode = tuple(mode_list)
+                
+        # Build transform list
         transforms = [
             SequentialTransformd(keys, sequence="s:xy f:x f:z", allow_missing_keys=True),
-            Spacingd(keys, [2.0, 2.0, 2.0], mode=("bilinear", "nearest"), allow_missing_keys=True),
+            Spacingd(keys, spacing_vector, mode=spacing_mode, allow_missing_keys=True),
             CropForegroundd(keys, source_key=keys[1] if len(keys) > 1 else keys[0], allow_missing_keys=True),
             Maskd(keys + [modal], allow_missing_keys=True),
             FlexResized(
@@ -67,7 +92,7 @@ class DataPreprocessor:
             Resized(
                 keys, 
                 target_size, 
-                size_mode="longest", mode=("bilinear", "nearest-exact"), 
+                size_mode="longest", mode=spacing_mode, 
                 allow_missing_keys=True
             ),
             ResizeWithPadOrCropd(
@@ -78,7 +103,7 @@ class DataPreprocessor:
             ),
             EnsureTyped(keys, device=target_device, allow_missing_keys=True),
         ]
-        
+                
         return Compose(transforms)
     
     def _create_label_post_transform(self, keys=["label"], modal="ct", to_gpu=True, decoder_size=False):
@@ -104,11 +129,31 @@ class DataPreprocessor:
         # Choose target device
         target_device = DEVICE if to_gpu else "cpu"
         
+        # Define spacing vector for this modal - ISOTROPIC for all modalities
+        spacing_vector = [2.0, 2.0, 2.0]
+
+        # Dynamic mode configuration for label-specific transform
+        mode_list = []
+        for key in keys:
+            if 'label' in key.lower():
+                mode_list.append('nearest')
+            else:
+                mode_list.append('nearest')
+        
+        # Convert to appropriate format for MONAI
+        if len(mode_list) == 1:
+            spacing_mode = mode_list[0]
+        else:
+            spacing_mode = tuple(mode_list)
+
+        # Use identical sequential transformation logic as _create_post_transform
+        # Both predictions and labels must use same SequentialTransformd for consistency
+        label_sequence = "s:xy f:x f:z"  # Same as _create_post_transform
+                
+        # Build transform list
         transforms = [
-            # Build transform list with optional sequential transformation as first step
-            SequentialTransformd(keys, sequence="s:xy f:x f:z", allow_missing_keys=True),
-            # Use nearest interpolation for all spatial transforms to preserve discrete labels
-            Spacingd(keys, [2.0, 2.0, 2.0], mode="nearest", allow_missing_keys=True),
+            SequentialTransformd(keys, sequence=label_sequence, allow_missing_keys=True),
+            Spacingd(keys, spacing_vector, mode=spacing_mode, allow_missing_keys=True),
             CropForegroundd(keys, source_key=keys[0], allow_missing_keys=True),
             # Skip Maskd transform for labels - it's not needed and causes key issues
             FlexResized(
@@ -120,7 +165,7 @@ class DataPreprocessor:
             Resized(
                 keys, 
                 target_size, 
-                size_mode="longest", mode="nearest-exact",  # Nearest for labels
+                size_mode="longest", mode=spacing_mode,  # Use dynamic mode (nearest for labels)
                 allow_missing_keys=True
             ),
             ResizeWithPadOrCropd(
@@ -130,135 +175,139 @@ class DataPreprocessor:
                 allow_missing_keys=True
             ),
             EnsureTyped(keys, device=target_device, allow_missing_keys=True),
-        ]
+        ]        
         
         return Compose(transforms)
     
-    def _generate_downsampled_gt(self, seg_true, modal, decoder_size=False):
+    def _apply_mr_unflatten(self, tensor, modal):
         """
-        Generate downsampled ground truth on-the-fly from full resolution ground truth.
-        Uses label-specific transform with nearest interpolation to preserve discrete label values.
+        Apply unflatten operation for MR data to handle [D*B,C,H,W] → [B,C,H,W,D] transformation.
         
         Args:
-            seg_true: Full resolution ground truth tensor (4D or 5D)
-            modal: Modal type ("ct" or "mr")
-            decoder_size: Whether to generate decoder-sized output
+            tensor: Input tensor to unflatten
+            modal: Modality type ("ct" or "mr")
         
         Returns:
-            Downsampled ground truth tensor (preserving original dimensionality and discrete values)
+            Unflattened tensor for MR, unchanged tensor for CT
         """
-        # Create label-specific transform to prevent corruption of discrete values
-        label_transform = self._create_label_post_transform(
-            keys=["label"], 
-            modal=modal, 
-            to_gpu=True, 
-            decoder_size=decoder_size,
-        )
+        if modal != 'mr':
+            return tensor
+            
+        # This batch size is specific to how the CAP dataset is structured.
+        batch_size = 2
         
-        # Apply transform directly to ground truth with proper key mapping
-        # Convert tensor to dict format expected by MONAI transforms
-        data_dict = {"label": seg_true, modal: seg_true}
-        
-        # Apply label-preserving transform
-        transformed_dict = label_transform(data_dict)
-        
-        # Return the transformed label
-        result = transformed_dict["label"]
-        
-        # Safety check: Ensure discrete values are preserved (optional validation)
-        if hasattr(result, 'unique'):
-            unique_vals = result.unique()
-            if len(unique_vals) > 10:  # Too many unique values suggests interpolation corruption
-                import warnings
-                warnings.warn(f"Warning: Ground truth downsampling may have corrupted discrete labels. "
-                            f"Found {len(unique_vals)} unique values: {unique_vals.tolist()[:10]}...")
-        
-        return result
+        # Apply unflatten operation: [D*B,C,H,W] → [B,C,H,W,D]
+        tensor_unflattened = rearrange(tensor, '(d b) c h w -> b c h w d', b=batch_size)
+            
+        return tensor_unflattened
     
-    def _memory_efficient_post_transform(self, seg_pred_list, seg_true_list, modal, to_gpu=True, decoder_size=False):
+    def _generate_downsampled_gt(self, seg_true, modal, decoder_size=False):
         """
-        Memory-efficient post-transform processing that handles tensors individually.
+        Generates a downsampled ground truth tensor. This method now handles a single
+        tensor directly, unifying MR and CT shapes to 5D before processing.
         
         Args:
-            seg_pred_list: List of prediction tensors or single tensor (4D or 5D)
-            seg_true_list: List of ground truth tensors or single tensor (4D or 5D)
+            seg_true: Ground truth tensor (4D for MR, 5D for CT)
+            modal: Modality type ("ct" or "mr")
+            decoder_size: Whether to use decoder-sized transform or regular transform
+        
+        Returns:
+            Downsampled ground truth tensor.
+        """
+        # Unify tensor shape to 5D
+        if modal == 'mr':
+            seg_true = self._apply_mr_unflatten(seg_true, modal)
+        
+        # Create the appropriate transform
+        transform = self._create_post_transform(
+            keys=["label"], 
+            modal=modal, 
+            to_gpu=False,
+            decoder_size=decoder_size
+        )
+        
+        # Move to CPU for memory-efficient processing
+        seg_true = seg_true.cpu()
+
+        # Process each item in the batch
+        batch_size = seg_true.shape[0]
+        batch_processed = []
+        for b in range(batch_size):
+            true_4d = seg_true[b]
+            result = transform({"label": true_4d, "modal": modal})
+            batch_processed.append(result["label"])
+        
+        # Stack results and move to the correct device
+        processed_true = torch.stack(batch_processed, dim=0)
+        if torch.cuda.is_available():
+            processed_true = processed_true.to(DEVICE)
+        
+        return processed_true
+    
+    def _memory_efficient_post_transform(self, seg_pred, seg_true, modal, to_gpu=True, decoder_size=False):
+        """
+        Memory-efficient post-transform processing that handles tensors directly.
+        Unifies tensor shapes to 5D before processing each item in the batch.
+        
+        Args:
+            seg_pred: Prediction tensor (4D for MR, 5D for CT)
+            seg_true: Ground truth tensor (4D for MR, 5D for CT)
             modal: Modal type ("ct" or "mr")
             to_gpu: Whether to move final output to GPU
-            decoder_size: Whether to use decoder-sized transform (upscaled) or regular transform
+            decoder_size: Whether to use decoder-sized transform or regular transform
         """
-        # Handle single tensor inputs by converting to list
-        if not isinstance(seg_pred_list, (list, tuple)):
-            seg_pred_list = [seg_pred_list]
-        if not isinstance(seg_true_list, (list, tuple)):
-            seg_true_list = [seg_true_list]
-        
-        processed_preds = []
-        
-        # Create appropriate transform based on flags
+        # Unify tensor shapes to 5D: [B,C,H,W,D] by unflattening MR data
+        if modal == 'mr':
+            seg_pred = self._apply_mr_unflatten(seg_pred, modal)
+            seg_true = self._apply_mr_unflatten(seg_true, modal)
+
+        # Create appropriate transform for post-processing
         transform = self._create_post_transform(
             keys=["pred", "label"], 
             modal=modal, 
             to_gpu=False,  # Always process on CPU first to save memory
             decoder_size=decoder_size,
         )
+
+        # Move to CPU for memory efficiency before processing
+        if hasattr(seg_pred, 'is_cuda') and seg_pred.is_cuda:
+            seg_pred = seg_pred.cpu()
+        if hasattr(seg_true, 'is_cuda') and seg_true.is_cuda:
+            seg_true = seg_true.cpu()
+
+        # Process each item in the batch individually
+        assert seg_pred.dim() == 5, f"Tensor must be 5D after potential unflattening, but got {seg_pred.dim()}D"
         
-        # Process each tensor individually to avoid large batch processing
-        for i, (pred, true) in enumerate(zip(seg_pred_list, seg_true_list)):
-            # Move to CPU if not already there
-            if hasattr(pred, 'is_cuda') and pred.is_cuda:
-                pred = pred.cpu()
-            if hasattr(true, 'is_cuda') and true.is_cuda:
-                true = true.cpu()
+        batch_size = seg_pred.shape[0]
+        batch_processed = []
+
+        for b in range(batch_size):
+            # Extract 4D tensors for each batch item (C, H, W, D)
+            pred_4d = seg_pred[b]
+            true_4d = seg_true[b]
             
-            # Handle batch dimension: process each batch item if 5D
-            if pred.dim() == 5:  # 5D: (B, C, D, H, W)
-                batch_size = pred.shape[0]
-                batch_processed = []
-                
-                for b in range(batch_size):
-                    # Extract 4D tensors for each batch item
-                    pred_4d = pred[b]  # (C, D, H, W)
-                    true_4d = true[b]  # (C, D, H, W)
-                    
-                    # Apply post-transform to 4D tensors
-                    result = transform({"pred": pred_4d, "label": true_4d, "modal": modal})
-                    processed_pred_4d = result["pred"]
-                    
-                    batch_processed.append(processed_pred_4d)
-                    
-                    # Clear intermediate results
-                    del pred_4d, true_4d, result
-                
-                # Stack batch results back to 5D
-                processed_pred = torch.stack(batch_processed, dim=0)
-                
-            elif pred.dim() == 4:  # 4D: (C, D, H, W)
-                # Apply post-transform directly to 4D tensors
-                result = transform({"pred": pred, "label": true, "modal": modal})
-                processed_pred = result["pred"]
-                del result
-                
-            else:
-                raise ValueError(f"Unsupported tensor dimensions: {pred.dim()}D. Expected 4D or 5D tensors.")
+            # Apply post-transform to 4D tensors
+            result = transform({"pred": pred_4d, "label": true_4d, "modal": modal})
+            processed_pred_4d = result["pred"]
             
-            # Move to GPU only when needed and one at a time
-            if to_gpu and hasattr(processed_pred, 'to'):
-                processed_pred = processed_pred.to(DEVICE)
+            batch_processed.append(processed_pred_4d)
             
-            processed_preds.append(processed_pred)
-            
-            # Clear intermediate results to free memory
-            del pred, true
-            if DEVICE == "cuda":
-                torch.cuda.empty_cache()
+            # Clear intermediate results
+            del pred_4d, true_4d, result
+
+        # Stack batch results back to 5D
+        processed_pred = torch.stack(batch_processed, dim=0)
+
+        # Move to GPU only when needed
+        if to_gpu and hasattr(processed_pred, 'to'):
+            processed_pred = processed_pred.to(DEVICE)
         
-        # Return results appropriately
-        if len(processed_preds) == 1:
-            return processed_preds[0]
-        elif processed_preds and hasattr(processed_preds[0], 'dim'):
-            return torch.stack(processed_preds, dim=0)
-        else:
-            return processed_preds
+        # Clear intermediate results to free memory
+        del seg_pred, seg_true
+        if DEVICE == "cuda":
+            torch.cuda.empty_cache()
+            
+        return processed_pred
     
     def _filter_unlabeled_slices(self, img, seg):
         """

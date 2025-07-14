@@ -5,6 +5,7 @@ Dataset utilities for MorphiNet modular architecture.
 import torch
 import numpy as np
 from typing import List, Dict, Union
+from einops import rearrange
 
 
 def collate_4D_batch(data: List[Dict[str, Union[torch.Tensor, np.ndarray]]]) -> Dict[str, torch.Tensor]:
@@ -17,28 +18,22 @@ def collate_4D_batch(data: List[Dict[str, Union[torch.Tensor, np.ndarray]]]) -> 
     Returns:
         Batched data dictionary
     """
+    # Collate function processes different data shapes:
+    # CT: image/label [B, H, W, D] -> [B, C, H, W, D], df [B, C, H, W, D] (unchanged)
+    # MR: image/label [B, H, W, D] -> [B*D, C, H, W], df [B, C, H, W, D] (unchanged)
+    
     batch = {}
     for key in data[0].keys():
         if isinstance(data[0][key], torch.Tensor):
             if "mr" not in key or "df" in key:
-                # Handle CT data and distance fields normally
+                # Handle CT data and MR/CT distance fields normally
                 batch[key] = torch.concat([d[key] for d in data], dim=0)
-                # Ensure CT data has proper dimensions: add batch dim if needed, then channel dim
-                if batch[key].dim() == 3:  # [H*B, W, D] -> [B, 1, H, W, D]
-                    # Reshape to separate batch and spatial dimensions
-                    original_shape = batch[key].shape
-                    batch_size = len(data)
-                    spatial_dims = (original_shape[0] // batch_size, original_shape[1], original_shape[2])
-                    batch[key] = batch[key].view(batch_size, *spatial_dims).unsqueeze(1)
-                elif batch[key].dim() == 4:  # [B, H, W, D] -> [B, 1, H, W, D]
-                    batch[key] = batch[key].unsqueeze(1)
+                batch[key] = batch[key].unsqueeze(0 if "df" in key else 1)
             else:
-                # For MR data, the input shape for each sample is [N, H, W, D].
-                # This code converts it to [N * D, C, H, W] for 2D UNet processing.
-                all_slices = [
-                    d[key].permute(0, 3, 1, 2).flatten(0, 1).unsqueeze(1) for d in data
-                ]
-                batch[key] = torch.concat(all_slices, dim=0)
+                # For MR data, handle both ACDC and CAP formats:
+                # [B, H, W, D] -> [B*D, C, H, W]  
+                batch[key] = torch.concat([d[key] for d in data], dim=0)
+                batch[key] = rearrange(batch[key], '(b c) h w d -> (b d) c h w', c=1)
         else:
             batch[key] = [d[key] for d in data]
     

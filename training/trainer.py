@@ -289,15 +289,25 @@ class MorphiNetTrainer:
             wandb.log(log_data_unet, step=step, commit=commit_log)
     
     def _train_resnet_phase(self, epoch, commit_log=True):
-        """Train ResNet for distance field prediction."""
+        """
+        Train ResNet decoder for segmentation refinement using CT data only.
+        
+        Architecture Note:
+        - ResNet decoder is trained ONLY on CT data
+        - During inference, the trained decoder can be applied to both CT and MR encoder outputs
+        - MR data is used for validation/testing but NOT for training the ResNet decoder
+        """
         self.encoder_ct.eval()
+        self.encoder_mr.eval()
         self.decoder.train()
 
         train_loss_epoch = dict(total=0.0, df=0.0)
-        resnet_step_count = 0
+        ct_step_count = 0
+        
+        # Process CT data
         if self.ct_train_loader is not None:
             for step, data_ct in enumerate(self.ct_train_loader):
-                resnet_step_count = step + 1
+                ct_step_count = step + 1
                 img_ct, seg_true_ct = (
                     data_ct["ct_image"].to(DEVICE),
                     data_ct["ct_label"].to(DEVICE),
@@ -314,14 +324,10 @@ class MorphiNetTrainer:
                         mode="gaussian",
                     )
                     
-                    # Process predictions and generate ground truth at decoder size with custom sequential transformation
                     seg_pred_ct_ds_decoder_size = self.preprocessor._memory_efficient_post_transform(
                         seg_pred_ct, seg_true_ct, "ct", to_gpu=True, decoder_size=True)
                     
-                    seg_true_ct_ds_decoder_size = torch.stack([
-                        self.preprocessor._generate_downsampled_gt(seg_true_item, "ct", decoder_size=True)
-                        for seg_true_item in seg_true_ct
-                    ])
+                    seg_true_ct_ds_decoder_size = self.preprocessor._generate_downsampled_gt(seg_true_ct, "ct", decoder_size=True)
                     
                     seg_pred_ct_ds = self.preprocessor._memory_efficient_post_transform(
                         seg_pred_ct, seg_true_ct, "ct", to_gpu=True, decoder_size=False)
@@ -340,6 +346,7 @@ class MorphiNetTrainer:
                     
                     # Apply refinement
                     seg_pred_ct_ds_final = seg_pred_ct_ds_decoder_size + mask * resnet_output
+                    
                     loss = self.msk_dice_loss_fn(seg_pred_ct_ds_final, seg_true_ct_ds_decoder_size)
 
                 self.scaler_resnet.scale(loss).backward()
@@ -350,16 +357,18 @@ class MorphiNetTrainer:
                 train_loss_epoch["total"] += loss_value
                 train_loss_epoch["df"] += loss_value
 
+        # Calculate average losses (CT only)
         for k, v in train_loss_epoch.items():
-            train_loss_epoch[k] = v / resnet_step_count if self.ct_train_loader is not None and resnet_step_count > 0 else 0.0
-            self.resnet_loss[k] = np.append(self.resnet_loss[k], train_loss_epoch[k])
+            train_loss_epoch[k] = v / ct_step_count if ct_step_count > 0 else 0.0
+            self.resnet_loss[k] = np.append(self.resnet_loss.get(k, np.array([])), train_loss_epoch[k])
 
-        print(f"ResNet Training - Loss: {train_loss_epoch['total']:.4f}, LR: {self.optimizer_resnet.param_groups[0]['lr']:.6f}")
+        print(f"ResNet Training (CT only) - Loss: {train_loss_epoch['total']:.4f}, LR: {self.optimizer_resnet.param_groups[0]['lr']:.6f}")
         print(f"{'='*60}")
 
         step = self.orchestrator.get_next_step() if self.orchestrator else epoch + 1
         wandb.log({
-            "resnet/train_loss_total": train_loss_epoch["total"]
+            "resnet/train_loss_total": train_loss_epoch["total"],
+            "resnet/train_loss_df": train_loss_epoch["df"]
         }, step=step, commit=commit_log)
 
         self.lr_scheduler_resnet.step(train_loss_epoch["total"])
@@ -380,10 +389,7 @@ class MorphiNetTrainer:
                     data_ct["ct_label"].to(DEVICE)
                 )
                 
-                seg_true_ct_ds = torch.stack([
-                    self.preprocessor._generate_downsampled_gt(seg_true_item, "ct", decoder_size=False)
-                    for seg_true_item in seg_true_ct
-                ])
+                seg_true_ct_ds = self.preprocessor._generate_downsampled_gt(seg_true_ct, "ct", decoder_size=False)
                 mesh_true_ct = self.mesh_ops.surface_extractor(seg_true_ct_ds.to(DEVICE), labels=2)
 
                 self.optimizer_gsn.zero_grad()
@@ -418,14 +424,14 @@ class MorphiNetTrainer:
                     resnet_output_padded = self.decoder(seg_pred_ct_ds_padded)
                     resnet_output = self.inference._remove_resnet_padding(resnet_output_padded, pad_info)
                     
-                    seg_pred_ct_ds = seg_pred_ct_ds_decoder_size + mask * resnet_output
-                    seg_pred_ct_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ct_ds])
+                    seg_pred_ct_ds_final = seg_pred_ct_ds_decoder_size + mask * resnet_output
+                    seg_pred_ct_ds_final = torch.stack([self.pred_transform(i) for i in seg_pred_ct_ds_final])
                     
                     # Generate distance fields
-                    foreground = seg_pred_ct_ds > 0
-                    lv = (seg_pred_ct_ds == 1)
-                    rv = (seg_pred_ct_ds == 3)
-                    myo = (seg_pred_ct_ds == 2)
+                    foreground = seg_pred_ct_ds_final > 0
+                    lv = (seg_pred_ct_ds_final == 1)
+                    rv = (seg_pred_ct_ds_final == 3)
+                    myo = (seg_pred_ct_ds_final == 2)
                     df_pred_ct = torch.stack([
                         distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
                         for i in [foreground, lv, rv, myo]], dim=1)
@@ -466,7 +472,7 @@ class MorphiNetTrainer:
                 finetune_loss_epoch["smooth"] += loss_smooth_value
                 
                 # Memory cleanup
-                del seg_pred_ct, seg_pred_ct_ds, binary_mask_pred, dist_map_pred, mask
+                del seg_pred_ct, seg_pred_ct_ds, seg_pred_ct_ds_final, binary_mask_pred, dist_map_pred, mask
                 del seg_pred_ct_ds_padded, resnet_output_padded, resnet_output
                 del foreground, lv, myo, df_pred_ct, template_mesh, level_outs
                 del loss_chmf, loss_smooth, loss

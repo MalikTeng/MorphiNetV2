@@ -90,7 +90,7 @@ parameters:
   max_epochs:
     value: 200  # Total epochs (distributed across phases)
   
-  validation_modality:
+  test_modality:
     value: "ct"  # Focus on CT validation
   
   mode:

@@ -12,7 +12,7 @@ from scipy import stats
 # import nibabel as nib  # Unused import
 
 
-__all__ = ["Maskd", "DFConvertd", "Adjustd", "FlexResized", "Probd", "DynUNetPaddingd", "SequentialTransformd", "ACDCSequentialTransform", "DatasetCanonicalizer", "UniversalCanonicalResampled", "DynamicIntensityRangeScalesd"]
+__all__ = ["Maskd", "DFConvertd", "FlexResized", "DynUNetPaddingd", "SequentialTransformd", "DatasetCanonicalizer", "UniversalCanonicalResampled", "DynamicIntensityRangeScalesd"]
 
 
 class Maskd(MapTransform):
@@ -58,43 +58,6 @@ class Maskd(MapTransform):
         return data
 
 
-class Adjustd(MapTransform):
-    """
-    process the input data to be compatible with the rest transforms.
-    """
-    def __init__(self, keys: KeysCollection, allow_missing_keys: bool = False, target: str = None) -> None:
-        super().__init__(keys, allow_missing_keys)
-        self.target = target
-
-    def __call__(self, data):
-        for key in self.keys:
-            try:
-                pixel_array = data[key].get_array().copy()
-
-                if 'mr' in key and len(pixel_array.shape) == 4 and self.target != 'acdc':
-                    affine = data[key].affine.clone()
-                    # update the affine matrix
-                    m = torch.eye(4)
-                    m[:3, 0] = affine[1, :3]
-                    m[:3, 1] = affine[2, :3]
-                    m[:3, 2] = affine[3, :3]
-                    m[:3, -1] = affine[:3, -1]
-                    data[key] = MetaTensor(pixel_array, affine=m)
-
-                if "label" in key:
-                    # Combine RV-MYO (label 4) with LV-MYO (label 2) into a single MYO label
-                    pixel_array[pixel_array == 4] = 2
-                    # Keep all other labels as they are: background(0), LV(1), combined MYO(2), RV(3)
-                    # Update the data with the modified pixel array
-                    data[key] = MetaTensor(pixel_array, affine=data[key].affine, 
-                                           applied_operations=data[key].applied_operations)
-
-            except KeyError:
-                pass  # Key not found in data dictionary
-
-        return data
-
-
 class FlexResized(MapTransform):
     """
     Flexible resize transform that resizes image/label to a fixed scale at the second dimension.
@@ -105,12 +68,15 @@ class FlexResized(MapTransform):
         size: Target size tuple, -1 preserves original dimension (e.g., (-1, 128, -1))
         allow_missing_keys: Whether to allow missing keys
         force_nearest: Whether to force nearest interpolation for all keys (useful for labels)
+        min_dimension_size: Minimum allowed size for any dimension to prevent compression to zero
     """
-    def __init__(self, keys: KeysCollection, size: tuple, allow_missing_keys: bool = False, force_nearest: bool = False) -> None:
+    def __init__(self, keys: KeysCollection, size: tuple, allow_missing_keys: bool = False, 
+                 force_nearest: bool = False, min_dimension_size: int = 4) -> None:
         super().__init__(keys, allow_missing_keys)
         self.target_size = np.array([int(s) for s in size])
         self.allow_missing_keys = allow_missing_keys
         self.force_nearest = force_nearest
+        self.min_dimension_size = min_dimension_size
 
     def __call__(self, data):
         # Determine available keys and their roles
@@ -140,6 +106,7 @@ class FlexResized(MapTransform):
         else:
             current_shape = np.array(data[reference_key].shape[1:])  # Skip channel dim
         
+        
         # Handle dimension mismatch: ensure target_size and current_shape have same length
         if len(self.target_size) != len(current_shape):
             # Pad target_size with -1 if it's shorter, or truncate if longer
@@ -155,14 +122,31 @@ class FlexResized(MapTransform):
         # Replace -1 with current dimensions
         final_size = np.where(target_size == -1, current_shape, target_size)
         
-        # Calculate rescale ratio based on the second dimension (index 1)
+        # IMPROVED CALCULATION: Prevent dimension compression
         if len(final_size) > 1 and final_size[1] != current_shape[1]:
             rescale_ratio = final_size[1] / current_shape[1]
-            new_shape = [int(np.ceil(d * rescale_ratio)) for d in current_shape]
-            # Ensure the target dimension matches exactly
-            new_shape[1] = int(final_size[1])
+            
+            # Calculate new shape with dimension safeguards
+            new_shape = []
+            for i, d in enumerate(current_shape):
+                if i == 1:
+                    # Second dimension: set to exact target
+                    new_dim = int(final_size[1])
+                else:
+                    # Other dimensions: apply rescale ratio but enforce minimum size
+                    scaled_dim = int(np.ceil(d * rescale_ratio))
+                    new_dim = max(scaled_dim, self.min_dimension_size)
+                new_shape.append(new_dim)
+            
         else:
             new_shape = [int(s) for s in final_size]
+            # Apply minimum dimension enforcement even when no rescaling
+            new_shape = [max(dim, self.min_dimension_size) for dim in new_shape]
+        
+        # Final validation: ensure no zero dimensions
+        if any(dim <= 0 for dim in new_shape):
+            new_shape = [max(dim, self.min_dimension_size) for dim in new_shape]
+        
         
         # Apply resize transformation
         if pred_key and label_key:
@@ -183,21 +167,6 @@ class FlexResized(MapTransform):
                 mode = "nearest" if "label" in available_keys[0] else "bilinear"
             data = Resized(available_keys, new_shape, size_mode="all", mode=mode)(data)
         
-        return data
-
-
-class Probd(MapTransform):
-    """
-    read the input data to see its shape and dimension.
-    """
-    def __init__(self, keys: KeysCollection, allow_missing_keys: bool = False) -> None:
-        super().__init__(keys, allow_missing_keys)
-
-    def __call__(self, data):
-        for key in self.keys:
-            _ = data[key].get_array().copy()  # Debug: examine array
-            # Debug information for key shape and pixdim
-
         return data
 
 
@@ -224,9 +193,9 @@ class DFConvertd(MapTransform):
         df = []
         for mask in [foreground, lv, rv, myo]:  # Compute DF for foreground, lv, rv, myo
             df_class = distance_transform_edt(mask) + distance_transform_edt(~mask)
-            df.append(df_class[:, None])
+            df.append(df_class)
 
-        df = MetaTensor(torch.cat(df, dim=1), affine=data[self.key].affine)
+        df = MetaTensor(torch.cat(df, dim=0), affine=data[self.key].affine)
 
         data[f"{self.modal}_df"] = df
 
@@ -319,8 +288,9 @@ class DynUNetPaddingd(MapTransform):
                 # Get original shape
                 original_shape = pixel_array.shape
                 
-                if len(original_shape) == 4:  # (C, H, W, D) format
-                    c, h, w, d = original_shape
+                if len(original_shape) == 4:  
+                    # Handle different 4D formats: (C, H, W, D) for most datasets, (time_frame, H, W, D) for CAP
+                    dim0, h, w, d = original_shape
                     
                     if self.spatial_dims == 2:
                         # 2D DynUNet: pad only H, W dimensions
@@ -485,15 +455,11 @@ class SequentialTransformd(MapTransform):
         return data_dict
 
 
-# Backward compatibility alias
-ACDCSequentialTransform = SequentialTransformd
-
-
 class DatasetCanonicalizer(MapTransform):
     """
     Applies dataset-specific canonicalization transformations.
     
-    Handles affine matrix adjustments for MR datasets and label cleanup.
+    Handles affine matrix adjustments for CAP datasets and label cleanup.
     """
     
     def __init__(self, keys: KeysCollection, dataset: str, modal: str, allow_missing_keys: bool = False):
@@ -514,10 +480,10 @@ class DatasetCanonicalizer(MapTransform):
                 pixel_array = data_dict[key].get_array().copy()
                 original_affine = data_dict[key].affine.clone()
                 
-                # Handle MR affine swap for non-ACDC datasets
-                if 'mr' in key and len(pixel_array.shape) == 4 and self.dataset != 'acdc':
+                # Handle MR affine swap for CAP dataset (4D format without channel dimension)
+                if 'mr' in key and self.dataset == 'cap' and len(pixel_array.shape) == 4:
                     affine = data_dict[key].affine.clone()
-                    # Update the affine matrix (same logic as Adjustd)
+                    # Update the affine matrix
                     m = torch.eye(4)
                     m[:3, 0] = affine[1, :3]
                     m[:3, 1] = affine[2, :3]
@@ -559,7 +525,7 @@ class UniversalCanonicalResampled(MapTransform):
     • Load image/label from file paths (wraps MONAI LoadImaged)
     • Apply dataset-specific canonicalization (axis swaps/flips)
     • Handle ACDC sequential transformation with affine compensation
-    • Resample to target spacing and ensure 4D output shape [C,D,H,W]
+    • Resample to target spacing and ensure 4D output shape [C,H,W,D]
     """
     
     def __init__(self,
@@ -577,11 +543,10 @@ class UniversalCanonicalResampled(MapTransform):
         from monai.transforms import LoadImaged, Spacingd
         
         # Initialize component transforms
-        # CAP uses NRRD files which require ensure_channel_first=True for proper loading
-        # Other MR datasets might need different handling
-        ensure_channel_first = True  # Default to True for better compatibility
-        if modal == "mr" and dataset not in ['acdc', 'cap']:
-            ensure_channel_first = False  # Only set False for other MR datasets if needed
+        if dataset == "cap" and modal == "mr":
+            ensure_channel_first = False  # CAP MR: Load as (C=time_frame, H, W, D)
+        else:
+            ensure_channel_first = True   # CT and other datasets: Add channel dimension (C, H, W, D)
             
         self.loader = LoadImaged(
             keys, 
@@ -593,27 +558,41 @@ class UniversalCanonicalResampled(MapTransform):
         # Setup ACDC sequential transformation if needed
         self.acdc_transform = None
         if dataset == "acdc":
-            self.acdc_transform = ACDCSequentialTransform(keys, allow_missing_keys)
+            self.acdc_transform = SequentialTransformd(keys, sequence=None, allow_missing_keys=allow_missing_keys)
         
         # Setup dataset canonicalizer
         self.canonicalizer = DatasetCanonicalizer(keys, dataset, modal, allow_missing_keys)
         
         # Setup spacing parameters based on dataset and modality
-        if dataset == "acdc":
-            # After sequential transformation, ACDC will match CAP layout
-            # So use the same spacing vector as CAP (MR non-ACDC)
-            spacing_vector = [target_spacing[0], target_spacing[1], -1]
-        elif modal == "ct":
-            spacing_vector = list(target_spacing)  # isotropic
-        else:  # MR non-ACDC (including CAP)
-            spacing_vector = [target_spacing[0], target_spacing[1], -1]
+        if modal == "ct":
+            spacing_vector = list(target_spacing)   #isotropic
+        else:
+            spacing_vector = [target_spacing[0], target_spacing[1], -1] # use the same spacing vector as CAP (MR non-ACDC)
             
+        # Dynamic mode configuration based on actual keys
+        mode_list = []
+        for key in keys:
+            if 'image' in key.lower():
+                mode_list.append('bilinear')
+            elif 'label' in key.lower():
+                mode_list.append('nearest')
+            else:
+                # Default to bilinear for unknown key types
+                mode_list.append('bilinear')
+        
+        # Convert to tuple for MONAI compatibility
+        mode_tuple = tuple(mode_list) if len(mode_list) > 1 else mode_list[0]
+        
         self.spacer = Spacingd(
             keys,
             spacing_vector,
-            mode=("bilinear", "nearest"),
+            mode=mode_tuple,
             allow_missing_keys=allow_missing_keys
         )
+        
+        # Store spacing vector and mode configuration for debugging
+        self.spacing_vector = spacing_vector
+        self.mode_tuple = mode_tuple
         
     def __call__(self, data):
         data_dict = dict(data)
@@ -628,22 +607,30 @@ class UniversalCanonicalResampled(MapTransform):
         # Step 3: Apply dataset canonicalization
         data_dict = self.canonicalizer(data_dict)
         
-        # Step 4: Resample to target spacing
+        # Step 4: Resample to target spacing (CRITICAL STEP)
         data_dict = self.spacer(data_dict)
         
-        # Step 5: Ensure 4D shape [C,D,H,W]
+        # Validate output after Spacingd
         for key in self.keys:
             if key in data_dict:
                 tensor_data = data_dict[key]
-                if hasattr(tensor_data, 'get_array'):
-                    array = tensor_data.get_array()
-                    if array.ndim == 3:  # Add channel dimension if missing
-                        array = array.unsqueeze(0) if hasattr(array, 'unsqueeze') else array[None, ...]
-                        data_dict[key] = MetaTensor(
-                            array,
-                            affine=tensor_data.affine,
-                            applied_operations=tensor_data.applied_operations if hasattr(tensor_data, 'applied_operations') else None
-                        )
+                if hasattr(tensor_data, 'affine') and tensor_data.affine is not None:
+                    import numpy as np
+                    pixdim = [np.linalg.norm(tensor_data.affine[:3, i]) for i in range(3)]
+                    if any(np.isnan(pixdim)) or any(np.isinf(pixdim)):
+                        raise ValueError(f"Invalid pixdim after Spacingd for {key}: {pixdim}")
+                    
+                    # Check if spacing was applied correctly (allow some tolerance)
+                    expected_spacing = self.spacing_vector
+                    for i, (actual, expected) in enumerate(zip(pixdim, expected_spacing)):
+                        if expected != -1:  # -1 means preserve original spacing
+                            if abs(actual - expected) > 0.1:
+                                import warnings
+                                warnings.warn(f"Warning: {key} dimension {i} spacing mismatch. "
+                                            f"Expected: {expected}, Got: {actual:.3f}")
+        
+        # Ensure proper shape format
+        assert data_dict[self.keys[0]].get_array().ndim == 4, "Output should be 4D"
         
         return data_dict
 

@@ -83,7 +83,7 @@ def train_with_sweep_config():
     base_args.run_id = run_name
     
     # Set validation modality consistently
-    base_args.validation_modality = "ct"
+    base_args.test_modality = "ct"
     
     # Ensure online logging for sweep visibility
     base_args.mode = "online"

@@ -130,7 +130,7 @@ class MorphiNetPipeline:
         if not hasattr(self.orchestrator, 'validator'):
             raise RuntimeError("Validator not available. Ensure training mode is enabled.")
         
-        return self.orchestrator.validator.validate(epoch, save_on)
+        return self.orchestrator.validator.validate_gsn(epoch, save_on)
     
     def test(self, test_data_dir=None, output_dir=None):
         """
@@ -144,10 +144,6 @@ class MorphiNetPipeline:
             Dictionary containing test results
         """
         print(f"\n--- TESTING PHASE ---")
-        
-        # Model weights should already be loaded by the calling code
-        # Skip additional checkpoint loading during testing to avoid confusion
-        print("Using current model weights for testing")
         
         # Run comprehensive testing using the testing module
         test_results = run_full_test(self, self.super_params)
