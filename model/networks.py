@@ -186,21 +186,10 @@ class LocalMeshWarper(nn.Module):
     
     def sample_gradient_field(self, direction, mesh_vertices):
         """
-        Sample direction vectors at mesh vertex positions using compact trilinear interpolation
+        Manual trilinear interpolation for gradient field sampling with torch.gradient compatibility.
         
-        Replaces torch.nn.functional.grid_sample with manual implementation for torch.gradient compatibility.
-        
-        Algorithm Sources:
-        - Trilinear interpolation theory: Standard computer graphics textbook algorithm
-        - PyTorch implementation reference: https://gist.github.com/Kulbear/af6499e83382df88c2a2c42fb3143652
-        - PyTorch3D trilinear method: pytorch3d.ops.add_pointclouds_to_volumes (fully differentiable)
-        - Research reference: "PyTorch interpolate | How to use PyTorch interpolate with Examples?"
-        
-        Key differences from grid_sample:
-        - Manual 8-corner cube sampling instead of built-in interpolation
-        - Explicit NDC-to-index conversion: index = (ndc + 1) * (size - 1) / 2
-        - Sequential lerp operations: lerp(lerp(lerp(corners, D), W), H)
-        - Direct coordinate system handling without tensor reshaping
+        Replaces F.grid_sample to maintain differentiability through torch.gradient operations.
+        Implements padding_mode="zeros" behavior for out-of-bounds coordinates.
         
         Args:
             direction: [B, C, H, W, D] - gradient field with channels [dH, dW, dD]
@@ -208,22 +197,15 @@ class LocalMeshWarper(nn.Module):
             
         Returns:
             sampled_directions: [B, N, 3] - interpolated vectors in [dX, dY, dZ] order
-            
-        Usage in LocalMeshWarper:
-            # Original grid_sample approach:
-            # direction_input = direction.permute(0, 1, 4, 2, 3).to(dtype=verts_dtype)
-            # grid_input = verts[:, verts_idx].unsqueeze(1).unsqueeze(1).to(dtype=verts_dtype)
-            # offset = F.grid_sample(direction_input, grid_input, ...).view(b, 3, -1).transpose(-1, -2)[:, :, [1, 0, 2]]
-            
-            # New manual approach:
-            # mesh_vertices = verts[:, verts_idx].to(dtype=verts_dtype)
-            # offset = self.sample_gradient_field(direction.to(dtype=verts_dtype), mesh_vertices)
         """
         B, C, H, W, D = direction.shape
         N = mesh_vertices.shape[1]
         
         # Step 1: Convert NDC [-1,1] to continuous volume indices [0,size-1]
         indices = (mesh_vertices + 1) * torch.tensor([D-1, W-1, H-1], device=mesh_vertices.device) / 2
+        
+        # Check for out-of-bounds vertices (padding_mode="zeros")
+        out_of_bounds = (mesh_vertices < -1).any(dim=-1) | (mesh_vertices > 1).any(dim=-1)  # [B, N]
         
         # Step 2: Extract floor indices and interpolation weights
         indices_floor = torch.floor(indices).long()
@@ -272,8 +254,11 @@ class LocalMeshWarper(nn.Module):
             
             # Interpolate along H dimension
             result[b] = c0 * (1 - wh_b) + c1 * wh_b
+            
+            # Apply padding_mode="zeros" for out-of-bounds vertices
+            result[b][out_of_bounds[b]] = 0.0
         
-        # Step 5: Reorder channels from [dH, dW, dD] to [dX, dY, dZ] = [dW, dH, dD]
+        # Step 5: Reorder channels from [dH, dW, dD] to [dX, dY, dZ]
         sampled_directions = result[..., [2, 1, 0]]
         
         return sampled_directions
@@ -298,8 +283,6 @@ class LocalMeshWarper(nn.Module):
         device = verts.device
         
         # Process both LV and RV related vertices for LV+RV template mesh
-        # LV processing: lv-endo (label 0), lv-epi (label 2)
-        # RV processing: rv-endo (label 1), rv-epi (label 3)
         for i, l in zip([1, 0, 2, 0], [[0], [2], [1], [3]]):  # lv-endo, lv-epi, rv-endo, rv-epi
             df_pred = df_preds[:, i].to(dtype=verts_dtype, device=device)
             verts_idx = torch.any(torch.stack([vert_labels == j for j in l]), dim=0)
@@ -383,17 +366,6 @@ class GSN(nn.Module):
 
             # 4. output the new mesh
             level_outs.append(meshes)
-
-        # Apply local mesh warping to all levels if df_preds and labels_levels are provided
-        if df_preds is not None and labels_levels is not None:
-            warped_level_outs = []
-            for l, level_mesh in enumerate(level_outs):
-                if l < len(labels_levels):
-                    warped_mesh = self.mesh_warper(level_mesh, df_preds, labels_levels[l])
-                    warped_level_outs.append(warped_mesh)
-                else:
-                    warped_level_outs.append(level_mesh)
-            return warped_level_outs
 
         return level_outs
 

@@ -224,8 +224,10 @@ class ModelInference:
             one_hot = one_hot.permute(0, 4, 1, 2, 3)
         elif one_hot.dim() == 4:  # (B, H, W, C) -> (B, C, H, W) for 2D batched
             one_hot = one_hot.permute(0, 3, 1, 2)
-        elif one_hot.dim() == 3:  # (H, W, C) -> (C, H, W) for 2D single  
-            one_hot = one_hot.permute(2, 0, 1)
+        else:
+            raise ValueError("2D slices are not supported for prediction")
+        # elif one_hot.dim() == 3:  # (H, W, C) -> (C, H, W) for 2D single  
+        #     one_hot = one_hot.permute(2, 0, 1)
         
         return one_hot.float()
     

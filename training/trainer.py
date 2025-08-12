@@ -6,7 +6,11 @@ from collections import OrderedDict
 from monai.inferers import sliding_window_inference
 from monai.transforms.utils import distance_transform_edt
 from pytorch3d.loss import chamfer_distance, mesh_laplacian_smoothing
-from monai.transforms import AsDiscrete
+from monai.transforms import (
+    Compose, 
+    AsDiscrete, 
+    KeepLargestConnectedComponent,
+)
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -87,7 +91,10 @@ class MorphiNetTrainer:
         self.mask_threshold = super_params.mask_threshold
         
         # Prediction transform
-        self.pred_transform = AsDiscrete(argmax=True, to_onehot=self.super_params.num_classes)
+        self.pred_transform = Compose([
+            AsDiscrete(argmax=True),
+            KeepLargestConnectedComponent(is_onehot=True, independent=False, connectivity=3),
+        ])
     
     @property
     def ct_train_loader(self):
@@ -165,14 +172,8 @@ class MorphiNetTrainer:
 
                 self.optimzer_ct_unet.zero_grad()
                 with torch.autocast(device_type=DEVICE, enabled=False):
-                    seg_pred_ct = sliding_window_inference(
-                        img_ct, 
-                        roi_size=self.super_params.crop_window_size,
-                        sw_batch_size=8, 
-                        predictor=self.encoder_ct,
-                        overlap=0.5, 
-                        mode="gaussian",
-                    ) 
+                    # Direct forward pass during training (no sliding window)
+                    seg_pred_ct = self.encoder_ct(img_ct)
                     loss = self.dice_loss_fn_ct(seg_pred_ct.to(DEVICE), seg_true_ct)
 
                 self.scaler_ct_unet.scale(loss).backward()
@@ -224,15 +225,9 @@ class MorphiNetTrainer:
 
                 self.optimzer_mr_unet.zero_grad()
                 with torch.autocast(device_type=DEVICE, enabled=False):
-                    seg_pred_mr = sliding_window_inference(
-                        img_mr,
-                        roi_size=self.super_params.crop_window_size[:2],
-                        sw_batch_size=8,
-                        predictor=self.encoder_mr,
-                        overlap=0.5,
-                        mode="gaussian",
-                    )
-                    loss = self.dice_loss_fn_mr(seg_pred_mr.to(DEVICE), seg_true_mr)
+                    # Direct forward pass during training (no sliding window)
+                    seg_pred_mr = self.encoder_mr(img_mr)
+                    loss = torch.stack([self.dice_loss_fn_mr(seg_pred_mr[:, i].to(DEVICE), seg_true_mr) for i in range(seg_pred_mr.shape[1])]).mean()
 
                 self.scaler_mr_unet.scale(loss).backward()
                 self.scaler_mr_unet.step(self.optimzer_mr_unet)
@@ -244,23 +239,21 @@ class MorphiNetTrainer:
                 
                 # Log wandb data for single random step per epoch  
                 if step == log_mr_step:
-                    if img_mr.shape[0] > 0:
-                        # Get middle slice for visualization
-                        slice_idx = img_mr.shape[0] // 4
-                        input_img_mr_slice = img_mr[slice_idx, 0, :, :]
-                        gt_slice_mr = seg_true_mr[slice_idx, 0, :, :]
-                        pred_slice_mr = torch.argmax(seg_pred_mr[slice_idx, :, :, :], dim=0)
-                        
-                        # Convert to numpy arrays for wandb logging using _prepare_slice_for_wandb
-                        input_img_mr_viz = self._prepare_slice_for_wandb(input_img_mr_slice, is_segmentation=False)
-                        gt_slice_mr_viz = self._prepare_slice_for_wandb(gt_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
-                        pred_slice_mr_viz = self._prepare_slice_for_wandb(pred_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
-                        
-                        log_data_unet.update({
-                            "unet/mr_input_slice": wandb.Image(input_img_mr_viz, caption=f"MR Input - Epoch {epoch+1}"),
-                            "unet/mr_gt_slice": wandb.Image(gt_slice_mr_viz, caption=f"MR Ground Truth - Epoch {epoch+1}"),
-                            "unet/mr_pred_slice": wandb.Image(pred_slice_mr_viz, caption=f"MR Prediction - Epoch {epoch+1}"),
-                        })
+                    # Get middle slice for visualization
+                    input_img_mr_slice = img_mr[img_mr.shape[0] // 2, 0, :, :]
+                    gt_slice_mr = seg_true_mr[seg_true_mr.shape[0] // 2, 0, :, :]
+                    pred_slice_mr = torch.argmax(seg_pred_mr[seg_pred_mr.shape[0] // 2, 0, :, :, :], dim=0)    # deep_supervision enabled, multi-layer output exported.
+                    
+                    # Convert to numpy arrays for wandb logging using _prepare_slice_for_wandb
+                    input_img_mr_viz = self._prepare_slice_for_wandb(input_img_mr_slice, is_segmentation=False)
+                    gt_slice_mr_viz = self._prepare_slice_for_wandb(gt_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
+                    pred_slice_mr_viz = self._prepare_slice_for_wandb(pred_slice_mr, is_segmentation=True, num_classes=self.super_params.num_classes)
+                    
+                    log_data_unet.update({
+                        "unet/mr_input_slice": wandb.Image(input_img_mr_viz, caption=f"MR Input - Epoch {epoch+1}"),
+                        "unet/mr_gt_slice": wandb.Image(gt_slice_mr_viz, caption=f"MR Ground Truth - Epoch {epoch+1}"),
+                        "unet/mr_pred_slice": wandb.Image(pred_slice_mr_viz, caption=f"MR Prediction - Epoch {epoch+1}"),
+                    })
 
         train_loss_epoch["mr"] = train_loss_epoch["mr"] / mr_step_count if self.mr_train_loader is not None and mr_step_count > 0 else 0.0
         
@@ -285,8 +278,13 @@ class MorphiNetTrainer:
 
         # Always log to the same step to ensure consistency
         if log_data_unet:
-            step = self.orchestrator.get_next_step() if self.orchestrator else epoch + 1
-            wandb.log(log_data_unet, step=step, commit=commit_log)
+            # Use continuous epoch-based logging for sweep runs to avoid step conflicts
+            if hasattr(self.super_params, 'is_sweep_run') and self.super_params.is_sweep_run:
+                continuous_epoch = self.orchestrator.get_next_continuous_epoch() if self.orchestrator else epoch + 1
+                wandb.log({**log_data_unet, "epoch": continuous_epoch}, commit=commit_log)
+            else:
+                step = self.orchestrator.get_next_step() if self.orchestrator else epoch + 1
+                wandb.log(log_data_unet, step=step, commit=commit_log)
     
     def _train_resnet_phase(self, epoch, commit_log=True):
         """
@@ -298,7 +296,6 @@ class MorphiNetTrainer:
         - MR data is used for validation/testing but NOT for training the ResNet decoder
         """
         self.encoder_ct.eval()
-        self.encoder_mr.eval()
         self.decoder.train()
 
         train_loss_epoch = dict(total=0.0, df=0.0)
@@ -315,14 +312,20 @@ class MorphiNetTrainer:
                 
                 self.optimizer_resnet.zero_grad()
                 with torch.autocast(device_type=DEVICE, enabled=False):
-                    seg_pred_ct = sliding_window_inference(
-                        img_ct,
-                        roi_size=self.super_params.crop_window_size,
-                        sw_batch_size=8,
-                        predictor=self.encoder_ct,
-                        overlap=0.5,
-                        mode="gaussian",
-                    )
+                    # Use sliding window inference with GPU processing but CPU storage
+                    with torch.no_grad():
+                        seg_pred_ct = sliding_window_inference(
+                            img_ct,
+                            roi_size=self.super_params.crop_window_size,
+                            sw_batch_size=8,
+                            predictor=self.encoder_ct,
+                            overlap=0.5,
+                            mode="gaussian",
+                            sw_device=DEVICE,  # Process windows on GPU
+                            device=torch.device('cpu'),  # Store results on CPU
+                            buffer_steps=4,
+                            buffer_dim=-1,
+                        )
                     
                     seg_pred_ct_ds_decoder_size = self.preprocessor._memory_efficient_post_transform(
                         seg_pred_ct, seg_true_ct, "ct", to_gpu=True, decoder_size=True)
@@ -365,11 +368,18 @@ class MorphiNetTrainer:
         print(f"ResNet Training (CT only) - Loss: {train_loss_epoch['total']:.4f}, LR: {self.optimizer_resnet.param_groups[0]['lr']:.6f}")
         print(f"{'='*60}")
 
-        step = self.orchestrator.get_next_step() if self.orchestrator else epoch + 1
-        wandb.log({
+        # Use epoch-based logging for sweep runs to avoid step conflicts
+        resnet_log_data = {
             "resnet/train_loss_total": train_loss_epoch["total"],
             "resnet/train_loss_df": train_loss_epoch["df"]
-        }, step=step, commit=commit_log)
+        }
+        
+        if hasattr(self.super_params, 'is_sweep_run') and self.super_params.is_sweep_run:
+            continuous_epoch = self.orchestrator.get_next_continuous_epoch() if self.orchestrator else epoch + 1
+            wandb.log({**resnet_log_data, "epoch": continuous_epoch}, commit=commit_log)
+        else:
+            step = self.orchestrator.get_next_step() if self.orchestrator else epoch + 1
+            wandb.log(resnet_log_data, step=step, commit=commit_log)
 
         self.lr_scheduler_resnet.step(train_loss_epoch["total"])
     
@@ -394,17 +404,20 @@ class MorphiNetTrainer:
 
                 self.optimizer_gsn.zero_grad()
                 with torch.autocast(device_type=DEVICE, enabled=False):
-                    seg_pred_ct = sliding_window_inference(
-                        img_ct,
-                        roi_size=self.super_params.crop_window_size,
-                        sw_batch_size=4,
-                        predictor=self.encoder_ct,
-                        overlap=0.5,
-                        mode="gaussian",
-                        device=torch.device('cpu'),
-                        buffer_steps=4,
-                        buffer_dim=-1,
-                    )
+                    # Use sliding window inference with GPU processing but CPU storage
+                    with torch.no_grad():
+                        seg_pred_ct = sliding_window_inference(
+                            img_ct,
+                            roi_size=self.super_params.crop_window_size,
+                            sw_batch_size=8,
+                            predictor=self.encoder_ct,
+                            overlap=0.5,
+                            mode="gaussian",
+                            sw_device=DEVICE,  # Process windows on GPU
+                            device=torch.device('cpu'),  # Store results on CPU
+                            buffer_steps=4,
+                            buffer_dim=-1,
+                        )
                     
                     # Process predictions through full pipeline with custom sequential transformation
                     seg_pred_ct_ds_decoder_size = self.preprocessor._memory_efficient_post_transform(
@@ -438,15 +451,12 @@ class MorphiNetTrainer:
                     
                     # Warp template and apply GSN
                     template_mesh = self.mesh_ops.warp_template_mesh(df_pred_ct.detach())
-                    template_mesh = template_mesh.update_padded(template_mesh.verts_padded().to(torch.float32))
                     
                     level_outs = self.GSN(template_mesh, self.mesh_ops.subdivided_faces.faces_levels)
 
                     # Calculate losses
                     loss_chmf, loss_smooth = 0.0, 0.0
                     for l, subdiv_mesh in enumerate(level_outs):
-                        # Ensure mesh vertices are in float32 for PyTorch3D compatibility
-                        subdiv_mesh = subdiv_mesh.update_padded(subdiv_mesh.verts_padded().to(torch.float32))
                         verts_label = self.mesh_ops.subdivided_faces.labels_levels[l]
                         surface_mask = torch.any(torch.stack([verts_label == i for i in [0, 1, 2, 3]]), dim=0)
                         surface_verts = subdiv_mesh.verts_padded()[:, surface_mask]
@@ -490,12 +500,18 @@ class MorphiNetTrainer:
         print(f"{'='*60}")
 
         # Log to WandB
-        step = self.orchestrator.get_next_step() if self.orchestrator else epoch + 1
-        wandb.log({
+        gsn_log_data = {
             "gsn/train_loss_total": finetune_loss_epoch["total"],
             "gsn/train_loss_chamfer": finetune_loss_epoch["chmf"],
             "gsn/train_loss_smooth": finetune_loss_epoch["smooth"]
-        }, step=step, commit=commit_log)
+        }
+        
+        if hasattr(self.super_params, 'is_sweep_run') and self.super_params.is_sweep_run:
+            continuous_epoch = self.orchestrator.get_next_continuous_epoch() if self.orchestrator else epoch + 1
+            wandb.log({**gsn_log_data, "epoch": continuous_epoch}, commit=commit_log)
+        else:
+            step = self.orchestrator.get_next_step() if self.orchestrator else epoch + 1
+            wandb.log(gsn_log_data, step=step, commit=commit_log)
 
         # Update learning rate scheduler
         if self.ct_train_loader is not None and gsn_step_count > 0:

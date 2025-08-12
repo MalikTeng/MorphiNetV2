@@ -20,7 +20,8 @@ try:
     from training.validators import MorphiNetValidator
     from training.losses import LossManager
     from utils.checkpoint_manager import CheckpointManager
-    from utils.rasterize.rasterize import Rasterize
+    # Import Trimesh rasterizer for voxelization
+    from utils.rasterize.voxelize_trimesh import VoxelizeTrimesh
 except ImportError as e:
     print(f"Import error in orchestrator: {e}")
     print("Make sure all modules are properly installed and accessible")
@@ -62,6 +63,9 @@ class MorphiNetOrchestrator:
         
         # Global step counter for wandb logging consistency
         self.global_step = 0
+        
+        # Continuous epoch counter for sweep runs (across all phases)
+        self.continuous_epoch = 0
         
         # Set deterministic behavior
         set_determinism(seed=seed)
@@ -121,22 +125,17 @@ class MorphiNetOrchestrator:
             kernel_size=mr_kernel_size, 
             strides=mr_strides,
             upsample_kernel_size=mr_upsample_kernel_size, 
-            filters=self.super_params.filters, 
-            dropout=False,
-            deep_supervision=False,
-            res_block=True
+            deep_supervision=True,  # Enable deep supervision for MR
+            deep_supr_num=2,       # Number of deep supervision levels
         ).to(DEVICE)
-        
+    
         self.encoder_ct = DynUNet(
             spatial_dims=3, in_channels=1,
             out_channels=self.super_params.num_classes,
             kernel_size=ct_kernel_size, 
             strides=ct_strides,
             upsample_kernel_size=ct_upsample_kernel_size, 
-            filters=self.super_params.filters, 
-            dropout=False,
             deep_supervision=False,
-            res_block=True
         ).to(DEVICE)
         
         # Initialize ResNet decoder
@@ -190,10 +189,14 @@ class MorphiNetOrchestrator:
             template_mesh, self.super_params.subdiv_levels, mesh_label=self.vert_label
         )
         
-        # Initialize rasterizer
+        # Initialize rasterizer using Trimesh signed-distance field approach
         raster_size = [int(i // self.super_params.pixdim[0] * self.super_params.upscale_ratio) 
                       for i in self.super_params.crop_window_size]
-        self.rasterizer = Rasterize(raster_size)
+        # raster_size = [128, 128, 128]
+        
+        # Use VoxelizeTrimesh with CUDA acceleration for high-performance voxelization
+        self.rasterizer = VoxelizeTrimesh(shape=raster_size, chunk_size=250_000, use_cuda=True)
+        print("Rasterizer: GPU-accelerated Trimesh signed-distance voxelization")
         
         # Store subdivision in mesh_ops for access by other components
         self.mesh_ops.subdivided_faces = self.subdivided_faces
@@ -458,6 +461,15 @@ class MorphiNetOrchestrator:
     def set_step(self, step):
         """Set the global step counter (for synchronization)."""
         self.global_step = step
+    
+    def get_next_continuous_epoch(self):
+        """Get the next continuous epoch for sweep runs (across all phases)."""
+        self.continuous_epoch += 1
+        return self.continuous_epoch
+    
+    def get_current_continuous_epoch(self):
+        """Get the current continuous epoch."""
+        return self.continuous_epoch
     
     def _auto_detect_dataset(self):
         """

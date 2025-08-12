@@ -196,50 +196,20 @@ def draw_plotly(
                 ))
 
     if df_pred is not None:
-        if mesh_pred is not None:
-            # Convert both tensors to the same precision (float64) for grid_sample
-            # Calculate the distance field gradient
-            df_pred_double = df_pred[-1].to(torch.float64)
-            direction = torch.gradient(-df_pred_double, dim=(0, 1, 2), edge_order=1)
-            direction = torch.stack(direction, dim=0)
-            direction = direction / (direction.norm(dim=0, keepdim=True) + 1e-8)  # avoid division by zero
-            direction[torch.isnan(direction)] = 0
-            direction[torch.isinf(direction)] = 0
-            
-            # Ensure mesh vertices are in the same precision
-            verts = 2 * (mesh_pred.verts_padded().to(torch.float64) / df_pred.shape[-1] - 0.5)
-            
-            offset = direction * df_pred_double.unsqueeze(0)
-            offset = F.grid_sample(
-                offset.unsqueeze(0).permute(0, 1, 4, 2, 3),
-                verts.unsqueeze(1).unsqueeze(1),
-                align_corners=False, padding_mode="zeros"
-            ).view(1, 3, -1).transpose(-1, -2)[0, :, [1, 0, 2]]
-
-            x, y, z = mesh_pred.verts_packed().T
-            u, v, w = offset.T
-            fig.add_trace(go.Cone(
+        # draw the zero-level set from the df_pred
+        df_mask = (df_pred[-1].cpu().numpy() <= 1).astype(np.float32)
+        vertices, faces = extract_surface_vertices_pytorch3d(df_mask, isolevel=0.1)
+        
+        if len(vertices) > 0 and len(faces) > 0:
+            x, y, z = vertices.T
+            I, J, K = faces.T
+            fig.add_trace(go.Mesh3d(
                 x=x, y=y, z=z,
-                u=u, v=v, w=w,
-                colorscale="Viridis", showscale=True,
-                sizeref=1, name="df_grad"
+                i=I, j=J, k=K,
+                color="gray",
+                opacity=0.25,
+                name="df_pred"
             ))
-        else:
-            # draw the zero-level set from the df_pred
-            df_mask = (df_pred[-1].cpu().numpy() <= 1).astype(np.float32)
-            vertices, faces = extract_surface_vertices_pytorch3d(df_mask, isolevel=0.5)
-            
-            if len(vertices) > 0 and len(faces) > 0:
-                # Use consistent coordinate ordering: y, x, z -> x, y, z
-                y, x, z = vertices.T
-                I, J, K = faces.T
-                fig.add_trace(go.Mesh3d(
-                    x=x, y=y, z=z,
-                    i=I, j=J, k=K,
-                    color="gray",
-                    opacity=0.25,
-                    name="df_pred"
-                ))
 
 
         if seg_true is not None:
@@ -247,7 +217,7 @@ def draw_plotly(
             for i, name in zip([1, 2], ["lv", "rv"]):
                 center = torch.nonzero(df_pred[i] <= 1).float().mean(0)
                 fig.add_trace(go.Scatter3d(
-                    x=[center[1].item()], y=[center[0].item()], z=[center[2].item()],
+                    x=[center[2].item()], y=[center[1].item()], z=[center[0].item()],
                     mode="markers", marker=dict(size=5, color="blue"),
                     name=f"center_{name}"
                 ))

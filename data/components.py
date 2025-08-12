@@ -8,6 +8,7 @@ from monai.transforms.utils import distance_transform_edt
 import os
 from typing import Optional, Tuple
 from scipy import stats
+from scipy.signal import find_peaks
 
 # import nibabel as nib  # Unused import
 
@@ -480,16 +481,16 @@ class DatasetCanonicalizer(MapTransform):
                 pixel_array = data_dict[key].get_array().copy()
                 original_affine = data_dict[key].affine.clone()
                 
-                # Handle MR affine swap for CAP dataset (4D format without channel dimension)
-                if 'mr' in key and self.dataset == 'cap' and len(pixel_array.shape) == 4:
-                    affine = data_dict[key].affine.clone()
-                    # Update the affine matrix
-                    m = torch.eye(4)
-                    m[:3, 0] = affine[1, :3]
-                    m[:3, 1] = affine[2, :3]
-                    m[:3, 2] = affine[3, :3]
-                    m[:3, -1] = affine[:3, -1]
-                    data_dict[key] = MetaTensor(pixel_array, affine=m)
+                # CAP data now harmonized - no special affine handling needed
+                # if 'mr' in key and self.dataset == 'cap' and len(pixel_array.shape) == 4:
+                #     affine = data_dict[key].affine.clone()
+                #     # Update the affine matrix
+                #     m = torch.eye(4)
+                #     m[:3, 0] = affine[1, :3]
+                #     m[:3, 1] = affine[2, :3]
+                #     m[:3, 2] = affine[3, :3]
+                #     m[:3, -1] = affine[:3, -1]
+                #     data_dict[key] = MetaTensor(pixel_array, affine=m)
                 
                 # Label cleanup: merge RV-MYO (label 4) with LV-MYO (label 2)
                 if "label" in key:
@@ -543,10 +544,8 @@ class UniversalCanonicalResampled(MapTransform):
         from monai.transforms import LoadImaged, Spacingd
         
         # Initialize component transforms
-        if dataset == "cap" and modal == "mr":
-            ensure_channel_first = False  # CAP MR: Load as (C=time_frame, H, W, D)
-        else:
-            ensure_channel_first = True   # CT and other datasets: Add channel dimension (C, H, W, D)
+        # CAP data now harmonized as 3D NIFTI - treat same as other datasets
+        ensure_channel_first = True   # All datasets: Add channel dimension (C, H, W, D)
             
         self.loader = LoadImaged(
             keys, 
@@ -555,10 +554,8 @@ class UniversalCanonicalResampled(MapTransform):
             allow_missing_keys=allow_missing_keys
         )
         
-        # Setup ACDC sequential transformation if needed
+        # ACDC data now pre-transformed - no sequential transformation needed
         self.acdc_transform = None
-        if dataset == "acdc":
-            self.acdc_transform = SequentialTransformd(keys, sequence=None, allow_missing_keys=allow_missing_keys)
         
         # Setup dataset canonicalizer
         self.canonicalizer = DatasetCanonicalizer(keys, dataset, modal, allow_missing_keys)
@@ -567,7 +564,7 @@ class UniversalCanonicalResampled(MapTransform):
         if modal == "ct":
             spacing_vector = list(target_spacing)   #isotropic
         else:
-            spacing_vector = [target_spacing[0], target_spacing[1], -1] # use the same spacing vector as CAP (MR non-ACDC)
+            spacing_vector = [target_spacing[0], target_spacing[1], -1]
             
         # Dynamic mode configuration based on actual keys
         mode_list = []
@@ -600,9 +597,9 @@ class UniversalCanonicalResampled(MapTransform):
         # Step 1: Load data
         data_dict = self.loader(data_dict)
         
-        # Step 2: Apply ACDC sequential transformation if needed
-        if self.acdc_transform:
-            data_dict = self.acdc_transform(data_dict)
+        # Step 2: Skip ACDC transformation (data now pre-transformed)
+        # if self.acdc_transform:
+        #     data_dict = self.acdc_transform(data_dict)
         
         # Step 3: Apply dataset canonicalization
         data_dict = self.canonicalizer(data_dict)
@@ -637,35 +634,36 @@ class UniversalCanonicalResampled(MapTransform):
 
 class DynamicIntensityRangeScalesd(MapTransform):
     """
-    Dynamic intensity range scaling based on background detection.
+    Dynamic intensity range scaling with optional dual-background clipping.
     
-    This transform automatically detects the background (air) intensity in medical images
-    and uses it to dynamically determine the lower percentile for intensity rescaling.
-    The background is identified as the most common intensity value in the image.
+    Detects background intensity in medical images and applies dynamic scaling.
+    For SCOTHEART CT data with dual-background (air and padding artifacts), 
+    clips the lower intensity peak before scaling.
     
     Workflow:
-    1. Extract pixel array from MetaTensor
-    2. Find background intensity (mode) using histogram analysis
-    3. Calculate what percentile the background intensity represents
-    4. Apply ScaleIntensityRangePercentilesd with dynamic percentile range
+    1. Detect background intensity using histogram peak analysis
+    2. For SCOTHEART: Clip pixels below higher background peak if dual-background detected
+    3. Calculate background percentile for intensity scaling  
+    4. Apply percentile-based intensity scaling to [0, 1] range
     
     Args:
-        keys: Keys to apply the transform to (typically image keys only)
+        keys: Keys to apply transform to (typically image keys only)
+        dataset: Dataset name for dataset-specific processing
         upper_percentile: Upper percentile for scaling (default: 99.0)
-        b_min: Target minimum intensity value (default: 0.0)
-        b_max: Target maximum intensity value (default: 1.0)
-        clip: Whether to clip values outside the range (default: True)
-        num_bins: Number of histogram bins for background detection (default: 256)
-        min_background_percentile: Minimum allowed background percentile (default: 1.0)
-        max_background_percentile: Maximum allowed background percentile (default: 80.0)
+        b_min: Target minimum intensity (default: 0.0)
+        b_max: Target maximum intensity (default: 1.0)
+        clip: Whether to clip values outside range (default: True)
+        num_bins: Histogram bins for background detection (default: 256)
+        min_background_percentile: Minimum background percentile (default: 1.0)
+        max_background_percentile: Maximum background percentile (default: 80.0)
         allow_missing_keys: Whether to allow missing keys (default: False)
+        debug: Enable debug mode for detailed logging (default: False)
     """
     
     def __init__(
         self,
         keys: KeysCollection,
         dataset: str = None,
-        dual_background_threshold: float = 200.0,
         upper_percentile: float = 99.0,
         b_min: float = 0.0,
         b_max: float = 1.0,
@@ -673,37 +671,521 @@ class DynamicIntensityRangeScalesd(MapTransform):
         num_bins: int = 256,
         min_background_percentile: float = 1.0,
         max_background_percentile: float = 80.0,
-        allow_missing_keys: bool = False
+        allow_missing_keys: bool = False,
+        debug: bool = False
     ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.dataset = dataset.lower() if dataset else None
-        self.dual_background_threshold = dual_background_threshold
         self.upper_percentile = upper_percentile
+        self.debug = debug
         self.b_min = b_min
         self.b_max = b_max
         self.clip = clip
         self.num_bins = num_bins
         self.min_background_percentile = min_background_percentile
         self.max_background_percentile = max_background_percentile
+        # Convert boolean debug to level (0=off, 1=basic, 2=full)
+        self.debug_level = 2 if debug else 0
         
+    def _create_debug_info(self, detection_type: str, **kwargs) -> dict:
+        """Create standardized debug info structure.
+        
+        Args:
+            detection_type: Type of detection ('mr_dual_peaks', 'scotheart_dual', 'mmwhs_plateau', 'single')
+            **kwargs: Additional debug information
+        
+        Returns:
+            Standardized debug dictionary
+        """
+        base_info = {
+            'detection_type': detection_type,
+            'method': kwargs.get('method', detection_type),
+            'threshold': kwargs.get('threshold'),
+            'detected': kwargs.get('detected', False)
+        }
+        
+        if self.debug_level >= 2:  # Full debug
+            base_info.update(kwargs)
+        elif self.debug_level == 1:  # Basic debug
+            # Only keep essential fields
+            for key in ['threshold', 'clipping_applied', 'selection_method']:
+                if key in kwargs:
+                    base_info[key] = kwargs[key]
+        
+        return base_info
+    
+    def _validate_peaks(self, peaks: list, criteria: dict, required: int = 4) -> tuple:
+        """Generic peak validation with configurable criteria.
+        
+        Args:
+            peaks: List of detected peaks
+            criteria: Dictionary of validation criteria (name -> bool)
+            required: Minimum criteria to pass
+        
+        Returns:
+            Tuple of (is_valid, validation_info)
+        """
+        if len(peaks) < 2:
+            return False, {'validation_passed': False, 'reason': 'insufficient_peaks'}
+        
+        passed = sum(criteria.values())
+        is_valid = passed >= required
+        
+        validation_info = {
+            'validation_passed': is_valid,
+            'criteria_met': f"{passed}/{len(criteria)}"
+        }
+        
+        if self.debug_level >= 2:
+            validation_info['validation_checks'] = criteria
+            validation_info['passed_validations'] = passed
+            validation_info['required_validations'] = required
+        
+        return is_valid, validation_info
+    
+    def _find_ct_background_peaks(self, hist: np.ndarray, bin_centers: np.ndarray, 
+                                 all_pixels: np.ndarray) -> tuple:
+        """
+        Unified CT peak detection for both SCOTHEART and MMWHS datasets.
+        
+        Returns:
+            Tuple of (peaks_list, detection_type)
+            - peaks_list: List of (bin_idx, count, intensity) tuples
+            - detection_type: 'dual_background', 'plateau', or 'single'
+        """
+        # First try SCOTHEART dual-background detection
+        scotheart_peaks = self._find_scotheart_background_peaks(hist, bin_centers, all_pixels)
+        
+        # Then try MMWHS plateau detection  
+        mmwhs_peaks = self._find_mmwhs_plateau_peaks(hist, bin_centers, all_pixels)
+        
+        # Determine best approach based on peak characteristics
+        if len(scotheart_peaks) >= 2:
+            # Check if peaks are in typical SCOTHEART range (-1400 to -700)
+            in_range = all(p[2] >= -1400 and p[2] <= -700 for p in scotheart_peaks[:2])
+            if in_range:
+                return scotheart_peaks, 'dual_background'
+        
+        if len(mmwhs_peaks) >= 2:
+            # Check for U-shape plateau pattern (>150 HU separation)
+            intensity_sep = abs(mmwhs_peaks[-1][2] - mmwhs_peaks[0][2])
+            if intensity_sep >= 150.0:
+                return mmwhs_peaks, 'plateau'
+        
+        # Fallback to single peak
+        all_peaks = scotheart_peaks + mmwhs_peaks
+        if all_peaks:
+            return all_peaks[:1], 'single'
+        else:
+            return [], 'single'
+    
+    def _find_scotheart_background_peaks(self, hist: np.ndarray, bin_centers: np.ndarray, 
+                                        all_pixels: np.ndarray) -> list:
+        """Find dual-background peaks specific to SCOTHEART CT data."""
+        # Target background region where air (-1100) and padding (-900) peaks appear
+        background_mask = (bin_centers >= -1400) & (bin_centers <= -700)
+        background_hist = hist[background_mask]
+        background_bins = bin_centers[background_mask]
+        
+        if len(background_hist) == 0:
+            return []
+        
+        # Find local maxima with sufficient pixel count
+        peaks = []
+        min_count = max(100, len(all_pixels) * 0.001)
+        
+        for i in range(1, len(background_hist) - 1):
+            if (background_hist[i] > background_hist[i-1] and 
+                background_hist[i] > background_hist[i+1] and
+                background_hist[i] >= min_count):
+                bin_idx = np.where(background_mask)[0][i]
+                peaks.append((bin_idx, background_hist[i], background_bins[i]))
+        
+        # Return top 2 peaks sorted by intensity
+        peaks.sort(key=lambda x: x[1], reverse=True)  # Sort by count
+        prominent_peaks = peaks[:2] if len(peaks) >= 2 else peaks
+        prominent_peaks.sort(key=lambda x: x[2])  # Sort by intensity
+        
+        return prominent_peaks
+    
+    def _find_mmwhs_plateau_peaks(self, hist: np.ndarray, bin_centers: np.ndarray, 
+                                 all_pixels: np.ndarray) -> list:
+        """
+        Find U-shape plateau boundary peaks specific to MMWHS CT data.
+        Identifies leftmost and rightmost significant peaks that define plateau boundaries
+        for subsequent clipping to remove flat distribution artifacts.
+        
+        Args:
+            hist: Histogram counts array
+            bin_centers: Bin center intensity values  
+            all_pixels: All pixel values for threshold calculation
+            
+        Returns:
+            List of plateau boundary peaks (bin_idx, count, intensity) sorted by intensity
+        """
+        # Algorithm: Scan full histogram for significant peaks, identify U-shape boundaries
+        # 1. Find all peaks with sufficient pixel count (>0.1% threshold)
+        # 2. Filter peaks by minimum prominence to avoid noise
+        # 3. Identify leftmost peak (plateau start) and rightmost peak (plateau end)
+        # 4. Validate minimum intensity separation (>150 HU) between boundaries
+        # 5. Return boundary peaks for plateau removal (clip below left peak)
+        
+        if len(hist) == 0:
+            return []
+        
+        # Use scipy.signal.find_peaks for robust peak detection
+        min_count = max(100, len(all_pixels) * 0.001)  # 0.1% of pixels minimum
+        peak_indices = find_peaks(hist, height=min_count, prominence=min_count * 0.5)[0]
+        
+        if len(peak_indices) == 0:
+            return []
+        
+        # Convert peak indices to (bin_idx, count, intensity) format
+        peaks = []
+        for peak_idx in peak_indices:
+            if peak_idx < len(bin_centers):
+                peaks.append((peak_idx, hist[peak_idx], bin_centers[peak_idx]))
+        
+        # Sort by intensity to identify plateau boundaries
+        peaks.sort(key=lambda x: x[2])  # Sort by intensity
+        
+        # For U-shape plateau: need at least 2 significant peaks with proper separation
+        if len(peaks) >= 2:
+            leftmost_peak = peaks[0]   # Plateau start (background side)
+            rightmost_peak = peaks[-1]  # Plateau end (tissue side)
+            
+            # Validate minimum intensity separation for true plateau
+            intensity_separation = rightmost_peak[2] - leftmost_peak[2]
+            if intensity_separation >= 150.0:  # Minimum 150 HU separation
+                return [leftmost_peak, rightmost_peak]
+        
+        # Return all peaks if insufficient separation (fallback case)
+        return peaks[:2] if len(peaks) >= 2 else peaks
+    
+    def _find_mr_background_noise_peaks(self, hist: np.ndarray, bin_centers: np.ndarray, 
+                                       all_pixels: np.ndarray) -> list:
+        """Detect background/noise peaks in MR low-intensity region.
+        
+        Args:
+            hist: Histogram counts
+            bin_centers: Bin center intensities
+            all_pixels: All pixel values
+        
+        Returns:
+            List of (bin_idx, count, intensity) tuples for up to 2 peaks
+        """
+        # Focus on 0-20% intensity range
+        max_intensity = np.percentile(all_pixels, 99)
+        low_mask = bin_centers <= (0.2 * max_intensity)
+        
+        if not low_mask.any():
+            return []
+        
+        # Find peaks with sufficient pixels
+        min_count = max(100, len(all_pixels) * 0.001)
+        low_hist = hist[low_mask]
+        low_bins = bin_centers[low_mask]
+        
+        peak_indices = find_peaks(low_hist, height=min_count, prominence=min_count * 0.5)[0]
+        
+        peaks = []
+        for idx in peak_indices:
+            full_idx = np.where(low_mask)[0][idx]
+            peaks.append((full_idx, low_hist[idx], low_bins[idx]))
+        
+        return sorted(peaks, key=lambda x: x[2])[:2]
+    
+    def _validate_mr_dual_peaks(self, peaks: list, all_pixels: np.ndarray) -> tuple:
+        """Validate MR dual peaks (background/noise)."""
+        if len(peaks) < 2:
+            return self._handle_mr_fallback(all_pixels)
+        
+        p1, p2 = peaks[0], peaks[1]
+        max_int = np.percentile(all_pixels, 99)
+        int_range = max_int - np.min(all_pixels)
+        
+        # Validate using generic validator
+        valid, val_info = self._validate_peaks(peaks, {
+            'low_intensity': p2[2] <= 0.2 * max_int,
+            'near_zero': p1[2] <= 0.05 * max_int,
+            'separated': (p2[2] - p1[2]) >= 0.02 * int_range,
+            'sufficient_pixels': p2[1] >= len(all_pixels) * 0.005,
+            'below_tissue': p2[2] < 0.15 * max_int,
+            'balanced': p2[1] / max(p1[1], 1) <= 10.0
+        })
+        
+        if valid:
+            threshold = p2[2]
+            return (threshold, threshold), self._create_debug_info(
+                'mr_dual_peaks',
+                detected=True,
+                threshold=threshold,
+                mr_dual_peaks_detected=True,  # Keep for compatibility
+                noise_threshold=threshold,
+                peaks=[p1[2], p2[2]] if self.debug_level >= 2 else None,
+                background_peak={'intensity': p1[2]} if self.debug_level >= 2 else None,
+                noise_peak={'intensity': p2[2]} if self.debug_level >= 2 else None,
+                selection_method='validated_mr_dual_peaks',
+                **val_info
+            )
+        
+        return self._handle_mr_fallback(all_pixels, attempted=True, validation_info=val_info)
+    
+    def _handle_mr_fallback(self, all_pixels: np.ndarray, attempted: bool = False, 
+                           validation_info: dict = None) -> tuple:
+        """Fallback to percentile method for MR."""
+        threshold = float(np.percentile(all_pixels, 5))
+        
+        debug_kwargs = {
+            'threshold': threshold,
+            'mr_dual_peaks_detected': False,
+            'selected_intensity': threshold,
+            'selection_method': 'percentile_fallback',
+            'percentile_used': 5
+        }
+        
+        if attempted and validation_info:
+            debug_kwargs.update(validation_info)
+        
+        return (threshold, threshold), self._create_debug_info('mr_fallback', **debug_kwargs)
+    
+    def _validate_plateau_detection(self, peaks: list, all_pixels: np.ndarray) -> tuple:
+        """
+        Validate MMWHS plateau detection and return clipping threshold.
+        Verifies plateau characteristics and selects appropriate clipping intensity
+        to remove U-shape distribution artifacts while preserving tissue data.
+        
+        Args:
+            peaks: List of detected plateau boundary peaks
+            all_pixels: All pixel values for validation
+            
+        Returns:
+            Tuple of (clipping_threshold, debug_info)
+        """
+        if len(peaks) < 2:
+            return self._handle_single_background(peaks, all_pixels)
+        
+        # Take leftmost and rightmost peaks as plateau boundaries
+        left_peak, right_peak = peaks[0], peaks[-1]
+        
+        intensity_separation = abs(right_peak[2] - left_peak[2])
+        count_ratio = max(left_peak[1], right_peak[1]) / max(min(left_peak[1], right_peak[1]), 1)
+        
+        # MMWHS plateau validation criteria
+        validation_checks = {
+            'sufficient_separation': intensity_separation >= 150.0,  # Minimum 150 HU for plateau
+            'reasonable_separation': intensity_separation <= 2000.0,  # Max reasonable range
+            'sufficient_left_count': left_peak[1] >= len(all_pixels) * 0.001,  # 0.1% minimum
+            'sufficient_right_count': right_peak[1] >= len(all_pixels) * 0.001,  # 0.1% minimum
+            'balanced_prominence': count_ratio <= 50.0,  # Allow significant imbalance
+            'left_is_background': left_peak[2] <= 0,  # Left peak should be background/air
+        }
+        
+        passed_validations = sum(validation_checks.values())
+        required_validations = 4  # Need at least 4/6 criteria
+        
+        plateau_valid = passed_validations >= required_validations
+        
+        if plateau_valid:
+            # Use left peak intensity as clipping threshold (remove plateau start)
+            clipping_threshold = left_peak[2]
+            
+            debug_info = self._create_debug_info(
+                'mmwhs_plateau',
+                plateau_detected=True,
+                detected=True,
+                threshold=clipping_threshold,
+                validation_checks=validation_checks,
+                passed_validations=passed_validations,
+                required_validations=required_validations,
+                left_peak={'bin_idx': left_peak[0], 'count': left_peak[1], 'intensity': left_peak[2]},
+                right_peak={'bin_idx': right_peak[0], 'count': right_peak[1], 'intensity': right_peak[2]},
+                intensity_separation=intensity_separation,
+                clipping_threshold=clipping_threshold,
+                selection_method='validated_plateau_detection'
+            )
+            
+            return (clipping_threshold, clipping_threshold), debug_info
+        else:
+            # Fall back to single background approach
+            single_result, single_debug = self._handle_single_background([left_peak], all_pixels)
+            
+            # Add plateau validation failure info
+            single_debug.update({
+                'plateau_attempted': True,
+                'validation_checks': validation_checks,
+                'passed_validations': passed_validations,
+                'required_validations': required_validations,
+                'fallback_reason': 'plateau_validation_failed'
+            })
+            
+            return single_result, single_debug
+    
+    def _validate_ct_peaks(self, peaks: list, detection_type: str, 
+                          bin_centers: np.ndarray, all_pixels: np.ndarray) -> tuple:
+        """
+        Route to appropriate validation based on detection type.
+        
+        Args:
+            peaks: List of detected peaks
+            detection_type: Type of detection ('dual_background', 'plateau', 'single')
+            bin_centers: Bin center intensities
+            all_pixels: All pixel values
+            
+        Returns:
+            Tuple of (result, debug_info)
+        """
+        if detection_type == 'dual_background':
+            return self._validate_dual_background(peaks, bin_centers, all_pixels)
+        elif detection_type == 'plateau':
+            return self._validate_plateau_detection(peaks, all_pixels)
+        else:
+            return self._handle_single_background(peaks, all_pixels)
+    
+    def _validate_dual_background(self, peaks: list, bin_centers: np.ndarray, 
+                                 all_pixels: np.ndarray) -> tuple:
+        """
+        Validate dual-background detection with robust criteria.
+        
+        Args:
+            peaks: List of detected peaks (bin_idx, count, intensity)
+            bin_centers: All bin center intensities
+            all_pixels: All pixel values for validation
+            
+        Returns:
+            Tuple of (selected_intensity, debug_info)
+        """
+        if len(peaks) < 2:
+            return self._handle_single_background(peaks, all_pixels)
+        
+        # Take the two lowest intensity peaks
+        peak1, peak2 = peaks[0], peaks[1]
+        
+        intensity_diff = abs(peak1[2] - peak2[2])
+        spatial_distance = abs(peak1[0] - peak2[0])
+        count_ratio = max(peak1[1], peak2[1]) / max(min(peak1[1], peak2[1]), 1)
+        
+        # Enhanced validation criteria for SCOTHEART dual-background
+        # Relaxed to better detect actual dual-background scenarios
+        validation_checks = {
+            'min_intensity_separation': intensity_diff >= 100.0,  # At least 100 HU apart (air vs padding)
+            'max_intensity_separation': intensity_diff <= 400.0,  # Not too far apart
+            'min_spatial_separation': spatial_distance >= 5,      # At least 5 bins apart (~50 HU)
+            'both_in_background': peak1[2] <= -800 and peak2[2] <= -800,  # Background range
+            'sufficient_count_peak1': peak1[1] >= len(all_pixels) * 0.005,  # 0.5% of pixels
+            'sufficient_count_peak2': peak2[1] >= len(all_pixels) * 0.001,  # 0.1% of pixels
+            'balanced_prominence': count_ratio <= 20.0,  # Allow more imbalance
+            'reasonable_range': peak1[2] >= -1400 and peak2[2] <= -800  # Typical SCOTHEART range
+        }
+        
+        # Count passed validations
+        passed_validations = sum(validation_checks.values())
+        required_validations = 5  # Need at least 5/8 criteria (more lenient)
+        
+        dual_background_valid = passed_validations >= required_validations
+        
+        if dual_background_valid:
+            # Use the higher intensity peak (more conservative)
+            selected_intensity = max(peak1[2], peak2[2])
+            
+            debug_info = self._create_debug_info(
+                'scotheart_dual',
+                dual_background_detected=True,
+                detected=True,
+                threshold=selected_intensity,
+                validation_checks=validation_checks,
+                passed_validations=passed_validations,
+                required_validations=required_validations,
+                peak1={'bin_idx': peak1[0], 'count': peak1[1], 'intensity': peak1[2]},
+                peak2={'bin_idx': peak2[0], 'count': peak2[1], 'intensity': peak2[2]},
+                intensity_difference=intensity_diff,
+                spatial_distance=spatial_distance,
+                selected_intensity=selected_intensity,
+                selection_method='validated_dual_background'
+            )
+            
+            return (selected_intensity, selected_intensity), debug_info
+        else:
+            # Fall back to single background
+            single_result, single_debug = self._handle_single_background([peak1], all_pixels)
+            
+            # Add validation failure info
+            single_debug.update({
+                'dual_background_attempted': True,
+                'validation_checks': validation_checks,
+                'passed_validations': passed_validations,
+                'required_validations': required_validations,
+                'fallback_reason': 'validation_failed'
+            })
+            
+            return single_result, single_debug
+    
+    def _handle_single_background(self, peaks: list, all_pixels: np.ndarray) -> tuple:
+        """Handle single background detection."""
+        if len(peaks) == 0:
+            threshold = float(np.min(all_pixels))
+            method = 'fallback_minimum'
+        else:
+            threshold = peaks[0][2]
+            method = 'single_peak'
+        
+        return (threshold, threshold), self._create_debug_info(
+            'single',
+            threshold=threshold,
+            selected_intensity=threshold,
+            selection_method=method,
+            dual_background_detected=False,
+            num_peaks_found=len(peaks)
+        )
+    
+    def _apply_clipping_if_needed(self, pixel_array: np.ndarray, key: str, data_dict: dict) -> np.ndarray:
+        """Apply dataset-specific clipping if conditions met."""
+        if not hasattr(self, '_last_debug_info') or not self.debug_level:
+            return pixel_array
+        
+        clip_configs = {
+            'scotheart': ('dual_background_detected', 'selected_intensity'),
+            'acdc': ('mr_dual_peaks_detected', 'noise_threshold'),
+            'cap': ('mr_dual_peaks_detected', 'noise_threshold'),
+            'mmwhs': ('plateau_detected', 'clipping_threshold')
+        }
+        
+        if self.dataset in clip_configs:
+            detect_key, thresh_key = clip_configs[self.dataset]
+            if self._last_debug_info.get(detect_key, False):
+                threshold = self._last_debug_info.get(thresh_key)
+                if threshold is not None:
+                    # Apply clipping
+                    pixel_array[pixel_array <= threshold] = threshold
+                    
+                    # Update MetaTensor
+                    if hasattr(data_dict[key], 'affine'):
+                        data_dict[key] = MetaTensor(
+                            pixel_array, 
+                            affine=data_dict[key].affine,
+                            applied_operations=data_dict[key].applied_operations
+                        )
+                    else:
+                        data_dict[key] = pixel_array
+                    
+                    # Mark clipping as applied
+                    self._last_debug_info['clipping_applied'] = True
+                    self._last_debug_info['clip_threshold'] = threshold
+        
+        return pixel_array
+    
     def _detect_background_intensity(self, pixel_array: np.ndarray) -> tuple:
         """
-        Detect background intensity using histogram analysis.
+        Detect background intensity using histogram peak analysis.
         
-        For SCOTHEART dataset: Handles dual-background scenario where air pixels
-        around -900 HU and padded pixels around -1100 HU both represent background.
-        
-        Algorithm:
-        1. Create histogram and find lowest intensity bins with significant counts
-        2. Check if the two lowest intensities differ by ≤ dual_background_threshold  
-        3. If SCOTHEART + dual background detected: use maximum of the two (more conservative)
-        4. Otherwise: return single lowest intensity (value, value)
+        For non-SCOTHEART datasets: Uses histogram mode (highest peak)
+        For SCOTHEART: Detects dual-background peaks and validates for clipping
         
         Args:
             pixel_array: Flattened pixel intensity array
             
         Returns:
-            Tuple of (intensity, intensity) for background intensity (consistent API)
+            Tuple of (background_intensity, background_intensity) for API compatibility
         """
         # Remove any NaN or infinite values
         valid_pixels = pixel_array[np.isfinite(pixel_array)]
@@ -711,57 +1193,56 @@ class DynamicIntensityRangeScalesd(MapTransform):
         if len(valid_pixels) == 0:
             raise ValueError("No valid pixel values found in the image")
         
-        # Create histogram to find intensity distribution
+        # Create histogram
         hist, bin_edges = np.histogram(valid_pixels, bins=self.num_bins)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
         
-        # Standard single-peak detection for non-SCOTHEART datasets
-        if self.dataset != 'scotheart':
-            max_bin_idx = np.argmax(hist)
-            background_intensity = (bin_edges[max_bin_idx] + bin_edges[max_bin_idx + 1]) / 2
-            return (background_intensity, background_intensity)
+        # MR dual-peak detection for background/noise removal
+        if self.dataset in ['acdc', 'cap']:
+            try:
+                mr_peaks = self._find_mr_background_noise_peaks(hist, bin_centers, valid_pixels)
+                background_result, debug_info = self._validate_mr_dual_peaks(mr_peaks, valid_pixels)
+                
+                if self.debug_level:
+                    self._last_debug_info = debug_info
+                return background_result
+                
+            except Exception as e:
+                # Fallback to percentile method for MR
+                return self._handle_mr_fallback(valid_pixels)
         
-        # SCOTHEART-specific dual-background detection
-        # For CT images, background (air) has lowest intensities around -900 to -1100 HU
-        # Find the two lowest intensity peaks (not highest!)
-        
-        # Only consider bins with significant counts to avoid noise
-        min_count_threshold = max(10, len(valid_pixels) * 0.001)  # At least 0.1% of pixels
-        significant_bins = hist >= min_count_threshold
-        
-        if not np.any(significant_bins):
-            # Fallback to highest peak if no significant bins found
-            max_bin_idx = np.argmax(hist)
-            background_intensity = (bin_edges[max_bin_idx] + bin_edges[max_bin_idx + 1]) / 2
-            return (background_intensity, background_intensity)
-        
-        # Get indices of significant bins, sorted by intensity (ascending for lowest values)
-        significant_indices = np.where(significant_bins)[0]
-        
-        # Find the two lowest intensity bins with significant counts
-        if len(significant_indices) >= 2:
-            # Get the two lowest intensity bins
-            first_low_idx = significant_indices[0]   # Lowest intensity bin
-            second_low_idx = significant_indices[1]  # Second lowest intensity bin
-            
-            first_intensity = (bin_edges[first_low_idx] + bin_edges[first_low_idx + 1]) / 2
-            second_intensity = (bin_edges[second_low_idx] + bin_edges[second_low_idx + 1]) / 2
-            
-            # Check if intensities are within threshold (dual-background condition)
-            intensity_diff = abs(first_intensity - second_intensity)
-            
-            if intensity_diff <= self.dual_background_threshold:
-                # Dual-background detected: use maximum of the two background peaks
-                # (higher value to be more conservative about excluding tissue)
-                combined_intensity = max(first_intensity, second_intensity)
-                return (combined_intensity, combined_intensity)
-            else:
-                # Peaks too far apart: use the lowest intensity
-                background_intensity = first_intensity
+        # Unified CT processing for both SCOTHEART and MMWHS
+        elif self.dataset in ['scotheart', 'mmwhs']:
+            try:
+                ct_peaks, detection_type = self._find_ct_background_peaks(hist, bin_centers, valid_pixels)
+                background_result, debug_info = self._validate_ct_peaks(
+                    ct_peaks, detection_type, bin_centers, valid_pixels)
+                
+                if self.debug_level:
+                    self._last_debug_info = debug_info
+                return background_result
+                
+            except Exception as e:
+                # Fallback to simple mode detection
+                max_bin_idx = np.argmax(hist)
+                background_intensity = (bin_edges[max_bin_idx] + bin_edges[max_bin_idx + 1]) / 2
                 return (background_intensity, background_intensity)
+        
+        # Standard single-peak detection for other non-CT datasets
         else:
-            # Only one significant bin found, use it
-            first_low_idx = significant_indices[0]
-            background_intensity = (bin_edges[first_low_idx] + bin_edges[first_low_idx + 1]) / 2
+            max_bin_idx = np.argmax(hist)
+            background_intensity = (bin_edges[max_bin_idx] + bin_edges[max_bin_idx + 1]) / 2
+            
+            debug_info = self._create_debug_info(
+                'single',
+                threshold=background_intensity,
+                selected_intensity=background_intensity,
+                selection_method='histogram_mode',
+                dual_background_detected=False
+            )
+            
+            if self.debug_level:
+                self._last_debug_info = debug_info
             return (background_intensity, background_intensity)
     
     def _calculate_background_percentile(self, pixel_array: np.ndarray, background_range: tuple) -> float:
@@ -820,6 +1301,9 @@ class DynamicIntensityRangeScalesd(MapTransform):
                 else:
                     pixel_array = pixel_array.astype(np.float32)
                 
+                # Copy for modification
+                pixel_array = pixel_array.copy()
+                
                 # Flatten for analysis (exclude channel dimension if present)
                 if pixel_array.ndim == 4:  # (C, H, W, D)
                     flat_pixels = pixel_array.flatten()
@@ -831,7 +1315,14 @@ class DynamicIntensityRangeScalesd(MapTransform):
                 # Detect background intensity range
                 background_range = self._detect_background_intensity(flat_pixels)
                 
-                # Calculate background percentile
+                # Apply dataset-specific clipping if needed
+                pixel_array = self._apply_clipping_if_needed(pixel_array, key, data_dict)
+                
+                # Recalculate flattened pixels if clipping was applied
+                if hasattr(self, '_last_debug_info') and self._last_debug_info.get('clipping_applied', False):
+                    flat_pixels = pixel_array.flatten()
+                
+                # Calculate background percentile (now on potentially clipped data)
                 background_percentile = self._calculate_background_percentile(flat_pixels, background_range)
                 
                 # Apply ScaleIntensityRangePercentilesd with dynamic parameters
@@ -847,6 +1338,14 @@ class DynamicIntensityRangeScalesd(MapTransform):
                 
                 # Apply the transform
                 data_dict = scale_transform(data_dict)
+                
+                # Add debug information to metadata if debug mode is enabled
+                if self.debug_level >= 2 and hasattr(self, '_last_debug_info'):
+                    if hasattr(data_dict[key], 'meta'):
+                        if data_dict[key].meta is not None:
+                            data_dict[key].meta['intensity_scaling_debug'] = self._last_debug_info
+                        else:
+                            data_dict[key].meta = {'intensity_scaling_debug': self._last_debug_info}
                 
             except Exception as e:
                 if not self.allow_missing_keys:

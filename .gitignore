@@ -2,13 +2,15 @@
 __pycache__/
 .vscode/
 wandb/
-template/
+# template/
 
-# legacy code is preserved for reference (not ignored)
-# legacy_code/
+# legacy code
+legacy_code/
+archive_rasterizers/
 
 # rasterise folder
 /utils/rasterize/*
+!/utils/rasterize/*.py
 !/utils/rasterize/*.cpp
 !/utils/rasterize/*.cu
 
@@ -43,5 +45,4 @@ custom_data_transform/
 archive_histogram_matching/
 
 # exclude test files and documentation
-tests/
 docs/

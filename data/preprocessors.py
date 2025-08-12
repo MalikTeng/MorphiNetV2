@@ -51,10 +51,15 @@ class DataPreprocessor:
             Composed transform pipeline
         """
         # Calculate target size based on decoder_size flag
-        if decoder_size:
-            target_size = int(self.super_params.crop_window_size[0] // self.super_params.pixdim[0] * self.super_params.upscale_ratio)
+        if isinstance(decoder_size, bool):
+            if decoder_size:
+                target_size = int(self.super_params.crop_window_size[0] // self.super_params.pixdim[0] * self.super_params.upscale_ratio)
+            else:
+                target_size = int(self.super_params.crop_window_size[0] // self.super_params.pixdim[0])
+        elif isinstance(decoder_size, int):
+            target_size = decoder_size
         else:
-            target_size = int(self.super_params.crop_window_size[0] // self.super_params.pixdim[0])
+            raise ValueError(f"Invalid decoder_size value: {decoder_size}")
         
         # Choose target device
         target_device = DEVICE if to_gpu else "cpu"
@@ -120,6 +125,7 @@ class DataPreprocessor:
         Returns:
             Composed transform pipeline with nearest interpolation for labels
         """
+        raise NotImplementedError("Use _create_post_transform instead")
         # Calculate target size based on decoder_size flag
         if decoder_size:
             target_size = int(self.super_params.crop_window_size[0] // self.super_params.pixdim[0] * self.super_params.upscale_ratio)
@@ -193,11 +199,8 @@ class DataPreprocessor:
         if modal != 'mr':
             return tensor
             
-        # This batch size is specific to how the CAP dataset is structured.
-        batch_size = 2
-        
         # Apply unflatten operation: [D*B,C,H,W] → [B,C,H,W,D]
-        tensor_unflattened = rearrange(tensor, '(d b) c h w -> b c h w d', b=batch_size)
+        tensor_unflattened = rearrange(tensor, '(d b) c h w -> b c h w d', b=1)
             
         return tensor_unflattened
     
@@ -359,6 +362,8 @@ class DataPreprocessor:
         Returns:
             One-hot encoded tensor
         """
+        # Deprecated: using model/inference._convert_to_onehot instead
+        raise NotImplementedError("Use model/inference._convert_to_onehot instead")
         # Use PyTorch's built-in one-hot function
         if seg_tensor.dim() == 4:  # (C, D, H, W)
             seg_tensor = seg_tensor.squeeze(0)  # Remove channel dimension

@@ -1,17 +1,20 @@
 #!/bin/bash
-"""
-MorphiNet Hyperparameter Sweep Execution Script
-
-This script provides a convenient way to launch and manage WandB sweeps for MorphiNet.
-It handles sweep creation, agent execution, and provides monitoring capabilities.
-"""
+# MorphiNet Hyperparameter Sweep Execution Script
+#
+# This script provides a convenient way to launch and manage WandB sweeps for MorphiNet.
+# It handles sweep creation, agent execution, and provides monitoring capabilities.
 
 set -e  # Exit on error
 
 # Configuration
 SWEEP_CONFIG="sweep_config.yaml"
 PROJECT_NAME="MorphiNet-Sweep"
-AGENT_COUNT=1
+AGENT_COUNT=5  # Number of sequential runs (parameter combinations to try)
+# Note: These runs execute SEQUENTIALLY, not concurrently, to avoid OOM
+
+# Memory optimization settings to prevent OOM
+export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:128"
+export CUDA_MODULE_LOADING=LAZY
 
 # Colors for output
 RED='\033[0;31m'
@@ -47,7 +50,7 @@ check_prerequisites() {
     if [[ "$CONDA_DEFAULT_ENV" != "morphinet" ]]; then
         print_warning "MorphiNet conda environment not activated"
         print_status "Activating morphinet environment..."
-        source ~/miniconda3/etc/profile.d/conda.sh
+        source /mnt/data/Experiment/miniconda3/etc/profile.d/conda.sh
         conda activate morphinet
     fi
     
@@ -73,6 +76,8 @@ check_prerequisites() {
 
 # Function to create and start sweep
 create_and_run_sweep() {
+    local run_count="${1:-$AGENT_COUNT}"  # Allow override via argument
+    
     print_header "Creating and Running Hyperparameter Sweep"
     
     # Create sweep and capture sweep ID
@@ -90,9 +95,24 @@ create_and_run_sweep() {
     echo "$SWEEP_ID" > sweep_id.txt
     print_status "Sweep ID saved to sweep_id.txt"
     
-    # Start sweep agent
-    print_status "Starting sweep agent with $AGENT_COUNT runs..."
-    python sweep_agent.py --sweep_id "$SWEEP_ID" --count "$AGENT_COUNT" --project "$PROJECT_NAME"
+    # Start sweep agent with specified run count
+    print_status "Starting sweep agent with $run_count sequential runs..."
+    print_status "Each run will try a different parameter combination from Bayesian optimization"
+    
+    # Use process isolation to prevent memory accumulation
+    if [[ $run_count -gt 1 ]]; then
+        print_status "Using process isolation to prevent OOM (running $run_count separate agents)"
+        for ((i=1; i<=run_count; i++)); do
+            print_status "Running parameter combination $i of $run_count..."
+            python sweep_agent.py --sweep_id "$SWEEP_ID" --count 1 --project "$PROJECT_NAME"
+            if [[ $? -ne 0 ]]; then
+                print_error "Run $i failed, but continuing with remaining runs..."
+            fi
+        done
+    else
+        # Single run - use direct agent
+        python sweep_agent.py --sweep_id "$SWEEP_ID" --count "$run_count" --project "$PROJECT_NAME"
+    fi
 }
 
 # Function to join existing sweep
@@ -102,11 +122,44 @@ join_existing_sweep() {
         exit 1
     fi
     
-    SWEEP_ID="$1"
-    print_header "Joining Existing Sweep: $SWEEP_ID"
+    local sweep_id="$1"
+    local run_count="${2:-$AGENT_COUNT}"  # Allow override via second argument
     
-    print_status "Starting sweep agent..."
-    python sweep_agent.py --sweep_id "$SWEEP_ID" --count "$AGENT_COUNT" --project "$PROJECT_NAME"
+    print_header "Joining Existing Sweep: $sweep_id"
+    
+    print_status "Starting sweep agent with $run_count sequential runs..."
+    
+    # Use process isolation for multiple runs
+    if [[ $run_count -gt 1 ]]; then
+        print_status "Using process isolation to prevent OOM (running $run_count separate agents)"
+        for ((i=1; i<=run_count; i++)); do
+            print_status "Running parameter combination $i of $run_count..."
+            python sweep_agent.py --sweep_id "$sweep_id" --count 1 --project "$PROJECT_NAME"
+            if [[ $? -ne 0 ]]; then
+                print_error "Run $i failed, but continuing with remaining runs..."
+            fi
+        done
+    else
+        python sweep_agent.py --sweep_id "$sweep_id" --count "$run_count" --project "$PROJECT_NAME"
+    fi
+}
+
+# Function to run multiple combinations on existing sweep
+run_multiple_combinations() {
+    local run_count="${1:-10}"  # Default 10 combinations
+    
+    if [[ ! -f "sweep_id.txt" ]]; then
+        print_error "No sweep ID file found. Create a sweep first with: $0 create"
+        exit 1
+    fi
+    
+    SWEEP_ID=$(cat sweep_id.txt)
+    print_header "Running $run_count Parameter Combinations on Sweep: $SWEEP_ID"
+    
+    print_status "Each combination will run sequentially to avoid OOM issues"
+    print_status "Bayesian optimization will suggest optimal parameter combinations"
+    
+    python sweep_agent.py --sweep_id "$SWEEP_ID" --count "$run_count" --project "$PROJECT_NAME"
 }
 
 # Function to show sweep status
@@ -122,24 +175,34 @@ show_sweep_status() {
 
 # Function to show usage
 show_usage() {
-    echo "Usage: $0 [OPTION]"
+    echo "Usage: $0 [OPTION] [COUNT]"
     echo ""
     echo "Options:"
-    echo "  create          Create and run a new hyperparameter sweep"
-    echo "  join <sweep_id> Join an existing sweep"
-    echo "  status          Show current sweep status"
-    echo "  clean           Clean up temporary files"
-    echo "  help            Show this help message"
+    echo "  create [count]           Create and run a new hyperparameter sweep"
+    echo "  join <sweep_id> [count]  Join an existing sweep"
+    echo "  multi [count]            Run multiple combinations on existing sweep"
+    echo "  status                   Show current sweep status"
+    echo "  clean                    Clean up temporary files"
+    echo "  help                     Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 create                    # Create and run new sweep"
-    echo "  $0 join abc123def456         # Join existing sweep"
+    echo "  $0 create                    # Create and run $AGENT_COUNT combinations"
+    echo "  $0 create 10                 # Create and run 10 combinations"
+    echo "  $0 join abc123def456         # Join existing sweep with $AGENT_COUNT runs"
+    echo "  $0 join abc123def456 15      # Join existing sweep with 15 runs"
+    echo "  $0 multi 20                  # Run 20 more combinations on existing sweep"
     echo "  $0 status                    # Show sweep status"
+    echo ""
+    echo "Key Points:"
+    echo "  • All runs execute SEQUENTIALLY to avoid OOM errors"
+    echo "  • Bayesian optimization selects parameter combinations"
+    echo "  • Each run tries different hyperparameter values"
+    echo "  • Results are logged to WandB for comparison"
     echo ""
     echo "Configuration:"
     echo "  SWEEP_CONFIG: $SWEEP_CONFIG"
     echo "  PROJECT_NAME: $PROJECT_NAME"
-    echo "  AGENT_COUNT: $AGENT_COUNT"
+    echo "  DEFAULT_COUNT: $AGENT_COUNT"
 }
 
 # Function to clean up
@@ -163,11 +226,15 @@ main() {
     case "${1:-help}" in
         "create")
             check_prerequisites
-            create_and_run_sweep
+            create_and_run_sweep "$2"  # Pass optional count
             ;;
         "join")
             check_prerequisites
-            join_existing_sweep "$2"
+            join_existing_sweep "$2" "$3"  # Pass sweep_id and optional count
+            ;;
+        "multi")
+            check_prerequisites
+            run_multiple_combinations "$2"  # Pass optional count
             ;;
         "status")
             show_sweep_status

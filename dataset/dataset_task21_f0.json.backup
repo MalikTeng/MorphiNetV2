@@ -1,0 +1,183 @@
+{
+  "name": "Dataset021_ACDC",
+  "description": "ACDC cine MR SAX image data - filtered to top 40 cases with highest RV-Myo Dice scores",
+  "tensorImageSize": "3D",
+  "reference": "https://cardiacatlas.org/challenges/segmentation/",
+  "licence": "CC-BY-SA 4.0",
+  "release": "n/a",
+  "modality": {
+    "0": "MR"
+  },
+  "labels": {
+    "0": "background",
+    "1": "lv",
+    "2": "lv-myo",
+    "3": "rv",
+    "4": "rv-myo"
+  },
+  "training": [],
+  "numTraining": 0,
+  "test": [
+    {
+      "image": "./imagesTs/patient080_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient080_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient069_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient069_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient072_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient072_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient096_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient096_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient065_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient065_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient095_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient095_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient071_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient071_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient065_frame14_0000.nii.gz",
+      "label": "./labelsTs/patient065_frame14.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient075_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient075_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient068_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient068_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient092_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient092_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient099_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient099_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient082_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient082_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient041_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient041_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient093_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient093_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient043_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient043_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient096_frame08_0000.nii.gz",
+      "label": "./labelsTs/patient096_frame08.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient020_frame11_0000.nii.gz",
+      "label": "./labelsTs/patient020_frame11.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient007_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient007_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient019_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient019_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient020_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient020_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient081_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient081_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient017_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient017_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient089_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient089_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient067_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient067_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient036_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient036_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient070_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient070_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient062_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient062_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient033_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient033_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient083_frame08_0000.nii.gz",
+      "label": "./labelsTs/patient083_frame08.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient010_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient010_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient058_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient058_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient080_frame10_0000.nii.gz",
+      "label": "./labelsTs/patient080_frame10.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient088_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient088_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient081_frame07_0000.nii.gz",
+      "label": "./labelsTs/patient081_frame07.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient100_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient100_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient046_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient046_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient088_frame12_0000.nii.gz",
+      "label": "./labelsTs/patient088_frame12.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient059_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient059_frame01.nii.gz"
+    },
+    {
+      "image": "./imagesTs/patient064_frame01_0000.nii.gz",
+      "label": "./labelsTs/patient064_frame01.nii.gz"
+    }
+  ],
+  "numTest": 40
+}

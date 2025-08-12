@@ -47,15 +47,27 @@ class DataLoaderManager:
     def _remap_abs_path(self, data_list, modal, section):
         """Remap relative paths to absolute paths."""
         if modal == "mr":
-            return [{
-                "mr_image": os.path.join(self.super_params.mr_data_dir, f"images{section}", os.path.basename(d["image"])),
-                "mr_label": os.path.join(self.super_params.mr_data_dir, f"labels{section}", os.path.basename(d["label"])),
-            } for d in data_list]
+            remapped = []
+            for d in data_list:
+                img_name = os.path.basename(d["image"])  # e.g., patient001_frame12.nii.gz
+                stem = os.path.splitext(os.path.splitext(img_name)[0])[0]
+                remapped.append({
+                    "mr_image": os.path.join(self.super_params.mr_data_dir, f"images{section}", img_name),
+                    "mr_label": os.path.join(self.super_params.mr_data_dir, f"labels{section}", os.path.basename(d["label"])),
+                    "mr_case_id": stem,
+                })
+            return remapped
         elif modal == "ct":
-            return [{
-                "ct_image": os.path.join(self.super_params.ct_data_dir, f"images{section}", os.path.split(d["image"])[-1]),
-                "ct_label": os.path.join(self.super_params.ct_data_dir, f"labels{section}", os.path.split(d["label"])[-1]),
-            } for d in data_list]
+            remapped = []
+            for d in data_list:
+                img_name = os.path.basename(d["image"])  # e.g., ct_train_1007.nii.gz
+                stem = os.path.splitext(os.path.splitext(img_name)[0])[0]
+                remapped.append({
+                    "ct_image": os.path.join(self.super_params.ct_data_dir, f"images{section}", img_name),
+                    "ct_label": os.path.join(self.super_params.ct_data_dir, f"labels{section}", os.path.basename(d["label"])),
+                    "ct_case_id": stem,
+                })
+            return remapped
     
     def _prepare_training_dataloaders(self, phase: str):
         """Prepare training dataloaders based on training phase."""

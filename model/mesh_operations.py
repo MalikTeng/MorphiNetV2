@@ -79,6 +79,9 @@ class MeshOperations:
         Returns:
             List of surface meshes with vertices and faces in NDC space [-1, 1]
         """
+        # Ensure segmentation tensor is int32 to avoid PyTorch3D compatibility issues
+        seg_true = seg_true.to(torch.int32)
+        
         # Handle labels parameter
         if labels is None:
             # For GSN phase: extract only myocardium surface as originally designed
@@ -100,16 +103,27 @@ class MeshOperations:
             raise ValueError(f"Invalid labels type: {type(labels)}. Must be None, int, or list.")
         
         # Create binary masks for each label group
-        seg_true_multi = [torch.any(torch.stack([seg_true == i for i in seg_idx]), dim=0) for seg_idx in seg_idx_list]
+        # Note: Use torch.int32 explicitly to avoid PyTorch3D compatibility issues
+        seg_true_multi = []
+        for seg_idx in seg_idx_list:
+            # Create boolean mask and convert to int32
+            mask = torch.any(torch.stack([seg_true == i for i in seg_idx]), dim=0)
+            seg_true_multi.append(mask)
 
         mesh_true = []
         for seg_true_ in seg_true_multi:
             # Apply marching cubes to extract surface
+            # Move to CPU to avoid PyTorch3D CUDA bug (issue #1679)
+            volume_cpu = seg_true_.squeeze(1).to(torch.float32).cpu()
             verts, faces = marching_cubes(
-                seg_true_.squeeze(1).to(torch.float32),
+                volume_cpu,
                 isolevel=0.1,
                 return_local_coords=True,
             )
+            
+            # Move results back to original device for subsequent operations
+            verts = [v.to(seg_true_.device) for v in verts]
+            faces = [f.to(seg_true_.device) for f in faces]
             
             # Apply Taubin smoothing to the extracted mesh
             mesh_true.append(taubin_smoothing(Meshes(verts, faces), 0.77, -0.34, 30))

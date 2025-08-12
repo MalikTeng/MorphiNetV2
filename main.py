@@ -14,7 +14,6 @@ import gc
 import torch
 import wandb
 
-from utils.tools import draw_eval_score
 wandb.login()
 
 import warnings
@@ -37,12 +36,10 @@ def config():
                        help="Path to template mesh file")
     parser.add_argument("--inference_only", action="store_true",
                        help="Run inference only (no training)")
-    parser.add_argument("--test_phase", type=str, default="unet",
-                       choices=["unet", "resnet", "gsn", "both", "all"],
-                       help="Which phase to test: 'unet', 'resnet', 'gsn', 'both' (unet+resnet), or 'all' (unet+resnet+gsn)")
-    parser.add_argument("--test_dataset", type=str, default="both",
-                       choices=["acdc", "mmwhs", "cap", "scotheart", "both"],
-                       help="Which dataset to test: 'acdc', 'mmwhs', 'cap', 'scotheart', or 'both'")
+    # Testing now runs end-to-end in a single pass; test_phase is deprecated and removed
+    parser.add_argument("--test_dataset", type=str, default="cap",
+                       choices=["acdc", "mmwhs", "cap", "scotheart"],
+                       help="Which dataset to test: 'acdc', 'mmwhs', 'cap', or 'scotheart'")
 
     # Training parameters
     parser.add_argument("--max_epochs", type=int, default=3, 
@@ -71,9 +68,9 @@ def config():
                        help="Laplacian smoothing loss coefficient")
     parser.add_argument("--iteration", type=int, default=10, 
                        help="Distance field warping iterations")
-    parser.add_argument("--sigmoid_scale_factor", type=float, default=0.19, 
+    parser.add_argument("--sigmoid_scale_factor", type=float, default=0.83, 
                        help="Sigmoid mask scale factor")
-    parser.add_argument("--mask_threshold", type=float, default=0.1, 
+    parser.add_argument("--mask_threshold", type=float, default=0.12, 
                        help="Distance map mask threshold")
 
     # Data parameters
@@ -95,14 +92,11 @@ def config():
     # Model parameters
     parser.add_argument("--num_classes", type=int, default=4, 
                        help="Number of segmentation classes (after preprocessing: background, LV, MYO, RV)")
-    parser.add_argument("--filters", type=int, nargs='+', 
-                       default=[8, 16, 32, 64, 128], 
-                       help="UNet filter sizes")
     parser.add_argument("--kernel_size", type=int, nargs='+', 
                        default=[3, 3, 3, 3, 3], 
                        help="UNet kernel sizes")
     parser.add_argument("--strides", type=int, nargs='+', 
-                       default=[1, 2, 2, 2, 2], 
+                       default=[1, 2, 1, 2, 2], 
                        help="UNet strides")
     parser.add_argument("--layers", type=int, nargs='+', 
                        default=[1, 2, 2, 4], 
@@ -115,18 +109,23 @@ def config():
                        help="GSN hidden features")
 
     # Checkpoint parameters
-    parser.add_argument("--use_ckpt", type=str, default="n", 
-                       help="Checkpoint directory to resume from")
+    parser.add_argument("--use_ckpt", type=str, 
+                        default="/mnt/data/Experiment/MorphiNet/Checkpoint/best/", 
+                        help="Checkpoint directory to resume from")
     parser.add_argument("--ckpt_dir", type=str, default="/mnt/data/Experiment/MorphiNet/Checkpoint/", 
                        help="Directory to save checkpoints")
     parser.add_argument("--run_id", type=str, default="", 
                        help="Run identifier")
 
+    # Output root for exported results (meshes, etc.) during testing
+    parser.add_argument("--output_root", type=str, default="/mnt/data/Experiment/MorphiNet/Result/",
+                       help="Root directory for MorphiNet testing outputs")
+
+    # Rasterizer backend removed - now uses Trimesh exclusively for robust voxelization
+
     # Deprecated parameters removed: --_4d and --_mr
     
-    # Add target parameter for testing dataset identification
-    parser.add_argument("--target", type=str, default=None,
-                       help="Target dataset for testing (exact dataset identifier)")
+    # Removed legacy rasterization and unused target parameters; ray casting is default in orchestrator
     
     # Note: Histogram matching parameters removed - functionality now handled automatically by HistogramMatchd transform
     
@@ -143,11 +142,10 @@ def test_morphinet(super_params):
     print("="*80)
     print("MORPHINET INFERENCE PIPELINE")
     print("="*80)
-    print(f"Testing phase: {super_params.test_phase}")
     print(f"Testing dataset: {super_params.test_dataset}")
     
     # Generate run ID for testing
-    run_id = f"test-{super_params.test_phase}-{super_params.test_dataset}-{time.strftime('%Y-%m-%d-%H%M', time.localtime(time.time()))}"
+    run_id = f"test-full-{super_params.test_dataset}-{time.strftime('%Y-%m-%d-%H%M', time.localtime(time.time()))}"
     
     # Initialize Weights & Biases for logging test results
     with wandb.init(config=super_params, mode=super_params.mode, 
@@ -161,7 +159,7 @@ def test_morphinet(super_params):
             pipeline = create_testing_pipeline(
                 super_params=super_params,
                 seed=42,
-                num_workers=4,
+                num_workers=16,
                 dataset=super_params.test_dataset
             )
             
@@ -248,7 +246,7 @@ def train_morphinet(super_params):
             # Create training pipeline
             pipeline = create_training_pipeline(
                 super_params=super_params,
-                seed=8,
+                seed=42,
                 num_workers=16
             )
             
@@ -305,21 +303,20 @@ def main():
     print(f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     print(f"Mode: {super_params.mode}")
     
-    if super_params.inference_only:
-        print("Running in INFERENCE mode")
-        print(f"Test phase: {super_params.test_phase}")
-        print(f"Test dataset: {super_params.test_dataset}")
-        print(f"Max samples: {super_params.max_samples}")
+    # if super_params.inference_only:
+    print("Running in INFERENCE mode")
+    print(f"Test dataset: {super_params.test_dataset}")
+    print(f"Max samples: {super_params.max_samples}")
+    
+    # Run inference testing
+    test_morphinet(super_params)
+    # else:
+    #     print("Running in TRAINING mode")
+    #     print(f"Training validation: UNet(CT+MR) -> ResNet(CT) -> GSN(CT)")
+    #     print(f"Max epochs: {super_params.max_epochs}")
         
-        # Run inference testing
-        test_morphinet(super_params)
-    else:
-        print("Running in TRAINING mode")
-        print(f"Training validation: UNet(CT+MR) -> ResNet(CT) -> GSN(CT)")
-        print(f"Max epochs: {super_params.max_epochs}")
-        
-        # Train using modular architecture
-        train_morphinet(super_params)
+    #     # Train using modular architecture
+    #     train_morphinet(super_params)
 
 
 if __name__ == '__main__':

@@ -4,12 +4,15 @@ from monai.transforms import (
     Compose,
     CropForegroundd,
     CopyItemsd,
+    RandCropByPosNegLabeld,
     RandGaussianNoised,
     RandGaussianSmoothd,
     RandZoomd,
+    RandFlipd,
     Resized,
     ResizeWithPadOrCropd,
     RandAdjustContrastd,
+    RandScaleIntensityd,
     Spacingd,
     EnsureTyped
 )
@@ -25,7 +28,6 @@ def pre_transform(
         phase: str = None,  # "unet", "resnet", "gsn"
         upscale_ratio: int = 2,  # Add upscale_ratio parameter for decoder-sized distance field
         dataset: str = None,
-        custom_sequence: str = None,  # Optional custom transformation sequence (e.g., "s:xy f:x f:z")
         **kwargs
 ):
     """
@@ -39,7 +41,6 @@ def pre_transform(
         section: identifier of either train, valid or test set.
         crop_window_size: image and label will be cropped to match the size of network input.
         pixdim: the spatial distance of the downsampled images and labels.
-        custom_sequence: optional transformation sequence string (e.g., "s:xy f:x f:z") applied before distance field generation.
         spacing: target spacing for isotropic resampling.
         phase: current processing phase, determining which keys are generated.
         dataset: dataset name for specific handling (e.g., 'acdc', 'cap', 'scotheart', 'mmwhs').
@@ -84,17 +85,11 @@ def pre_transform(
         DynamicIntensityRangeScalesd(
             keys=[keys[0]], 
             dataset=dataset,
-            dual_background_threshold=200.0,
-            upper_percentile=99.0, 
-            b_min=0.0, 
-            b_max=1.0, 
-            clip=True, 
-            allow_missing_keys=True
         )
     )
     
-    # Only load distance fields for full pipeline validation phase (not needed for UNet or ResNet phases)
-    load_distance_fields = (section == "valid" and phase == "gsn")
+    # Load distance fields for full pipeline validation and testing phases
+    load_distance_fields = (section in ["valid", "test"] and phase == "gsn")
 
     if load_distance_fields:
         # Calculate target size for distance field (decoder-sized for validation)
@@ -102,15 +97,15 @@ def pre_transform(
         
         df_transforms = [
             CopyItemsd(keys[1], names=f"{keys[1]}_ds"),
-            SequentialTransformd(f"{keys[1]}_ds", sequence=custom_sequence if custom_sequence else "s:xy f:x f:z"),
-            Spacingd(f"{keys[1]}_ds", [spacing] * 3,
-                    mode="nearest", padding_mode="zeros"),
+            SequentialTransformd(f"{keys[1]}_ds", sequence="s:xy f:x f:z"),
+            Spacingd(f"{keys[1]}_ds", [spacing] * 3, mode="nearest"),
             CropForegroundd(f"{keys[1]}_ds", source_key=f"{keys[1]}_ds"),
             # create distance field from down-sampled label at decoder size
             Maskd([f"{keys[1]}_ds", f"{keys[1][:2]}"], allow_missing_keys=True),
             FlexResized(
                 f"{keys[1]}_ds", 
-                (-1, crop_window_size[0], -1)
+                (-1, crop_window_size[0], -1),
+                force_nearest=True
             ),
             Resized(
                 f"{keys[1]}_ds", 
@@ -128,20 +123,40 @@ def pre_transform(
         transforms.extend(df_transforms)
 
     if section == "train":
+        if phase == "unet":
+            # Only apply random crop for UNet phase
+            transforms.append(
+                RandCropByPosNegLabeld(
+                    keys, 
+                    label_key=keys[1], 
+                    spatial_size=crop_window_size, 
+                    pos=2, 
+                    neg=1,
+                    num_samples=4,
+                    allow_smaller=True,
+                    allow_missing_keys=True
+                )
+            )
+
         transforms.extend([
             # spatial augmentation
             RandZoomd(
                 keys,
-                min_zoom=0.6 if modal == "ct" else [0.6, 0.6, 1.0], 
-                max_zoom=1.4 if modal == "ct" else [1.4, 1.4, 1.0],
+                min_zoom=0.8 if modal == "ct" else [0.6, 0.6, 1.0], 
+                max_zoom=1.2 if modal == "ct" else [1.4, 1.4, 1.0],
                 mode=("trilinear", "nearest-exact"),
                 padding_mode="constant",
                 align_corners=(True, None), prob=0.15,
             ),
+            RandFlipd(keys, prob=0.5, spatial_axis=[0]),  # H
+            RandFlipd(keys, prob=0.5, spatial_axis=[1]),  # W
             RandGaussianNoised(keys[0], std=0.01, prob=0.15),
             RandGaussianSmoothd(
-                keys[0], sigma_x=(0.5, 1.15), sigma_y=(0.5, 1.15),
-                sigma_z=(0.5, 1.15), prob=0.15,
+                keys[0], 
+                sigma_x=(0.5, 1.15), 
+                sigma_y=(0.5, 1.15),
+                sigma_z=(0.5, 1.15), 
+                prob=0.15,
             ),
             RandAdjustContrastd(keys[0], gamma=(0.65, 1.5), prob=0.5),
         ])
