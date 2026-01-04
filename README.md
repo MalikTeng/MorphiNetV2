@@ -23,7 +23,7 @@ You can set up the required environment using Conda. We provide a helper script 
 
 1.  **Clone the repository:**
     ```bash
-    git clone <repo_url>
+    git clone https://github.com/MalikTeng/MorphiNetV2.git
     cd MorphiNet
     ```
 
