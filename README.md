@@ -86,7 +86,7 @@ python main.py \
 ```
 
 **Key Arguments:**
-- `--mode`: Setup WandB mode (`online`, `offline`, `disabled`).
+- `--mode`: Setup W&B mode (`online`, `offline`, `disabled`).
 - `--max_epochs`: Total number of training epochs.
 - `--pretrain_epochs`: Epochs for UNet pre-training.
 - `--train_epochs`: Epochs for ResNet training.
