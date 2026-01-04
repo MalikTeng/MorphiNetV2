@@ -15,10 +15,6 @@
 # Networks
 !/model
 
-# Checkpoints and Templates
-!/pretrained
-!/template
-
 # Training Loop
 !/training
 

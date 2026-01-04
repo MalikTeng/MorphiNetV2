@@ -40,7 +40,14 @@ You can set up the required environment using Conda. We provide a helper script 
     conda activate morphinet
     ```
 
+
+## External Resources
+
+> [!IMPORTANT]
+> The `pretrained` and `template` folders will be provided from a separate share drive. These directories are required for training and inference.
+
 ## Dataset Preparation
+
 
 MorphiNet uses JSON files to manage dataset splits and file paths. These files are located in the `dataset/` directory.
 
