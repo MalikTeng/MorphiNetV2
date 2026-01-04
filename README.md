@@ -1,280 +1,142 @@
-# MorphiNet - Cardiac Surface Reconstruction Neural Pipeline
+# MorphiNet: A Graph Subdivision Network for Adaptive Bi-ventricle Surface Reconstruction
 
-**🫀 Cardiac AI System**: MorphiNet reconstructs 3D cardiac surface meshes from CT/CMR images using a three-stage neural pipeline (UNet → ResNet → GSN).
+![MorphiNet Overview](figure/overview.png)
 
-This repository provides a **modular, production-ready** implementation of MorphiNet with comprehensive training, testing, and data processing capabilities for multi-modal cardiac imaging datasets.
+## Introduction
 
-## 🎯 Current Status (2025)
+**MorphiNet** is a novel network that reproduces heart anatomy learned from high-resolution Computed Tomography (CT) images, unpaired with Cardiac Magnetic Resonance (CMR) images. It addresses the limitations of CMR imaging—anisotropy, large inter-slice distances, and misalignments—by encoding anatomical structure as gradient fields that deform template meshes into patient-specific geometries.
 
-### ✅ Production-Ready Features
-- **Modular Architecture**: Clean separation of concerns across specialized modules
-- **Phase-Specific Checkpoint Saving**: UNet, ResNet, and GSN models saved independently
-- **Advanced Testing Pipeline**: Automatic checkpoint detection with comprehensive validation
+A multilayer graph subdivision network (GSN) refines these geometries while maintaining dense point correspondence, suitable for computational analysis. MorphiNet achieves state-of-the-art bi-ventricular myocardium reconstruction and delivers 50× faster inference than comparable neural implicit function methods.
 
-- **Interactive Data Orientation**: Widget-based workflow for data validation
-- **Comprehensive Documentation**: Updated guides for all major features
+For more details, please refer to our paper: [Arxiv](https://arxiv.org/abs/2412.10985).
 
-### 🚀 Recent Major Updates
-- **Enhanced Checkpoint System**: Automatic detection, phase-specific saving, best model tracking
-- **Improved Testing Infrastructure**: Real model inference with WandB integration
-- **Sequential Transformations**: Generic flip/swap sequences with affine compensation
-- **Memory-Efficient Processing**: Optimized data loading and GPU memory management
+## Environment Preparation
 
-## 🏗️ Architecture Overview
+You can set up the required environment using Conda. We provide a helper script and an environment configuration file.
 
-### Three-Stage Neural Pipeline
+### Prerequisites
+- Linux
+- NVIDIA GPU with CUDA support (CUDA 11.8 recommended)
+- Conda
+
+### Installation
+
+1.  **Clone the repository:**
+    ```bash
+    git clone <repo_url>
+    cd MorphiNet
+    ```
+
+2.  **Create and activate the environment:**
+    You can use the provided installation script which sets up the conda environment and installs additional dependencies (like PyTorch Geometric extensions):
+    ```bash
+    bash install_morphinet.sh
+    conda activate morphinet
+    ```
+
+    Alternatively, manually create the environment from `environment.yml`:
+    ```bash
+    conda env create -f environment.yml
+    conda activate morphinet
+    ```
+
+## Dataset Preparation
+
+MorphiNet uses JSON files to manage dataset splits and file paths. These files are located in the `dataset/` directory.
+
+### Structure
+The expected data structure involves:
+1.  **Raw Data**: Your CT and MR images stored in specific directories.
+2.  **Index Files**: JSON files (e.g., `dataset_task20_f0.json`) that map case IDs to their file paths.
+
+### Configuration
+When running the training script, you must specify the location of your raw data and the corresponding JSON index files:
+- `--ct_data_dir`: Root directory for CT data.
+- `--ct_json_dir`: Path to the CT dataset JSON.
+- `--mr_data_dir`: Root directory for MR data.
+- `--mr_json_dir`: Path to the MR dataset JSON.
+
+**Note**: You can generate or update these JSON files using the utility script provided in `utils/update_dataset_json.py`.
+
+## Usage
+
+MorphiNet supports both training (end-to-end curriculum learning) and inference.
+
+### Training
+
+To start the training pipeline, run `main.py`. The training proceeds in three phases:
+1.  **UNet**: Segmentation training.
+2.  **ResNet**: Distance field prediction.
+3.  **GSN**: Graph Subdivision Network for mesh refinement.
+
+```bash
+python main.py \
+    --mode online \
+    --ct_data_dir /path/to/ct_data \
+    --mr_data_dir /path/to/mr_data \
+    --max_epochs 100 \
+    --batch_size 1
 ```
-Input: CT/MR Images → UNet → ResNet → GSN → Output: 3D Surface Mesh
-                      ↓       ↓        ↓
-                 Segmentation Distance  Mesh
-                              Fields   Deformation
+
+**Key Arguments:**
+- `--mode`: Setup WandB mode (`online`, `offline`, `disabled`).
+- `--max_epochs`: Total number of training epochs.
+- `--pretrain_epochs`: Epochs for UNet pre-training.
+- `--train_epochs`: Epochs for ResNet training.
+- `--batch_size`: Batch size (default: 1).
+- `--lr`: Learning rate (default: 1e-3).
+- `--use_ckpt`: Path to resume training from a specific checkpoint.
+
+### Testing / Inference
+
+To test a trained model on a specific dataset (e.g., ACDC, MMWHS, CAP):
+
+```bash
+python main.py \
+    --inference_only \
+    --test_dataset acdc \
+    --use_ckpt /path/to/checkpoint/dir
 ```
 
-1. **UNet Stage**: Semantic segmentation (image → labels)
-2. **ResNet Stage**: Distance field generation (labels → distance fields) 
-3. **GSN Stage**: Template mesh deformation (distance fields → surface mesh)
+**Key Arguments:**
+- `--inference_only`: Flag to enable inference mode.
+- `--test_dataset`: Target dataset (`acdc`, `mmwhs`, `cap`, `scotheart`).
+- `--output_root`: Directory to save exported meshes and results.
 
-### Modular Components
+## Codebase Structure
+
+The codebase is organized into modular components:
 
 ```
 MorphiNet/
-├── data/                    # Data processing pipeline
-│   ├── loaders.py          # DataLoaderManager - unified data loading
-│   ├── preprocessors.py    # DataPreprocessor - transforms & processing
-│   ├── components.py       # UniversalCanonicalResampled, SequentialTransformd
-│   └── utils/geometry.py   # Geometric transformation utilities
-├── model/                   # Neural network architecture
-│   ├── networks.py         # UNet, ResNet, GSN model definitions
-│   ├── mesh_operations.py  # Template mesh processing
-│   └── inference.py        # Sliding window inference
-├── training/                # Training pipeline
-│   ├── trainer.py          # MorphiNetTrainer - 3-phase training
-│   ├── validators.py       # MorphiNetValidator - validation & checkpoints
-│   └── losses.py           # LossManager - optimizers & loss functions
-├── pipeline/                # Pipeline orchestration
-│   ├── orchestrator.py     # MorphiNetOrchestrator - main coordinator
-│   └── testing.py          # MorphiNetTester - inference testing
-├── utils/                   # Utilities and tools
-│   └── checkpoint_manager.py # Model persistence
-├── data_check/              # Interactive data validation
-│   └── orientation.py      # 5-section orientation workflow
-└── docs/                    # Comprehensive documentation
+├── dataset/            # JSON files defining dataset splits
+├── environment.yml     # Conda environment configuration
+├── install_morphinet.sh # Installation helper script
+├── main.py             # Main entry point for training and testing
+├── run.py              # Factory for creating training/inference pipelines
+├── evaluation/         # Metrics and evaluation logic
+├── model/              # Neural network architectures
+│   ├── networks.py     # Definitions of UNet, ResNet, and GSN
+│   ├── parts.py        # Building blocks for networks
+│   ├── mesh_operations.py # Differentiable mesh operations
+│   └── inference.py    # Inference-specific logic
+├── pipeline/           # Core pipeline orchestration
+│   ├── orchestrator.py # Manages the training phases (UNet -> ResNet -> GSN)
+│   └── testing.py      # Testing pipeline logic
+├── training/           # Training components
+│   ├── trainer.py      # Training loop implementation
+│   ├── validators.py   # Validation logic during training
+│   └── losses.py       # Loss functions (Chamfer, Laplacian, etc.)
+└── utils/              # Helper utilities
+    ├── mesh_metrics.py # Geometric metrics calculation
+    ├── process_nrrd_slices.py # Data processing tools
+    └── update_dataset_json.py # Dataset index generator
 ```
 
-## 🚀 Quick Start
+## Citation
 
-### Installation
-```bash
-# Clone repository
-git clone https://github.com/MalikTeng/MorphiNet
-cd MorphiNet
+If you find this work useful in your research, please cite our paper:
 
-# Install using provided script (recommended)
-chmod +x install_morphinet.sh
-./install_morphinet.sh
-
-# Or use conda environment
-conda env create -f environment.yml
-conda activate morphinet
 ```
-
-### Training
-```bash
-# Launch training with default parameters
-./control.sh
-
-# Custom training configuration
-python main.py --test_modality ct --max_epochs 10 --batch_size 2
-
-# Quick development test
-python main.py --max_samples 2 --max_epochs 5 --mode disabled
+Deng, Y., Xu, Y., Qian, L., Mauger, C., Nasopoulou, A., Williams, S., Williams, M., Niederer, S., Newby, D., McCulloch, A. and Omens, J., 2024. MorphiNet: A Graph Subdivision Network for Adaptive Bi-ventricle Surface Reconstruction. arXiv preprint arXiv:2412.10985.
 ```
-
-### Testing (Model Inference)
-```bash
-# Automatic checkpoint detection (recommended)
-python main.py --inference_only --test_phase unet --test_dataset scotheart --max_samples 2
-
-# Manual checkpoint specification
-python main.py --inference_only --test_phase resnet --test_dataset mmwhs \
-  --use_ckpt "/path/to/checkpoint/dir" --max_samples 2
-
-# Test multiple phases
-python main.py --inference_only --test_phase both --test_dataset cap --max_samples 5
-```
-
-### Hyperparameter Sweeps
-```bash
-# Test sweep configuration
-python test_sweep.py --simulate
-
-# Create and run hyperparameter sweep
-./run_sweep.sh create
-
-# Join existing sweep
-./run_sweep.sh join <sweep_id>
-
-# Manual sweep control
-python sweep_agent.py --create_sweep --project "MorphiNet-Sweep"
-python sweep_agent.py --sweep_id <sweep_id> --count 5
-```
-
-### Data Orientation Validation
-```bash
-# Launch interactive orientation workflow
-jupyter lab data_check/orientation.py
-
-# Or use VS Code with Jupyter extension
-code data_check/orientation.py
-```
-
-## 🗂️ Checkpoint Management
-
-### New Checkpoint Architecture (2025)
-```
-/path/to/checkpoints/dynamic/
-└── {run_id}/                    # e.g., ct--myo--f0--2025-07-11-0650
-    └── trained_weights/
-        ├── best_UNet_CT.pth     # Best UNet CT model
-        ├── best_UNet_MR.pth     # Best UNet MR model  
-        ├── best_ResNet.pth      # Best ResNet model
-        ├── best_GSN.pth         # Best GSN model
-        ├── final_UNet_CT.pth    # Final models after training
-        ├── final_UNet_MR.pth
-        ├── final_ResNet.pth
-        ├── final_GSN.pth
-        ├── {epoch}_UNet_CT.pth  # Per-epoch checkpoints
-        ├── {epoch}_UNet_MR.pth
-        ├── {epoch}_ResNet.pth
-        └── {epoch}_GSN.pth
-```
-
-### Features
-- **Automatic Detection**: System finds most recent checkpoint by modification time
-- **Phase-Specific Saving**: Each training phase saves its own checkpoints
-- **Best Model Tracking**: Best models saved when validation scores improve
-- **Final Checkpoint**: Models saved after training completion
-- **Backward Compatibility**: Supports legacy checkpoint formats
-
-
-
-## 🧪 Testing & Validation
-
-### Supported Test Phases
-- **UNet Phase**: Tests segmentation encoders (CT: encoder_ct, MR: encoder_mr)
-- **ResNet Phase**: Tests UNet→ResNet pipeline with distance field refinement
-- **Both Phases**: Comprehensive testing of full pipeline components
-
-### Supported Datasets
-- **ACDC** (MR): Automated Cardiac Diagnosis Challenge
-- **CAP** (MR): Cardiac Atlas Project  
-- **SCOTHEART** (CT): Scottish Heart Imaging
-- **MMWHS** (CT): Multi-Modality Whole Heart Segmentation
-
-### Output Metrics
-- **UNet Phase**: Dice score, IoU score per dataset
-- **ResNet Phase**: MSE score for distance field prediction
-- **WandB Integration**: Image visualizations and performance tracking
-
-## 📋 Data Orientation Workflow
-
-### Interactive 5-Section Process
-1. **Preparation**: Environment setup and dependency loading
-2. **Data Processing**: Process cardiac dataset with baseline orientation
-3. **Initial Visualization**: Visualize raw data to identify orientation issues
-4. **Custom Transformation**: Configure rotation/flip transformations via widgets
-5. **Validation**: Apply transformations and validate corrected orientation
-
-### Features
-- **Widget-Based Interface**: Interactive controls for transformation parameters
-- **3D Visualization**: Real-time Plotly visualizations with coordinate axes
-- **Matrix Generation**: Automatic transformation matrix creation and validation
-- **Reusable Transformations**: Save matrices for training/inference workflows
-
-## 🔧 Advanced Features
-
-### Sequential Transformations
-Generic flip/swap transformation system supporting arbitrary sequences:
-
-```python
-# Custom transformation sequences
-transform = SequentialTransformd(['ct_image', 'ct_label'], sequence="s:xy f:x f:z")
-
-# ACDC backward compatibility
-acdc_transform = ACDCSequentialTransform(['mr_label'])  # Unchanged
-```
-
-### Memory-Efficient Processing
-- **Sample Limiting**: Configurable sample limits for development/testing
-- **GPU Memory Management**: Optimized memory usage with proper cleanup
-- **Batch Processing**: Efficient handling of large datasets
-
-### Development Tools
-```bash
-# Quick development cycles
-python main.py --max_samples 2 --max_epochs 1 --mode disabled
-
-# Geometry transformation testing
-python -m pytest tests/test_geometry.py -v --cov=data.utils.geometry
-
-# Import validation
-python -c "from data.components import UniversalCanonicalResampled; print('✅ Imports OK')"
-```
-
-## 📚 Documentation
-
-### Key Guides
-- **Training**: Complete 3-phase training pipeline documentation
-- **Testing**: Comprehensive model inference and validation guide
-- **Data Processing**: Multi-modal data handling and transformation
-- **Troubleshooting**: Common issues and solutions
-- **Architecture**: Detailed modular component documentation
-
-### Recent Updates (2025)
-- Enhanced checkpoint system with automatic detection
-- Comprehensive testing pipeline documentation
-- Interactive data orientation workflow guide
-- Advanced data processing capabilities
-
-## 🛠️ Environment Requirements
-
-### Core Dependencies
-- **Python**: 3.10
-- **PyTorch**: 2.1.0 with CUDA 11.8
-- **PyTorch3D**: Latest from conda pytorch3d channel
-- **MONAI**: Medical imaging transformations
-- **Plotly**: Interactive 3D visualizations
-- **Weights & Biases**: Experiment tracking
-
-### Hardware Requirements
-- **GPU**: CUDA-capable GPU recommended for training
-- **Memory**: 16GB+ RAM for full dataset processing
-- **Storage**: ~100GB for datasets and checkpoints
-
-## 🎯 Current Development Status
-
-### ✅ Completed Features
-- **Modular Architecture Refactoring**: Complete separation of concerns
-- **Enhanced Checkpoint System**: Phase-specific saving with automatic detection
-- **Testing Pipeline Rewrite**: Real model inference with comprehensive validation
-
-- **Interactive Data Validation**: 5-section orientation workflow
-- **Sequential Transformation System**: Generic flip/swap sequences
-- **WandB Hyperparameter Sweeps**: Bayesian optimization with 19 searchable parameters
-- **Documentation Updates**: Comprehensive guides for all features
-
-### 🔄 Ongoing Improvements
-- Performance optimizations for large-scale training
-- Additional dataset integration and validation
-- Enhanced visualization capabilities
-- Extended testing coverage
-
-## 📞 Support & Contact
-
-**Primary Contact**: [Malik Teng on LinkedIn](https://www.linkedin.com/in/malik-teng-86085149/)
-
-**Repository**: MorphiNet - Adaptive Bi-ventricle Surface Reconstruction from Cardiovascular Imaging
-
----
-
-*MorphiNet provides a complete, production-ready solution for cardiac surface reconstruction with state-of-the-art deep learning techniques and comprehensive data processing capabilities.*

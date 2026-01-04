@@ -26,6 +26,7 @@
 !/evaluation
 
 # README and others
+!figure/
 !README.md
 !LICENSE
 !main.py
