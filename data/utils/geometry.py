@@ -49,7 +49,7 @@ def create_flip_matrix(mask_shape, axis='z'):
         >>> # matrix[0,0] = -1, matrix[0,3] = 63
     """
     H, W, D = mask_shape[-3:]
-    M_index = np.eye(4, dtype=np.float64)
+    M_index = np.eye(4, dtype=np.float32)
     
     if axis.lower() == 'x':
         M_index[2, 2] = -1
@@ -102,21 +102,21 @@ def create_swap_matrix(mask_shape=None, pair='xy'):
             [0, 0, 1, 0],
             [0, 1, 0, 0],
             [0, 0, 0, 1]
-        ], dtype=np.float64)
+        ], dtype=np.float32)
     elif pair == 'xz': # (h,w,d) -> (d,w,h) - swap X <-> Z (D <-> H)
         M = np.array([
             [0, 0, 1, 0],
             [0, 1, 0, 0],
             [1, 0, 0, 0],
             [0, 0, 0, 1]
-        ], dtype=np.float64)
+        ], dtype=np.float32)
     elif pair == 'yz': # (h,w,d) -> (w,h,d) - swap Y <-> Z (W <-> H)
         M = np.array([
             [0, 1, 0, 0],
             [1, 0, 0, 0],
             [0, 0, 1, 0],
             [0, 0, 0, 1]
-        ], dtype=np.float64)
+        ], dtype=np.float32)
     else:
         raise ValueError(f"Invalid pair: {pair}. Must be 'xy', 'xz', or 'yz'")
     

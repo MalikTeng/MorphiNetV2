@@ -168,7 +168,7 @@ class VoxelizeTrimesh(nn.Module):
         for b in range(batch_size):
             # Move mesh data to CPU numpy for Trimesh
             v_np = vertices[b].detach().to("cpu", dtype=torch.float32).numpy()
-            f_np = faces[b].detach().to("cpu", dtype=torch.int64).numpy()
+            f_np = faces[b].detach().to("cpu", dtype=torch.int32).numpy()
 
             if f_np.size == 0 or v_np.size == 0:
                 continue

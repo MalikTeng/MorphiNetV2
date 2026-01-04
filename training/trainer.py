@@ -1,7 +1,9 @@
 import os
 import torch
+import torch.nn.functional as F
 import numpy as np
 import wandb
+from scipy.ndimage import binary_dilation
 from collections import OrderedDict
 from monai.inferers import sliding_window_inference
 from monai.transforms.utils import distance_transform_edt
@@ -85,10 +87,6 @@ class MorphiNetTrainer:
         self.unet_loss = OrderedDict({k: np.asarray([]) for k in ["total", "ct", "mr", "seg"]})
         self.resnet_loss = OrderedDict({k: np.asarray([]) for k in ["total", "df"]})
         self.gsn_loss = OrderedDict({k: np.asarray([]) for k in ["total", "chmf", "smooth"]})
-        
-        # Sigmoid parameters
-        self.sigmoid_scale_factor = super_params.sigmoid_scale_factor
-        self.mask_threshold = super_params.mask_threshold
         
         # Prediction transform
         self.pred_transform = Compose([
@@ -336,16 +334,14 @@ class MorphiNetTrainer:
                         seg_pred_ct, seg_true_ct, "ct", to_gpu=True, decoder_size=False)
                     
                     # Calculate mask for refinement
-                    binary_mask_pred = (torch.argmax(seg_pred_ct_ds_decoder_size, dim=1, keepdim=True) == 0)
-                    dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
-                    mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor + 1).detach()
-                    mask = mask * binary_mask_pred
-                    mask[mask < self.mask_threshold] = 0
+                    binary_mask_pred = (torch.argmax(seg_pred_ct_ds_decoder_size, dim=1, keepdim=True) > 0)
+                    mask = torch.zeros_like(binary_mask_pred)
+                    seg_np = binary_mask_pred[0, 0].cpu().numpy().astype(bool)
+                    dilated_np = binary_dilation(seg_np, iterations=20)
+                    mask[0, 0] = torch.from_numpy(dilated_np.astype(np.float32)).to(binary_mask_pred.device)
+                    mask[binary_mask_pred == 1] = 0
                     
-                    # Apply ResNet with padding
-                    seg_pred_ct_ds_padded, pad_info = self.inference._apply_resnet_padding(seg_pred_ct_ds)
-                    resnet_output_padded = self.decoder(seg_pred_ct_ds_padded)
-                    resnet_output = self.inference._remove_resnet_padding(resnet_output_padded, pad_info)
+                    resnet_output = self.decoder(seg_pred_ct_ds)
                     
                     # Apply refinement
                     seg_pred_ct_ds_final = seg_pred_ct_ds_decoder_size + mask * resnet_output
@@ -399,7 +395,7 @@ class MorphiNetTrainer:
                     data_ct["ct_label"].to(DEVICE)
                 )
                 
-                seg_true_ct_ds = self.preprocessor._generate_downsampled_gt(seg_true_ct, "ct", decoder_size=False)
+                seg_true_ct_ds = self.preprocessor._generate_downsampled_gt(seg_true_ct, "ct", decoder_size=32)
                 mesh_true_ct = self.mesh_ops.surface_extractor(seg_true_ct_ds.to(DEVICE), labels=2)
 
                 self.optimizer_gsn.zero_grad()
@@ -427,18 +423,17 @@ class MorphiNetTrainer:
                         seg_pred_ct, seg_true_ct, "ct", to_gpu=True, decoder_size=False)
                     
                     # Calculate mask and apply ResNet
-                    binary_mask_pred = (torch.argmax(seg_pred_ct_ds_decoder_size, dim=1, keepdim=True) == 0)
-                    dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
-                    mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor + 1).detach()
-                    mask = mask * binary_mask_pred
-                    mask[mask < self.mask_threshold] = 0
+                    binary_mask_pred = (torch.argmax(seg_pred_ct_ds_decoder_size, dim=1, keepdim=True) > 0)
+                    mask = torch.zeros_like(binary_mask_pred)
+                    seg_np = binary_mask_pred[0, 0].cpu().numpy().astype(bool)
+                    dilated_np = binary_dilation(seg_np, iterations=20)
+                    mask[0, 0] = torch.from_numpy(dilated_np.astype(np.float32)).to(binary_mask_pred.device)
+                    mask[binary_mask_pred == 1] = 0
 
-                    seg_pred_ct_ds_padded, pad_info = self.inference._apply_resnet_padding(seg_pred_ct_ds)
-                    resnet_output_padded = self.decoder(seg_pred_ct_ds_padded)
-                    resnet_output = self.inference._remove_resnet_padding(resnet_output_padded, pad_info)
-                    
+                    resnet_output = self.decoder(seg_pred_ct_ds)
                     seg_pred_ct_ds_final = seg_pred_ct_ds_decoder_size + mask * resnet_output
                     seg_pred_ct_ds_final = torch.stack([self.pred_transform(i) for i in seg_pred_ct_ds_final])
+                    seg_pred_ct_ds_final = F.interpolate(seg_pred_ct_ds_final, size=(32, 32, 32), mode="trilinear", align_corners=False)
                     
                     # Generate distance fields
                     foreground = seg_pred_ct_ds_final > 0
@@ -480,10 +475,9 @@ class MorphiNetTrainer:
                 finetune_loss_epoch["total"] += loss_value
                 finetune_loss_epoch["chmf"] += loss_chmf_value
                 finetune_loss_epoch["smooth"] += loss_smooth_value
-                
+
                 # Memory cleanup
-                del seg_pred_ct, seg_pred_ct_ds, seg_pred_ct_ds_final, binary_mask_pred, dist_map_pred, mask
-                del seg_pred_ct_ds_padded, resnet_output_padded, resnet_output
+                del seg_pred_ct, seg_pred_ct_ds, seg_pred_ct_ds_final, binary_mask_pred, mask
                 del foreground, lv, myo, df_pred_ct, template_mesh, level_outs
                 del loss_chmf, loss_smooth, loss
                 torch.cuda.empty_cache()

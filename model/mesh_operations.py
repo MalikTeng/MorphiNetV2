@@ -117,7 +117,7 @@ class MeshOperations:
             volume_cpu = seg_true_.squeeze(1).to(torch.float32).cpu()
             verts, faces = marching_cubes(
                 volume_cpu,
-                isolevel=0.1,
+                isolevel=0.5,
                 return_local_coords=True,
             )
             
@@ -126,7 +126,7 @@ class MeshOperations:
             faces = [f.to(seg_true_.device) for f in faces]
             
             # Apply Taubin smoothing to the extracted mesh
-            mesh_true.append(taubin_smoothing(Meshes(verts, faces), 0.77, -0.34, 30))
+            mesh_true.append(taubin_smoothing(Meshes(verts, faces), 0.7, -0.73, 30))
 
         return mesh_true
     
@@ -160,7 +160,7 @@ class MeshOperations:
             sin_theta = vector_msh_xz[:, 0] * vector_df_xz[:, 1] - vector_msh_xz[:, 1] * vector_df_xz[:, 0]
 
             # Create rotation matrices
-            R = torch.zeros(vector_msh.shape[0], 3, 3, device=vector_msh.device, dtype=torch.float64)
+            R = torch.zeros(vector_msh.shape[0], 3, 3, device=vector_msh.device, dtype=torch.float32)
             R[:, 0, 0] = cos_theta
             R[:, 0, 2] = sin_theta
             R[:, 1, 1] = 1
@@ -172,25 +172,28 @@ class MeshOperations:
         # Load template mesh using PyTorch3D
         template_mesh_pt3d = load_objs_as_meshes([self.super_params.template_mesh_dir], device=DEVICE)
         template_mesh = Meshes(
-            verts=[template_mesh_pt3d.verts_packed().to(dtype=torch.float64)], 
-            faces=[template_mesh_pt3d.faces_packed().to(dtype=torch.int64)]
+            verts=[template_mesh_pt3d.verts_packed().to(dtype=torch.float32)], 
+            faces=[template_mesh_pt3d.faces_packed().to(dtype=torch.int32)]
         ).to(DEVICE).extend(b)
+
+        # Apply taubin smoothing to improve mesh quality
+        template_mesh = taubin_smoothing(template_mesh, 0.5, -0.53, 10)
 
         # Stage 1: Smooth global offset with rotation alignment
         verts = template_mesh.verts_padded()
         
         # Find the rotation matrix that makes the centroid vectors align
         # Use RV distance field (channel 2) for RV center calculation
-        df_c = torch.stack([2 * (torch.nonzero(df <= 1).to(torch.float64).mean(0) / d - 0.5) 
+        df_c = torch.stack([2 * (torch.nonzero(df <= 1).to(torch.float32).mean(0) / d - 0.5) 
                             for df in df_preds[:, 2]])[:, [2, 1, 0]]   # reorder dimensions, using RV channel
         
         # Use only the RV center as the reference center
-        mesh_c = self.mesh_c[1].unsqueeze(0).expand(b, -1).to(torch.float64)
+        mesh_c = self.mesh_c[1].unsqueeze(0).expand(b, -1).to(torch.float32)
         
         R = find_rotation_matrix_xz(mesh_c, df_c)
         
         # Ensure verts are in double precision before matrix multiplication
-        verts = verts.to(torch.float64)
+        verts = verts.to(torch.float32)
         verts = torch.bmm(R, verts.transpose(1, 2)).transpose(1, 2)
         
         template_mesh = template_mesh.update_padded(verts)

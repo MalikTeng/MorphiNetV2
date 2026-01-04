@@ -1,48 +1,38 @@
-# build folders
-__pycache__/
-.vscode/
-wandb/
-# template/
+*/
 
-# legacy code
-legacy_code/
-archive_rasterizers/
-
-# rasterise folder
+# Utils and Rasterizer
+!/utils/
+/utils/*
+!/utils/rasterize/
 /utils/rasterize/*
 !/utils/rasterize/*.py
 !/utils/rasterize/*.cpp
 !/utils/rasterize/*.cu
 
-# temporary files and logs
-*.out
-*.txt
-*.html
-*.log
-training_sim_data/
-iframe_figures/
+# Data-loader
+!/data
 
-# environment and cache
-.env
-.cache/
+# Networks
+!/model
 
-# development test files
-test_*.py
+# Checkpoints and Templates
+!/pretrained
+!/template
 
-# keep important dataset files
-!dataset/*.json
+# Training Loop
+!/training
 
-# exclude internal documentation from public repo
-CLAUDE.md
-CLAUDE.local.md
+# Evaluation
+!/evaluation
 
-# exclude development tools and custom data transformation scripts
-.claude/
-.cursor/
-custom_data_transform/
-
-# exclude archived histogram matching functionality
-archive_histogram_matching/
-
-# exclude test files and documentation
-docs/
+# README and others
+!README.md
+!LICENSE
+!main.py
+!run.py
+!sweep_agent.py
+!control.sh
+!install_morphinet.sh
+!run_sweep.sh
+!sweep_config.yaml
+!environment.yml

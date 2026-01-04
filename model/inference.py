@@ -29,6 +29,7 @@ class ModelInference:
         Returns:
             Tuple of (padded_tensor, pad_info) where pad_info contains padding information
         """
+        raise NotImplementedError("This method is deprecated. Use the new inference_with_padding method instead.")
         # Calculate stride factor based on ResNet layers
         num_layers = len(self.super_params.layers)
         stride_factor = 2 ** (num_layers - 1)  # Encoder downsampling factor
@@ -82,6 +83,7 @@ class ModelInference:
         Returns:
             Tensor with padding removed and potentially downscaled
         """
+        raise NotImplementedError("This method is deprecated. Use the new inference_with_padding method instead.")
         # Extract padding information
         original_shape = pad_info['original_shape']
         pad_h = pad_info['pad_h']
@@ -159,6 +161,7 @@ class ModelInference:
         Returns:
             Model predictions with padding removed
         """
+        raise NotImplementedError("This method is deprecated. Use the new inference_with_padding method instead.")
         # Apply padding
         padded_inputs, pad_info = self._apply_resnet_padding(inputs)
         

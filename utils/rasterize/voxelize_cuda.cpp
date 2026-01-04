@@ -55,7 +55,7 @@ torch::Tensor voxelize_cuda_forward(
     TORCH_CHECK(shape_dhw.dim() == 1 && shape_dhw.size(0) == 3, "shape_dhw must be [3]");
     
     TORCH_CHECK(vertices.dtype() == torch::kFloat32, "vertices must be float32");
-    TORCH_CHECK(faces.dtype() == torch::kInt32 || faces.dtype() == torch::kInt64, "faces must be int32 or int64");
+    TORCH_CHECK(faces.dtype() == torch::kInt32 || faces.dtype() == torch::kInt64, "faces must be int32 or int32");
     TORCH_CHECK(grid_points.dtype() == torch::kFloat32, "grid_points must be float32");
     
     // Convert faces to int32 if needed

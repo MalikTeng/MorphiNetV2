@@ -13,45 +13,13 @@
         2.3. resize the cropped data to have the same size 16 x 16 x 16.
     3. compute the signed distance fields from the ground truth segmentation using edt package, https://github.com/seung-lab/euclidean-distance-transform-3d.
 """
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-from collections.abc import Callable
-from functools import partial
-from typing import Any, Dict, Union
-
-from monai.networks.nets import DynUNet
-from monai.networks.layers.factories import Conv, Norm, Pool
-from monai.networks.layers.utils import get_pool_layer
-from monai.utils import ensure_tuple_rep
-from monai.utils.module import look_up_option
-from monai.transforms.utils import distance_transform_edt
-
-from .parts import ResNetBlock, ResNetBottleneck
-
-__all__ = ["GSN", "Subdivision", "LocalMeshWarper", "UpscalingResNet"]
-
-"""
-    implementation of forming Loop subdivision method as message passing neural network. this takes Pytorch3d.Mesh object as input and output. 
-    
-    subdvided faces will have the same orientation as the original fases, i.e., if the original faces are counter-clockwise then the subdivided faces are alse counter-clockewise. presume that the input mesh is homogeneous, i.e., all faces are triangles.
-    
-    a walkthrough of the method follows,
-    1. create a faces indices for the subdivided mesh that is pre-computed and can be used for multiple meshes that has the same topology.
-    2. create message passing using torch-geometric.MessagePassing base class with 'mean' aggregate method.
-    3. create new vertices using the passage method and concatenate them to the original vertices.
-    4. output the new mesh with the same topology as the original mesh.
-"""
 from typing import List
 import torch
-from torch import Tensor
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear, LayerNorm, LeakyReLU, Sequential
-
+from monai.networks.layers.factories import Conv, Norm
+from pytorch3d.ops import taubin_smoothing
 from pytorch3d.structures import Meshes
-
 from torch_geometric.typing import (
     Adj,
     OptPairTensor,
@@ -60,6 +28,10 @@ from torch_geometric.typing import (
 from torch_geometric.nn import MessagePassing, DeepGCNLayer, GCNConv
 from torch_geometric.nn.dense.linear import Linear as DenseLinear
 from torch_geometric.utils import add_self_loops,degree
+
+from .parts import ResNetBlock, ResNetBottleneck
+
+__all__ = ["GSN", "Subdivision", "LocalMeshWarper", "UpscalingResNet"]
 
 
 # function for pre-computed faces index
@@ -262,7 +234,23 @@ class LocalMeshWarper(nn.Module):
         sampled_directions = result[..., [2, 1, 0]]
         
         return sampled_directions
+    
+    # def mesh_quality(self, meshes):
+    #     import trimesh
+    #     import pyvista as pv
+    #     import numpy as np
+    #     mesh = trimesh.Trimesh(
+    #         vertices=meshes.verts_packed().cpu().numpy(),
+    #         faces=meshes.faces_packed().cpu().numpy(),
+    #     )
+    #     mesh_pv = pv.wrap(mesh)
         
+    #     aspect = np.median(np.array(mesh_pv.compute_cell_quality('aspect_ratio').active_scalars))
+    #     jacobian_values = np.array(mesh_pv.compute_cell_quality('scaled_jacobian').active_scalars)
+    #     jacobian = np.median(jacobian_values)
+
+    #     print(f"DEBUG: mesh_quality: aspect={aspect}, jacobian={jacobian}")
+
     def forward(self, meshes, df_preds, vert_labels):
         """
         Apply local offset warping to mesh vertices based on distance fields.
@@ -281,7 +269,7 @@ class LocalMeshWarper(nn.Module):
         # Use the same precision as the mesh vertices (AMP compatible)
         verts_dtype = verts.dtype
         device = verts.device
-        
+
         # Process both LV and RV related vertices for LV+RV template mesh
         for i, l in zip([1, 0, 2, 0], [[0], [2], [1], [3]]):  # lv-endo, lv-epi, rv-endo, rv-epi
             df_pred = df_preds[:, i].to(dtype=verts_dtype, device=device)
@@ -318,8 +306,8 @@ class LocalMeshWarper(nn.Module):
                 # Transform verts back to NDC space
                 verts = 2 * (verts / d - 0.5)
 
-        # Update meshes with warped vertices
         meshes = meshes.update_padded(verts)
+
         return meshes
 
 
@@ -366,6 +354,15 @@ class GSN(nn.Module):
 
             # 4. output the new mesh
             level_outs.append(meshes)
+
+        # 5. Apply mesh warping post-processing during evaluation
+        if not self.training and df_preds is not None and labels_levels is not None:
+            warped_level_outs = []
+            for l, meshes in enumerate(level_outs):
+                warped_meshes = self.mesh_warper(meshes, df_preds, labels_levels[l])
+                warped_meshes = taubin_smoothing(warped_meshes, 0.5, -0.53, 10)
+                warped_level_outs.append(warped_meshes)
+            level_outs = warped_level_outs
 
         return level_outs
 

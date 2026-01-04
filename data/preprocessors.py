@@ -37,7 +37,7 @@ class DataPreprocessor:
         self.super_params = super_params
         self.dataset = dataset
     
-    def _create_post_transform(self, keys=["pred", "label"], modal="ct", to_gpu=True, decoder_size=False):
+    def _create_post_transform(self, keys=["pred", "label"], modal="ct", to_gpu=True, decoder_size=False, nearest_interpolate=False):
         """
         Create a unified post-transform pipeline that can handle both CPU/GPU and regular/decoder-sized outputs.
         
@@ -46,6 +46,7 @@ class DataPreprocessor:
             modal: Modal type ("ct" or "mr")
             to_gpu: Whether to move final output to GPU
             decoder_size: Whether to use decoder-sized transform (upscaled) or regular transform
+            nearest_interpolate: Whether use nearest interpolate to segmentation prediction created by UNET
         
         Returns:
             Composed transform pipeline
@@ -65,39 +66,46 @@ class DataPreprocessor:
         target_device = DEVICE if to_gpu else "cpu"
         
         # Define spacing vector for this modal - ISOTROPIC for all modalities
-        spacing_vector = [2.0, 2.0, 2.0]
+        spacing_vector = [2, 2, 2]
                 
         # Dynamic mode configuration based on key types
         mode_list = []
         for key in keys:
-            if 'pred' in key.lower() or 'image' in key.lower():
+            if ('pred' in key.lower() or 'image' in key.lower()) and not nearest_interpolate:
                 mode_list.append('bilinear')
-            elif 'label' in key.lower():
+            elif 'label' in key.lower() or nearest_interpolate:
                 mode_list.append('nearest')
             else:
                 mode_list.append('bilinear')
-        
+
         # Convert to appropriate format for MONAI
         if len(mode_list) == 1:
             spacing_mode = mode_list[0]
         else:
             spacing_mode = tuple(mode_list)
-                
-        # Build transform list
+
+        # Build transform list - Apply ReliableSpacingd LAST to ensure pixdim preservation
         transforms = [
             SequentialTransformd(keys, sequence="s:xy f:x f:z", allow_missing_keys=True),
             Spacingd(keys, spacing_vector, mode=spacing_mode, allow_missing_keys=True),
-            CropForegroundd(keys, source_key=keys[1] if len(keys) > 1 else keys[0], allow_missing_keys=True),
-            Maskd(keys + [modal], allow_missing_keys=True),
+            CropForegroundd(
+                keys, 
+                source_key=keys[1] if len(keys) > 1 else keys[0], 
+                margin=3, 
+                allow_missing_keys=True,
+            ),
+            Maskd(keys, allow_missing_keys=True),
             FlexResized(
                 keys, 
-                (-1, self.super_params.crop_window_size[0], -1), 
+                (-1, target_size, -1), 
+                force_nearest=True if nearest_interpolate else False,
                 allow_missing_keys=True
             ),
             Resized(
                 keys, 
                 target_size, 
-                size_mode="longest", mode=spacing_mode, 
+                size_mode="longest", 
+                mode=spacing_mode, 
                 allow_missing_keys=True
             ),
             ResizeWithPadOrCropd(
@@ -226,7 +234,7 @@ class DataPreprocessor:
             keys=["label"], 
             modal=modal, 
             to_gpu=False,
-            decoder_size=decoder_size
+            decoder_size=decoder_size,
         )
         
         # Move to CPU for memory-efficient processing
@@ -247,7 +255,7 @@ class DataPreprocessor:
         
         return processed_true
     
-    def _memory_efficient_post_transform(self, seg_pred, seg_true, modal, to_gpu=True, decoder_size=False):
+    def _memory_efficient_post_transform(self, seg_pred, seg_true, modal, to_gpu=True, decoder_size=False, **kwargs):
         """
         Memory-efficient post-transform processing that handles tensors directly.
         Unifies tensor shapes to 5D before processing each item in the batch.
@@ -270,6 +278,7 @@ class DataPreprocessor:
             modal=modal, 
             to_gpu=False,  # Always process on CPU first to save memory
             decoder_size=decoder_size,
+            nearest_interpolate=kwargs.get('nearest_interpolate', False)  # Allow skipping masking if specified
         )
 
         # Move to CPU for memory efficiency before processing
@@ -355,29 +364,9 @@ class DataPreprocessor:
         """
         Convert segmentation tensor to one-hot encoding.
         
-        Args:
-            seg_tensor: Segmentation tensor
-            num_classes: Number of classes
-        
-        Returns:
-            One-hot encoded tensor
+        Deprecated: using model/inference._convert_to_onehot instead
         """
-        # Deprecated: using model/inference._convert_to_onehot instead
         raise NotImplementedError("Use model/inference._convert_to_onehot instead")
-        # Use PyTorch's built-in one-hot function
-        if seg_tensor.dim() == 4:  # (C, D, H, W)
-            seg_tensor = seg_tensor.squeeze(0)  # Remove channel dimension
-        
-        # Convert to long tensor for one-hot encoding
-        seg_long = seg_tensor.long()
-        
-        # Create one-hot encoding
-        one_hot = torch.nn.functional.one_hot(seg_long, num_classes=num_classes)
-        
-        # Rearrange dimensions: (D, H, W, C) -> (C, D, H, W)
-        one_hot = one_hot.permute(-1, 0, 1, 2)
-        
-        return one_hot.float()
     
     def _prepare_slice_for_wandb(self, slice_tensor, is_segmentation, num_classes=None):
         """

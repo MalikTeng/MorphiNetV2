@@ -99,9 +99,12 @@ def pre_transform(
             CopyItemsd(keys[1], names=f"{keys[1]}_ds"),
             SequentialTransformd(f"{keys[1]}_ds", sequence="s:xy f:x f:z"),
             Spacingd(f"{keys[1]}_ds", [spacing] * 3, mode="nearest"),
-            CropForegroundd(f"{keys[1]}_ds", source_key=f"{keys[1]}_ds"),
+            CropForegroundd(f"{keys[1]}_ds", source_key=f"{keys[1]}_ds", margin=3),
             # create distance field from down-sampled label at decoder size
-            Maskd([f"{keys[1]}_ds", f"{keys[1][:2]}"], allow_missing_keys=True),
+            Maskd(
+                [f"{keys[1]}_ds", f"{keys[1][:2]}"], 
+                allow_missing_keys=True
+                ),
             FlexResized(
                 f"{keys[1]}_ds", 
                 (-1, crop_window_size[0], -1),
@@ -125,7 +128,7 @@ def pre_transform(
     if section == "train":
         if phase == "unet":
             # Only apply random crop for UNet phase
-            transforms.append(
+            transforms.extend([
                 RandCropByPosNegLabeld(
                     keys, 
                     label_key=keys[1], 
@@ -135,8 +138,10 @@ def pre_transform(
                     num_samples=4,
                     allow_smaller=True,
                     allow_missing_keys=True
-                )
-            )
+                ),
+                RandFlipd(keys, prob=0.5, spatial_axis=[0]),  # H
+                RandFlipd(keys, prob=0.5, spatial_axis=[1]),  # W
+            ])
 
         transforms.extend([
             # spatial augmentation
@@ -148,8 +153,6 @@ def pre_transform(
                 padding_mode="constant",
                 align_corners=(True, None), prob=0.15,
             ),
-            RandFlipd(keys, prob=0.5, spatial_axis=[0]),  # H
-            RandFlipd(keys, prob=0.5, spatial_axis=[1]),  # W
             RandGaussianNoised(keys[0], std=0.01, prob=0.15),
             RandGaussianSmoothd(
                 keys[0], 

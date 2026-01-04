@@ -29,7 +29,7 @@ def config():
     parser = argparse.ArgumentParser(description="MorphiNet Training Pipeline")
     
     # Mode parameters
-    parser.add_argument("--mode", type=str, default="offline", 
+    parser.add_argument("--mode", type=str, default="disabled", 
                        help="Wandb mode: 'disabled', 'offline', 'online'")
     parser.add_argument("--template_mesh_dir", type=str,
                        default="./template/template_mesh-myo.obj",
@@ -42,11 +42,11 @@ def config():
                        help="Which dataset to test: 'acdc', 'mmwhs', 'cap', or 'scotheart'")
 
     # Training parameters
-    parser.add_argument("--max_epochs", type=int, default=3, 
+    parser.add_argument("--max_epochs", type=int, default=2, 
                        help="Maximum number of epochs")
-    parser.add_argument("--pretrain_epochs", type=int, default=1, 
+    parser.add_argument("--pretrain_epochs", type=int, default=0, 
                        help="Number of epochs for UNet training")
-    parser.add_argument("--train_epochs", type=int, default=2, 
+    parser.add_argument("--train_epochs", type=int, default=1, 
                        help="Number of epochs for ResNet training")
     parser.add_argument("--reduce_count_down", type=int, default=-1, 
                        help="Countdown for mesh face reduction")
@@ -68,10 +68,10 @@ def config():
                        help="Laplacian smoothing loss coefficient")
     parser.add_argument("--iteration", type=int, default=10, 
                        help="Distance field warping iterations")
-    parser.add_argument("--sigmoid_scale_factor", type=float, default=0.83, 
-                       help="Sigmoid mask scale factor")
-    parser.add_argument("--mask_threshold", type=float, default=0.12, 
-                       help="Distance map mask threshold")
+    # parser.add_argument("--sigmoid_scale_factor", type=float, default=0.83, 
+    #                    help="Sigmoid mask scale factor")
+    # parser.add_argument("--mask_threshold", type=float, default=0.12, 
+    #                    help="Distance map mask threshold")
 
     # Data parameters
     parser.add_argument("--ct_ratio", type=float, default=1.0, 
@@ -101,7 +101,7 @@ def config():
     parser.add_argument("--layers", type=int, nargs='+', 
                        default=[1, 2, 2, 4], 
                        help="ResNet layer configuration")
-    parser.add_argument("--upscale_ratio", type=int, default=2, 
+    parser.add_argument("--upscale_ratio", type=int, default=8, 
                        help="ResNet upscaling ratio")
     parser.add_argument("--subdiv_levels", type=int, default=2, 
                        help="Graph subdivision levels")
@@ -303,20 +303,20 @@ def main():
     print(f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     print(f"Mode: {super_params.mode}")
     
-    # if super_params.inference_only:
-    print("Running in INFERENCE mode")
-    print(f"Test dataset: {super_params.test_dataset}")
-    print(f"Max samples: {super_params.max_samples}")
-    
-    # Run inference testing
-    test_morphinet(super_params)
-    # else:
-    #     print("Running in TRAINING mode")
-    #     print(f"Training validation: UNet(CT+MR) -> ResNet(CT) -> GSN(CT)")
-    #     print(f"Max epochs: {super_params.max_epochs}")
+    if super_params.inference_only:
+        print("Running in INFERENCE mode")
+        print(f"Test dataset: {super_params.test_dataset}")
+        print(f"Max samples: {super_params.max_samples}")
         
-    #     # Train using modular architecture
-    #     train_morphinet(super_params)
+        # Run inference testing
+        test_morphinet(super_params)
+    else:
+        print("Running in TRAINING mode")
+        print(f"Training validation: UNet(CT+MR) -> ResNet(CT) -> GSN(CT)")
+        print(f"Max epochs: {super_params.max_epochs}")
+        
+        # Train using modular architecture
+        train_morphinet(super_params)
 
 
 if __name__ == '__main__':

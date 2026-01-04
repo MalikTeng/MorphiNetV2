@@ -31,30 +31,25 @@ class Maskd(MapTransform):
             except KeyError:
                 continue
             else:
-                # Ensure we work with CPU arrays to avoid GPU memory issues
-                if hasattr(array, 'is_cuda') and array.is_cuda:
-                    array = array.cpu()
-                
-                array = array.get_array()
+                array = array.get_array() # (C, H, D, W)
 
                 if data["modal"] == "ct" and "pred" in key:
-                    # mask the CTA images near the basal and apex plane
+                    # mask the CT images near the basal and apex plane
                     mask = np.zeros_like(array).astype(bool)
-                    mask[:, 6:-6] = True
+                    mask[:, :, 16:-16] = True
                     array[~mask] = array.min()
 
                     data[key] = MetaTensor(array, affine=data[key].affine, 
                                            applied_operations=data[key].applied_operations)
                 
                 elif data["modal"] == "mr":
-                    # pad slices on the top and bottom of the image
-                    array = np.pad(array, ((0, 0), (6, 6), (0, 0), (0, 0)), mode="constant", constant_values=array.min())
+                    # pad slices on the top and bottom along the SAX direction
+                    array = np.pad(array, ((0, 0), (0, 0), (16, 16), (0, 0)), mode="constant", constant_values=array.min())
                     # update the affine
-                    affine = data[key].affine.clone()
-                    affine[:3, -1] -= 6 * data[key].pixdim[0]
+                    affine = data[key].affine.clone()   # affine is 4x4
+                    affine[:3, -2] -= 16 * data[key].pixdim[0]
                     data[key] = MetaTensor(array, affine=affine,
                                            applied_operations=data[key].applied_operations)
-
 
         return data
 
@@ -74,6 +69,7 @@ class FlexResized(MapTransform):
     def __init__(self, keys: KeysCollection, size: tuple, allow_missing_keys: bool = False, 
                  force_nearest: bool = False, min_dimension_size: int = 4) -> None:
         super().__init__(keys, allow_missing_keys)
+        assert len(size) == 3, "Size must be a 3-tuple"
         self.target_size = np.array([int(s) for s in size])
         self.allow_missing_keys = allow_missing_keys
         self.force_nearest = force_nearest
@@ -102,26 +98,12 @@ class FlexResized(MapTransform):
         reference_key = label_key if label_key else available_keys[0]
         
         # Get current data shape (excluding channel dimension)
-        if hasattr(data[reference_key], 'get_array'):
-            current_shape = np.array(data[reference_key].get_array().shape[1:])  # Skip channel dim
-        else:
-            current_shape = np.array(data[reference_key].shape[1:])  # Skip channel dim
+        current_shape = np.array(data[reference_key].get_array().shape[1:])  # Skip channel dim
         
-        
-        # Handle dimension mismatch: ensure target_size and current_shape have same length
-        if len(self.target_size) != len(current_shape):
-            # Pad target_size with -1 if it's shorter, or truncate if longer
-            if len(self.target_size) < len(current_shape):
-                padded_size = np.full(len(current_shape), -1, dtype=int)
-                padded_size[:len(self.target_size)] = self.target_size
-                target_size = padded_size
-            else:
-                target_size = self.target_size[:len(current_shape)]
-        else:
-            target_size = self.target_size
+        assert len(self.target_size) == len(current_shape), "Target size and current shape must have the same length"
         
         # Replace -1 with current dimensions
-        final_size = np.where(target_size == -1, current_shape, target_size)
+        final_size = np.where(self.target_size == -1, current_shape, self.target_size)
         
         # IMPROVED CALCULATION: Prevent dimension compression
         if len(final_size) > 1 and final_size[1] != current_shape[1]:
@@ -147,7 +129,6 @@ class FlexResized(MapTransform):
         # Final validation: ensure no zero dimensions
         if any(dim <= 0 for dim in new_shape):
             new_shape = [max(dim, self.min_dimension_size) for dim in new_shape]
-        
         
         # Apply resize transformation
         if pred_key and label_key:
@@ -554,8 +535,11 @@ class UniversalCanonicalResampled(MapTransform):
             allow_missing_keys=allow_missing_keys
         )
         
-        # ACDC data now pre-transformed - no sequential transformation needed
-        self.acdc_transform = None
+        # ACDC sequential transformation (handling orientation error)
+        if dataset == "acdc":
+            self.acdc_transform = SequentialTransformd(keys, sequence="f:x f:z")
+        else:
+            self.acdc_transform = None
         
         # Setup dataset canonicalizer
         self.canonicalizer = DatasetCanonicalizer(keys, dataset, modal, allow_missing_keys)
@@ -597,9 +581,9 @@ class UniversalCanonicalResampled(MapTransform):
         # Step 1: Load data
         data_dict = self.loader(data_dict)
         
-        # Step 2: Skip ACDC transformation (data now pre-transformed)
-        # if self.acdc_transform:
-        #     data_dict = self.acdc_transform(data_dict)
+        # Step 2: Skip ACDC transformation
+        if self.acdc_transform:
+            data_dict = self.acdc_transform(data_dict)
         
         # Step 3: Apply dataset canonicalization
         data_dict = self.canonicalizer(data_dict)
@@ -1352,4 +1336,3 @@ class DynamicIntensityRangeScalesd(MapTransform):
                     raise KeyError(f"Error processing key '{key}' in DynamicIntensityRangeScalesd: {str(e)}")
         
         return data_dict
-

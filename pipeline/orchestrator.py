@@ -20,8 +20,8 @@ try:
     from training.validators import MorphiNetValidator
     from training.losses import LossManager
     from utils.checkpoint_manager import CheckpointManager
-    # Import Trimesh rasterizer for voxelization
-    from utils.rasterize.voxelize_trimesh import VoxelizeTrimesh
+    # Import Open3D rasterizer for voxelization
+    from utils.rasterize.voxelize_open3d import VoxelizeOpen3D
 except ImportError as e:
     print(f"Import error in orchestrator: {e}")
     print("Make sure all modules are properly installed and accessible")
@@ -177,7 +177,7 @@ class MorphiNetOrchestrator:
         # Convert Trimesh object to PyTorch3D Meshes object
         template_mesh = Meshes(
             verts=[torch.tensor(template_mesh_trimesh.vertices, dtype=torch.float32)],
-            faces=[torch.tensor(template_mesh_trimesh.faces, dtype=torch.int64)]
+            faces=[torch.tensor(template_mesh_trimesh.faces, dtype=torch.int32)]
         ).to(DEVICE)
         
         self.mesh_ops = MeshOperations(self.super_params)
@@ -190,13 +190,13 @@ class MorphiNetOrchestrator:
         )
         
         # Initialize rasterizer using Trimesh signed-distance field approach
-        raster_size = [int(i // self.super_params.pixdim[0] * self.super_params.upscale_ratio) 
-                      for i in self.super_params.crop_window_size]
-        # raster_size = [128, 128, 128]
+        # raster_size = [int(i // self.super_params.pixdim[0] * self.super_params.upscale_ratio) 
+        #                  for i in self.super_params.crop_window_size]
+        raster_size = [128, 128, 128]
         
-        # Use VoxelizeTrimesh with CUDA acceleration for high-performance voxelization
-        self.rasterizer = VoxelizeTrimesh(shape=raster_size, chunk_size=250_000, use_cuda=True)
-        print("Rasterizer: GPU-accelerated Trimesh signed-distance voxelization")
+        # Use VoxelizeOpen3D with occupancy method for solid voxelization
+        self.rasterizer = VoxelizeOpen3D(shape=raster_size, method='occupancy')
+        print("Rasterizer: Open3D raycasting occupancy voxelization")
         
         # Store subdivision in mesh_ops for access by other components
         self.mesh_ops.subdivided_faces = self.subdivided_faces
@@ -347,8 +347,8 @@ class MorphiNetOrchestrator:
         else:
             print(f"ResNet phase: SKIPPED (train_epochs={self.super_params.train_epochs} <= pretrain_epochs={self.super_params.pretrain_epochs})")
         
-        # Phase 3: GSN Training (only if max_epochs > train_epochs AND train_epochs > pretrain_epochs)
-        if self.super_params.max_epochs > self.super_params.train_epochs and self.super_params.train_epochs > self.super_params.pretrain_epochs:
+        # Phase 3: GSN Training (only if max_epochs > train_epochs
+        if self.super_params.max_epochs > self.super_params.train_epochs:
             print(f"GSN phase: epochs {self.super_params.train_epochs} to {self.super_params.max_epochs}")
             self.train_phase("gsn", self.super_params.train_epochs, self.super_params.max_epochs)
         else:

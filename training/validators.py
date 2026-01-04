@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn.functional as F
 import numpy as np
 import wandb
 from scipy.ndimage import binary_dilation
@@ -98,10 +99,6 @@ class MorphiNetValidator:
             KeepLargestConnectedComponent(is_onehot=True, independent=False, connectivity=3),
         ])
         
-        # Sigmoid parameters
-        self.sigmoid_scale_factor = super_params.sigmoid_scale_factor
-        self.mask_threshold = super_params.mask_threshold
-        
         # Rasterizer
         if hasattr(mesh_ops, 'rasterizer'):
             self.rasterizer = mesh_ops.rasterizer
@@ -142,8 +139,7 @@ class MorphiNetValidator:
             # Visualization 1: Segmentation Ground Truth vs Mesh Prediction
             draw_plotly(
                 seg_true=cached_data["seg_true_ds"], 
-                seg_pred=cached_data["subdiv_mesh"],
-                # mesh_pred=cached_data["subdiv_mesh"],
+                mesh_pred=cached_data["subdiv_mesh"],
                 save_html=True,
                 save_dir=visualization_dir,
                 filename="seg_true_ds_vs_mesh_pred.html",
@@ -187,42 +183,42 @@ class MorphiNetValidator:
             if os.path.exists(png_path):
                 log_data_viz["gsn/template_vs_seg_true"] = wandb.Image(png_path)
             
-            # Visualization 4: Distance Field Prediction vs Ground Truth
-            if "df_pred" in cached_data:
-                draw_plotly(
-                    seg_true=cached_data["seg_true_ds"], 
-                    df_pred=cached_data["df_pred"],
-                    save_html=True,
-                    save_dir=visualization_dir,
-                    filename="seg_true_ds_vs_df_pred.html",
-                    export_static=True,
-                    export_png_filename="seg_true_ds_vs_df_pred.png"
-                )
+            # # Visualization 4: Distance Field Prediction vs Ground Truth
+            # if "df_pred" in cached_data:
+            #     draw_plotly(
+            #         seg_true=cached_data["seg_true_ds"], 
+            #         df_pred=cached_data["df_pred"],
+            #         save_html=True,
+            #         save_dir=visualization_dir,
+            #         filename="seg_true_ds_vs_df_pred.html",
+            #         export_static=True,
+            #         export_png_filename="seg_true_ds_vs_df_pred.png"
+            #     )
                 
-                png_path = os.path.join(visualization_dir, "seg_true_ds_vs_df_pred.png")
-                if os.path.exists(png_path):
-                    log_data_viz["gsn/seg_true_vs_df_pred"] = wandb.Image(png_path)
+            #     png_path = os.path.join(visualization_dir, "seg_true_ds_vs_df_pred.png")
+            #     if os.path.exists(png_path):
+            #         log_data_viz["gsn/seg_true_vs_df_pred"] = wandb.Image(png_path)
             
-            # Visualization 5: Distance Field Distribution Plot (if available)
-            if "df_true" in cached_data and "df_pred" in cached_data:
-                try:
-                    import plotly.figure_factory as ff
+            # # Visualization 5: Distance Field Distribution Plot (if available)
+            # if "df_true" in cached_data and "df_pred" in cached_data:
+            #     try:
+            #         import plotly.figure_factory as ff
                     
-                    # Ensure tensors are on CPU before conversion to numpy
-                    dist_fig = ff.create_distplot(
-                        [cached_data["df_true"][-1].flatten().cpu().numpy(), 
-                         cached_data["df_pred"][-1].flatten().cpu().numpy()],
-                        group_labels=["df_true", "df_pred"],
-                        colors=["#EF553B", "#3366CC"],
-                        bin_size=0.1
-                    )
+            #         # Ensure tensors are on CPU before conversion to numpy
+            #         dist_fig = ff.create_distplot(
+            #             [cached_data["df_true"][-1].flatten().cpu().numpy(), 
+            #              cached_data["df_pred"][-1].flatten().cpu().numpy()],
+            #             group_labels=["df_true", "df_pred"],
+            #             colors=["#EF553B", "#3366CC"],
+            #             bin_size=0.1
+            #         )
                     
-                    # Save the distribution plot
-                    dist_fig.write_image(f"{visualization_dir}/df_true_vs_pred.png")
-                    log_data_viz["gsn/df_true_vs_pred"] = wandb.Image(f"{visualization_dir}/df_true_vs_pred.png")
+            #         # Save the distribution plot
+            #         dist_fig.write_image(f"{visualization_dir}/df_true_vs_pred.png")
+            #         log_data_viz["gsn/df_true_vs_pred"] = wandb.Image(f"{visualization_dir}/df_true_vs_pred.png")
                     
-                except Exception as e:
-                    print(f"Warning: Could not generate distance field distribution plot: {e}")
+            #     except Exception as e:
+            #         print(f"Warning: Could not generate distance field distribution plot: {e}")
             
             print("Visualizations saved successfully!")
             
@@ -477,20 +473,15 @@ class MorphiNetValidator:
                     seg_pred, seg_true, "ct", to_gpu=True, decoder_size=False)
                                 
                 # Calculate mask for refinement
-                binary_mask_pred = (torch.argmax(seg_pred_ds_decoder_size, dim=1, keepdim=True) == 0)
-                dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
-                mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor + 1).detach()
-                mask = mask * binary_mask_pred
-                mask[mask < self.mask_threshold] = 0
+                binary_mask_pred = (torch.argmax(seg_pred_ds_decoder_size, dim=1, keepdim=True) > 0)
+                mask = torch.zeros_like(binary_mask_pred)
+                seg_np = binary_mask_pred[0, 0].cpu().numpy().astype(bool)
+                dilated_np = binary_dilation(seg_np, iterations=20)
+                mask[0, 0] = torch.from_numpy(dilated_np.astype(np.float32)).to(binary_mask_pred.device)
+                mask[binary_mask_pred == 1] = 0
                 
-                # Apply decoder (ResNet) with padding
-                seg_pred_ds_padded, pad_info = self.inference._apply_resnet_padding(seg_pred_ds)
-                
-                resnet_output_padded = self.decoder(seg_pred_ds_padded)
-                
-                resnet_output = self.inference._remove_resnet_padding(resnet_output_padded, pad_info)
-                                
                 # Combine predictions (ResNet refined segmentation)
+                resnet_output = self.decoder(seg_pred_ds)
                 seg_pred_ds_refined = seg_pred_ds_decoder_size + mask * resnet_output
                 
                 # Generate downsampled ground truth at decoder size
@@ -606,18 +597,15 @@ class MorphiNetValidator:
                     seg_pred, seg_true, "ct", to_gpu=True, decoder_size=False)
                 
                 # Calculate mask for refinement
-                binary_mask_pred = (torch.argmax(seg_pred_ds_decoder_size, dim=1, keepdim=True) == 0)
-                dist_map_pred = (-distance_transform_edt(binary_mask_pred.squeeze(1)) + distance_transform_edt(~binary_mask_pred.squeeze(1))).unsqueeze(1)
-                mask = torch.sigmoid(dist_map_pred * self.sigmoid_scale_factor + 1).detach()
-                mask = mask * binary_mask_pred
-                mask[mask < self.mask_threshold] = 0
-                
-                # Apply decoder (ResNet) with padding
-                seg_pred_ds_padded, pad_info = self.inference._apply_resnet_padding(seg_pred_ds)
-                resnet_output_padded = self.decoder(seg_pred_ds_padded)
-                resnet_output = self.inference._remove_resnet_padding(resnet_output_padded, pad_info)
+                binary_mask_pred = (torch.argmax(seg_pred_ds_decoder_size, dim=1, keepdim=True) > 0)
+                mask = torch.zeros_like(binary_mask_pred)
+                seg_np = binary_mask_pred[0, 0].cpu().numpy().astype(bool)
+                dilated_np = binary_dilation(seg_np, iterations=20)
+                mask[0, 0] = torch.from_numpy(dilated_np.astype(np.float32)).to(binary_mask_pred.device)
+                mask[binary_mask_pred == 1] = 0
                 
                 # Combine predictions
+                resnet_output = self.decoder(seg_pred_ds)
                 seg_pred_ds = seg_pred_ds_decoder_size + mask * resnet_output
                 seg_pred_ds = torch.stack([self.pred_transform(i) for i in seg_pred_ds])
                 
@@ -628,12 +616,15 @@ class MorphiNetValidator:
                 myo = (seg_pred_ds == 2)
                 df_pred = torch.stack([
                     distance_transform_edt(i[:, 0]) + distance_transform_edt(~i[:, 0]) 
-                    for i in [foreground, lv, rv, myo]], dim=1)
+                    for i in [foreground, lv, rv, myo]
+                    ], dim=1)
                 
                 df_metric_batch_decoder(df_pred, df_true)
                 
                 # Generate mesh predictions
-                template_mesh = self.mesh_ops.warp_template_mesh(df_pred)
+                template_mesh = self.mesh_ops.warp_template_mesh(
+                    F.interpolate(df_pred, size=(32, 32, 32), mode="trilinear", align_corners=False)
+                )
 
                 subdiv_mesh = self.GSN(template_mesh, self.mesh_ops.subdivided_faces.faces_levels, df_pred, self.mesh_ops.subdivided_faces.labels_levels)[-1]
                 
@@ -643,19 +634,22 @@ class MorphiNetValidator:
                 
                 seg_true_ds = (seg_true_ds == 2).to(torch.float32)
                 msh_metric_batch_decoder(voxeld_mesh, seg_true_ds)
-                
+
+                # For ease of demonstration, resize data before caching
+                seg_pred_ds = F.interpolate(seg_pred_ds, size=(16, 16, 16), mode="nearest-exact")
+                seg_true_ds = F.interpolate(seg_true_ds, size=(16, 16, 16), mode="nearest-exact")
+
                 # Cache data for visualization
                 if step == choice_case:
                     cached_data = {
-                        "df_true": df_true[0].cpu(),
-                        "df_pred": df_pred[0].cpu(),
+                        # "df_true": df_true[0].cpu(),
+                        # "df_pred": df_pred[0].cpu(),
                         "seg_pred_ds": seg_pred_ds[0].cpu(),
                         "seg_true_ds": seg_true_ds[0].cpu(),
-                        "subdiv_mesh": voxeld_mesh[0].cpu(),
-                        # "subdiv_mesh": subdiv_mesh[0].cpu(),
+                        "subdiv_mesh": subdiv_mesh[0].cpu(),
                         "template_mesh": template_mesh[0].cpu(),
                     }
-        
+
         # Calculate metrics
         eval_score_epoch = msh_metric_batch_decoder.aggregate().mean()
         df_score_epoch = df_metric_batch_decoder.aggregate().mean()
@@ -1049,7 +1043,7 @@ class MorphiNetValidator:
                         for b_idx in range(verts_b.shape[0]):
                             case_id = case_ids[b_idx] if b_idx < len(case_ids) else f"case_{step:04d}_{b_idx}"
                             save_obj(os.path.join(ablation_dir, f"{case_id}_unet_myo.obj"),
-                                     verts_b[b_idx].to(torch.float32), faces_b[b_idx].to(torch.int64))
+                                     verts_b[b_idx].to(torch.float32), faces_b[b_idx].to(torch.int32))
                 except Exception as e:
                     print(f"Warning: UNet mesh export failed: {e}")
 
@@ -1096,7 +1090,7 @@ class MorphiNetValidator:
                         for b_idx in range(verts_b.shape[0]):
                             case_id = case_ids[b_idx] if b_idx < len(case_ids) else f"case_{step:04d}_{b_idx}"
                             save_obj(os.path.join(ablation_dir, f"{case_id}_resnet_myo.obj"),
-                                     verts_b[b_idx].to(torch.float32), faces_b[b_idx].to(torch.int64))
+                                     verts_b[b_idx].to(torch.float32), faces_b[b_idx].to(torch.int32))
                 except Exception as e:
                     print(f"Warning: ResNet mesh export failed: {e}")
                 
@@ -1124,7 +1118,7 @@ class MorphiNetValidator:
                     for b_idx in range(verts_b.shape[0]):
                         case_id = case_ids[b_idx] if b_idx < len(case_ids) else f"case_{step:04d}_{b_idx}"
                         save_obj(os.path.join(ablation_dir, f"{case_id}_template_warped_myo.obj"),
-                                 verts_b[b_idx].to(torch.float32), faces_b[b_idx].to(torch.int64))
+                                 verts_b[b_idx].to(torch.float32), faces_b[b_idx].to(torch.int32))
                 except Exception as e:
                     print(f"Warning: Warped template mesh export failed: {e}")
 
@@ -1143,7 +1137,7 @@ class MorphiNetValidator:
                         for b_idx in range(verts_b.shape[0]):
                             case_id = case_ids[b_idx] if b_idx < len(case_ids) else f"case_{step:04d}_{b_idx}"
                             save_obj(os.path.join(ablation_dir, f"{case_id}_gsn_l{lvl_idx+1}_myo.obj"),
-                                     verts_b[b_idx].to(torch.float32), faces_b[b_idx].to(torch.int64))
+                                     verts_b[b_idx].to(torch.float32), faces_b[b_idx].to(torch.int32))
                 except Exception as e:
                     print(f"Warning: GSN multi-level export failed: {e}")
                 
@@ -1178,7 +1172,7 @@ class MorphiNetValidator:
                 for b_idx in range(B):
                     case_id = case_ids[b_idx] if b_idx < len(case_ids) else f"case_{step:04d}_{b_idx}"
                     V = verts_b[b_idx].to(torch.float32)
-                    F = faces_b[b_idx].to(torch.int64)
+                    F = faces_b[b_idx].to(torch.int32)
                     out_path = os.path.join(export_dir, f"{case_id}_myo.obj")
                     # Mesh is already in NDC and MYO; save as OBJ
                     try:
