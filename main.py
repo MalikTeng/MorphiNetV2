@@ -79,14 +79,14 @@ def config():
     parser.add_argument("--ct_json_dir", type=str, 
                        default="./dataset/dataset_task20_f0.json",
                        help="CT dataset JSON file")
-    parser.add_argument("--ct_data_dir", type=str, 
-                       default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset020_SCOTHEART",
+    parser.add_argument("--ct_data_dir", type=str,
+                       default="./data/ct",
                        help="CT data directory")
-    parser.add_argument("--mr_json_dir", type=str, 
+    parser.add_argument("--mr_json_dir", type=str,
                        default="./dataset/dataset_task11_f0.json",
                        help="MR dataset JSON file")
-    parser.add_argument("--mr_data_dir", type=str, 
-                       default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX",
+    parser.add_argument("--mr_data_dir", type=str,
+                       default="./data/mr",
                        help="MR data directory")
 
     # Model parameters
@@ -109,16 +109,16 @@ def config():
                        help="GSN hidden features")
 
     # Checkpoint parameters
-    parser.add_argument("--use_ckpt", type=str, 
-                        default="/mnt/data/Experiment/MorphiNet/Checkpoint/best/", 
-                        help="Checkpoint directory to resume from")
-    parser.add_argument("--ckpt_dir", type=str, default="/mnt/data/Experiment/MorphiNet/Checkpoint/", 
+    parser.add_argument("--use_ckpt", type=str,
+                        default="./pretrained",
+                        help="Checkpoint directory to resume from (release bundle: ./pretrained)")
+    parser.add_argument("--ckpt_dir", type=str, default="./checkpoints",
                        help="Directory to save checkpoints")
-    parser.add_argument("--run_id", type=str, default="", 
+    parser.add_argument("--run_id", type=str, default="",
                        help="Run identifier")
 
     # Output root for exported results (meshes, etc.) during testing
-    parser.add_argument("--output_root", type=str, default="/mnt/data/Experiment/MorphiNet/Result/",
+    parser.add_argument("--output_root", type=str, default="./results",
                        help="Root directory for MorphiNet testing outputs")
 
     # Rasterizer backend removed - now uses Trimesh exclusively for robust voxelization
