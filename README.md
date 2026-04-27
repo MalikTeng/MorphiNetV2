@@ -44,7 +44,30 @@ You can set up the required environment using Conda. We provide a helper script 
 ## External Resources
 
 > [!IMPORTANT]
-> The `pretrained` and `template` folders will be provided from a separate share drive. These directories are required for training and inference.
+> The `template/` folder is bundled with this repository. The `pretrained/` checkpoints are distributed as a release asset due to size (~155 MB compressed).
+
+Download and extract the pretrained weights from the latest [GitHub Release](https://github.com/MalikTeng/MorphiNetV2/releases/latest):
+
+```bash
+# From the repository root
+curl -L -o pretrained.tar.gz \
+    https://github.com/MalikTeng/MorphiNetV2/releases/latest/download/morphinet-pretrained.tar.gz
+tar -xzf pretrained.tar.gz && rm pretrained.tar.gz
+```
+
+After extraction the `pretrained/` directory at the repo root will contain:
+
+```
+pretrained/
+├── best_UNet_CT.pth
+├── best_UNet_MR.pth
+├── best_ResNet.pth
+├── best_GSN.pth
+├── best_subdivided_faces_l0.pth
+└── best_subdivided_faces_l1.pth
+```
+
+The default values of `--use_ckpt`, `--template_mesh_dir`, `--ckpt_dir`, and `--output_root` in `main.py` resolve against the repository root, so no further configuration is needed once the archive is extracted.
 
 ## Dataset Preparation
 
