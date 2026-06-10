@@ -8,6 +8,11 @@
 !/utils/rasterize/*.py
 !/utils/rasterize/*.cpp
 !/utils/rasterize/*.cu
+!/utils/path_config.py
+!/utils/process_nrrd_slices.py
+!/utils/update_dataset_json.py
+!/utils/testing/
+!/utils/testing/*.py
 
 # Data-loader
 !/data

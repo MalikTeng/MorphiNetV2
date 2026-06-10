@@ -8,7 +8,7 @@
 
 A multilayer graph subdivision network (GSN) refines these geometries while maintaining dense point correspondence, suitable for computational analysis. MorphiNet achieves state-of-the-art bi-ventricular myocardium reconstruction and delivers 50× faster inference than comparable neural implicit function methods.
 
-For more details, please refer to our paper: [Arxiv](https://arxiv.org/abs/2412.10985).
+For more details, please refer to the published [IEEE TMI paper](https://doi.org/10.1109/TMI.2026.3683925) or the [arXiv preprint](https://arxiv.org/abs/2412.10985).
 
 ## Environment Preparation
 
@@ -41,15 +41,91 @@ You can set up the required environment using Conda. We provide a helper script 
     ```
 
 
+## Path Configuration
+
+MorphiNet reads project-specific runtime paths from `config.env` and helper shell scripts read Conda settings from `conda.env`. Both files are plain shell-compatible `KEY=VALUE` files and are safe to edit for your machine.
+
+Default paths are project-relative so a checkout can run without user-specific absolute directories:
+
+```bash
+# config.env
+export MORPHINET_ACDC_DATA_DIR="./dataset/Dataset021_ACDC"
+export MORPHINET_MMWHS_DATA_DIR="./dataset/Dataset022_MMWHS_CT"
+export MORPHINET_CAP_DATA_DIR="./dataset/Dataset011_CAP_SAX"
+export MORPHINET_SCOTHEART_DATA_DIR="./dataset/Dataset020_SCOTHEART"
+export MORPHINET_CKPT_DIR="./checkpoints"
+export MORPHINET_USE_CKPT="./pretrained"
+export MORPHINET_OUTPUT_ROOT="./results"
+```
+
+```bash
+# conda.env
+export CONDA_ROOT="${HOME}/miniconda3"
+export CONDA_ENV_NAME="morphinet"
+```
+
+For the default CLI commands, place or symlink raw datasets under `./dataset/` using the directory names above. The JSON split files remain in `./dataset/*.json`; the raw image roots should contain their expected `imagesTr`/`labelsTr` or `imagesTs`/`labelsTs` subdirectories. Put downloaded pretrained weights in `./pretrained/`, training checkpoints in `./checkpoints/`, and inference exports will be written under `./results/` unless overridden.
+
+Every value can also be overridden for one command without editing files:
+
+```bash
+MORPHINET_ACDC_DATA_DIR=/data/Dataset021_ACDC \
+MORPHINET_OUTPUT_ROOT=/scratch/morphinet-results \
+python main.py --inference_only --test_dataset acdc
+```
+
+CLI flags such as `--ct_data_dir`, `--mr_data_dir`, `--use_ckpt`, `--ckpt_dir`, and `--output_root` still take precedence when provided explicitly.
+
+
 ## External Resources
 
 > [!IMPORTANT]
-> The `pretrained` and `template` folders will be provided from a separate share drive. These directories are required for training and inference.
+> Use the resource files from the latest v1 release so the checkpoints, template meshes, and code stay in sync.
+
+The v1 release is tracked by the upstream [`v1.0.0` tag](https://github.com/MalikTeng/MorphiNetV2/tree/v1.0.0) / [`release/v1.0.0` branch](https://github.com/MalikTeng/MorphiNetV2/tree/release/v1.0.0). Download checkpoint assets from the latest [GitHub Release](https://github.com/MalikTeng/MorphiNetV2/releases/latest), then extract them from the repository root.
+
+```bash
+# From the repository root
+curl -L -o morphinet-pretrained.tar.gz \
+    https://github.com/MalikTeng/MorphiNetV2/releases/latest/download/morphinet-pretrained.tar.gz
+tar -xzf morphinet-pretrained.tar.gz
+rm morphinet-pretrained.tar.gz
+
+# If template/ is missing, restore it from the v1 source archive.
+curl -L -o morphinet-v1.0.0-source.tar.gz \
+    https://github.com/MalikTeng/MorphiNetV2/archive/refs/tags/v1.0.0.tar.gz
+tar -xzf morphinet-v1.0.0-source.tar.gz --strip-components=1 MorphiNetV2-1.0.0/template
+rm morphinet-v1.0.0-source.tar.gz
+```
+
+The checkpoint archive should create `./pretrained/` with:
+
+```
+pretrained/
+├── best_UNet_CT.pth
+├── best_UNet_MR.pth
+├── best_ResNet.pth
+├── best_GSN.pth
+├── best_subdivided_faces_l0.pth
+└── best_subdivided_faces_l1.pth
+```
+
+The template files are included in the v1 source archive and should be present under `./template/`:
+
+```
+template/
+├── faces-control_mesh.txt
+├── template_mesh-lv_myo.obj
+├── template_mesh-myo.obj
+└── verts-control_mesh.txt
+```
+
+The default `config.env` points `MORPHINET_USE_CKPT` to `./pretrained`, and `main.py` uses `./template/template_mesh-myo.obj` as the default template mesh. No extra path changes are needed if these folders are extracted at the repository root.
 
 ## Dataset Preparation
 
 
-MorphiNet uses JSON files to manage dataset splits and file paths. These files are located in the `dataset/` directory.
+MorphiNet uses JSON files to manage dataset splits and file paths. These files are located in the `dataset/` directory. Raw datasets are also expected under `./dataset/` by default, with configurable roots in `config.env`.
 
 ### Structure
 The expected data structure involves:
@@ -57,7 +133,7 @@ The expected data structure involves:
 2.  **Index Files**: JSON files (e.g., `dataset_task20_f0.json`) that map case IDs to their file paths.
 
 ### Configuration
-When running the training script, you must specify the location of your raw data and the corresponding JSON index files:
+When running the training script, use `config.env` for default raw data roots or override them on the CLI:
 - `--ct_data_dir`: Root directory for CT data.
 - `--ct_json_dir`: Path to the CT dataset JSON.
 - `--mr_data_dir`: Root directory for MR data.
@@ -92,7 +168,7 @@ python main.py \
 - `--train_epochs`: Epochs for ResNet training.
 - `--batch_size`: Batch size (default: 1).
 - `--lr`: Learning rate (default: 1e-3).
-- `--use_ckpt`: Path to resume training from a specific checkpoint.
+- `--use_ckpt`: Path to resume training from a specific checkpoint. Defaults to `MORPHINET_USE_CKPT` from `config.env`.
 
 ### Testing / Inference
 
@@ -108,7 +184,7 @@ python main.py \
 **Key Arguments:**
 - `--inference_only`: Flag to enable inference mode.
 - `--test_dataset`: Target dataset (`acdc`, `mmwhs`, `cap`, `scotheart`).
-- `--output_root`: Directory to save exported meshes and results.
+- `--output_root`: Directory to save exported meshes and results. Defaults to `MORPHINET_OUTPUT_ROOT` from `config.env` (`./results`).
 
 ## Codebase Structure
 
@@ -142,8 +218,16 @@ MorphiNet/
 
 ## Citation
 
-If you find this work useful in your research, please cite our paper:
+If you find this work useful in your research, please cite the published IEEE TMI paper:
 
-```
-Deng, Y., Xu, Y., Qian, L., Mauger, C., Nasopoulou, A., Williams, S., Williams, M., Niederer, S., Newby, D., McCulloch, A. and Omens, J., 2024. MorphiNet: A Graph Subdivision Network for Adaptive Bi-ventricle Surface Reconstruction. arXiv preprint arXiv:2412.10985.
+```bibtex
+@article{deng2026morphinet,
+  author = {Deng, Yu and Xu, Yiyang and Qian, Linglong and Mauger, Charlene and Nasopoulou, Anastasia and Williams, Steven and Williams, Michelle and Niederer, Steven and Newby, David and McCulloch, Andrew and Omens, Jeff and Pushprajah, Kuberan and Young, Alistair},
+  title = {MorphiNet: A Graph Subdivision Network for Adaptive Bi-ventricle Surface Reconstruction},
+  journal = {IEEE Transactions on Medical Imaging},
+  year = {2026},
+  pages = {1--1},
+  doi = {10.1109/TMI.2026.3683925},
+  note = {Early Access}
+}
 ```

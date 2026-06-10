@@ -5,6 +5,7 @@ import numpy as np
 import wandb
 from scipy.ndimage import binary_dilation
 from utils.tools import draw_plotly
+from utils.path_config import get_path_default
 from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric, MSEMetric
 from monai.transforms.utils import distance_transform_edt
@@ -974,7 +975,7 @@ class MorphiNetValidator:
         
         # Export directory setup
         dataset_name = getattr(self.orchestrator, 'dataset', 'unknown') or 'unknown'
-        output_root = getattr(self.super_params, 'output_root', '/mnt/data/Experiment/MorphiNet/Result/')
+        output_root = getattr(self.super_params, 'output_root', get_path_default('MORPHINET_OUTPUT_ROOT'))
         export_dir = os.path.join(output_root, dataset_name, 'MorphiNet', 'myo', 'f0')
         os.makedirs(export_dir, exist_ok=True)
         # Ablation directory (intermediate artifacts) - only for CAP/SCOTHEART

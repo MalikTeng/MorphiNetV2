@@ -101,7 +101,7 @@ parameters:
   
   # Data augmentation and preprocessing
   use_ckpt:
-    value: '/mnt/data/Experiment/MorphiNet/Checkpoint/dynamic/ct--myo--f0--2025-08-07-1708/'  # 'n' for train from scratch
+    value: './checkpoints/dynamic/ct--myo--f0--2025-08-07-1708/'  # 'n' for train from scratch
   
   max_samples:
     value: 25

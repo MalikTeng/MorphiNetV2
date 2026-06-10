@@ -13,6 +13,7 @@ import argparse
 import gc
 import torch
 import wandb
+from utils.path_config import get_path_default
 
 wandb.login()
 
@@ -80,13 +81,13 @@ def config():
                        default="./dataset/dataset_task20_f0.json",
                        help="CT dataset JSON file")
     parser.add_argument("--ct_data_dir", type=str, 
-                       default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset020_SCOTHEART",
+                       default=get_path_default("MORPHINET_CT_DATA_DIR"),
                        help="CT data directory")
     parser.add_argument("--mr_json_dir", type=str, 
                        default="./dataset/dataset_task11_f0.json",
                        help="MR dataset JSON file")
     parser.add_argument("--mr_data_dir", type=str, 
-                       default="/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX",
+                       default=get_path_default("MORPHINET_MR_DATA_DIR"),
                        help="MR data directory")
 
     # Model parameters
@@ -110,15 +111,15 @@ def config():
 
     # Checkpoint parameters
     parser.add_argument("--use_ckpt", type=str, 
-                        default="/mnt/data/Experiment/MorphiNet/Checkpoint/best/", 
+                        default=get_path_default("MORPHINET_USE_CKPT"),
                         help="Checkpoint directory to resume from")
-    parser.add_argument("--ckpt_dir", type=str, default="/mnt/data/Experiment/MorphiNet/Checkpoint/", 
+    parser.add_argument("--ckpt_dir", type=str, default=get_path_default("MORPHINET_CKPT_DIR"),
                        help="Directory to save checkpoints")
     parser.add_argument("--run_id", type=str, default="", 
                        help="Run identifier")
 
     # Output root for exported results (meshes, etc.) during testing
-    parser.add_argument("--output_root", type=str, default="/mnt/data/Experiment/MorphiNet/Result/",
+    parser.add_argument("--output_root", type=str, default=get_path_default("MORPHINET_OUTPUT_ROOT"),
                        help="Root directory for MorphiNet testing outputs")
 
     # Rasterizer backend removed - now uses Trimesh exclusively for robust voxelization

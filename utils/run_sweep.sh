@@ -7,6 +7,18 @@
 set -e  # Exit on error
 
 # Configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+if [[ -f "$PROJECT_ROOT/conda.env" ]]; then
+    set -a
+    source "$PROJECT_ROOT/conda.env"
+    set +a
+fi
+
+CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-morphinet}"
+
 SWEEP_CONFIG="sweep_config.yaml"
 PROJECT_NAME="MorphiNet-Sweep"
 AGENT_COUNT=5  # Number of sequential runs (parameter combinations to try)
@@ -47,11 +59,11 @@ check_prerequisites() {
     print_header "Checking Prerequisites"
     
     # Check if conda environment is activated
-    if [[ "$CONDA_DEFAULT_ENV" != "morphinet" ]]; then
+    if [[ "$CONDA_DEFAULT_ENV" != "$CONDA_ENV_NAME" ]]; then
         print_warning "MorphiNet conda environment not activated"
-        print_status "Activating morphinet environment..."
-        source /mnt/data/Experiment/miniconda3/etc/profile.d/conda.sh
-        conda activate morphinet
+        print_status "Activating $CONDA_ENV_NAME environment..."
+        source "$CONDA_ROOT/etc/profile.d/conda.sh"
+        conda activate "$CONDA_ENV_NAME"
     fi
     
     # Check if WandB is installed

@@ -26,6 +26,7 @@ from einops import rearrange
 
 # Import new metrics and export functionality
 from utils.xlsx_exporter import export_ablation_study_to_xlsx
+from utils.path_config import get_dataset_registry, get_path_default
 
 # Import refactored testing modules
 from utils.testing.basic_testing import (
@@ -49,28 +50,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 # Dataset registry mapping dataset identifiers to metadata
-DATASET_REGISTRY = {
-    "acdc": {
-        "modality": "mr",
-        "json": "./dataset/dataset_task21_f0.json",
-        "data_dir": "/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset021_ACDC",
-    },
-    "mmwhs": {
-        "modality": "ct",
-        "json": "./dataset/dataset_task22_f0.json",
-        "data_dir": "/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset022_MMWHS_CT",
-    },
-    "cap": {
-        "modality": "mr", 
-        "json": "./dataset/dataset_task11_f0.json",
-        "data_dir": "/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset011_CAP_SAX",
-    },
-    "scotheart": {
-        "modality": "ct",
-        "json": "./dataset/dataset_task20_f0.json",
-        "data_dir": "/mnt/data/Experiment/Data/MorphiNet-MR_CT/Dataset020_SCOTHEART",
-    },
-}
+DATASET_REGISTRY = get_dataset_registry()
 
 
 class MorphiNetTester:
@@ -117,7 +97,7 @@ class MorphiNetTester:
 
         dataset_name = getattr(self.orchestrator, 'dataset', 'unknown') or 'unknown'
         dataset_export_name = {'scotheart': 'sct'}.get(dataset_name, dataset_name)  # Map internal dataset identifiers to historical export folder names
-        output_root = getattr(self.super_params, 'output_root', '/mnt/data/Experiment/MorphiNet/Result/')
+        output_root = getattr(self.super_params, 'output_root', get_path_default('MORPHINET_OUTPUT_ROOT'))
         export_dir = os.path.join(output_root, dataset_export_name, 'MorphiNet', 'myo', 'f0')
         os.makedirs(export_dir, exist_ok=True)
         export_ablation = dataset_name in {"cap", "scotheart"}
