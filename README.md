@@ -122,10 +122,25 @@ template/
 
 The default `config.env` points `MORPHINET_USE_CKPT` to `./pretrained`, and `main.py` uses `./template/template_mesh-myo.obj` as the default template mesh. No extra path changes are needed if these folders are extracted at the repository root.
 
+### Orientation anchor (for the alignment helper)
+
+The orientation alignment helper [`tools/align_orientation.ipynb`](tools/align_orientation.ipynb) needs an **anchor** image/label, published as a separate release ([**v1.01**](https://github.com/MalikTeng/MorphiNetV2/releases/tag/v1.01)). Download both files into `./template/`:
+
+```bash
+# From the repository root
+curl -L -o template/acdc_anchor_image.nii.gz \
+    https://github.com/MalikTeng/MorphiNetV2/releases/download/v1.01/acdc_anchor_image.nii.gz
+curl -L -o template/acdc_anchor_label.nii.gz \
+    https://github.com/MalikTeng/MorphiNetV2/releases/download/v1.01/acdc_anchor_label.nii.gz
+```
+
 ## Dataset Preparation
 
 
 MorphiNet uses JSON files to manage dataset splits and file paths. These files are located in the `dataset/` directory. Raw datasets are also expected under `./dataset/` by default, with configurable roots in `config.env`.
+
+> [!IMPORTANT]
+> **Correct data orientation is required.** MorphiNet deforms the template mesh with a gradient field derived from the segmentation, so every dataset must be in the orientation the pipeline expects — a mis-oriented dataset silently yields wrong reconstructions. Before training or inference on a new dataset, use the interactive helper [`tools/align_orientation.ipynb`](tools/align_orientation.ipynb) to align your segmentation to the provided anchor and write the corrected NIfTI files into the MorphiNet layout (see [`tools/README.md`](tools/README.md)).
 
 ### Structure
 The expected data structure involves:

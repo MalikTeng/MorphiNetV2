@@ -26,6 +26,19 @@
 # Evaluation
 !/evaluation
 
+# Template assets: meshes are tracked; anchor NIfTIs come from the v1.01 release, not the repo
+!/template/
+/template/*
+!/template/*.obj
+!/template/*.txt
+
+# Orientation helper (tools/)
+!/tools/
+/tools/*
+!/tools/*.ipynb
+!/tools/*.py
+!/tools/*.md
+
 # README and others
 !figure/
 !README.md
