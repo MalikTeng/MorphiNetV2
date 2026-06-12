@@ -80,22 +80,16 @@ CLI flags such as `--ct_data_dir`, `--mr_data_dir`, `--use_ckpt`, `--ckpt_dir`, 
 ## External Resources
 
 > [!IMPORTANT]
-> Use the resource files from the latest v1 release so the checkpoints, template meshes, and code stay in sync.
+> Use the resource files from the latest release (**v1.0.1**) so the checkpoints, template meshes, orientation anchor, and code stay in sync.
 
-The v1 release is tracked by the upstream [`v1.0.0` tag](https://github.com/MalikTeng/MorphiNetV2/tree/v1.0.0) / [`release/v1.0.0` branch](https://github.com/MalikTeng/MorphiNetV2/tree/release/v1.0.0). Download checkpoint assets from the latest [GitHub Release](https://github.com/MalikTeng/MorphiNetV2/releases/latest), then extract them from the repository root.
+Download the assets from the latest [GitHub Release](https://github.com/MalikTeng/MorphiNetV2/releases/latest) and extract them from the repository root:
 
 ```bash
-# From the repository root
-curl -L -o morphinet-pretrained.tar.gz \
-    https://github.com/MalikTeng/MorphiNetV2/releases/latest/download/morphinet-pretrained.tar.gz
-tar -xzf morphinet-pretrained.tar.gz
-rm morphinet-pretrained.tar.gz
-
-# If template/ is missing, restore it from the v1 source archive.
-curl -L -o morphinet-v1.0.0-source.tar.gz \
-    https://github.com/MalikTeng/MorphiNetV2/archive/refs/tags/v1.0.0.tar.gz
-tar -xzf morphinet-v1.0.0-source.tar.gz --strip-components=1 MorphiNetV2-1.0.0/template
-rm morphinet-v1.0.0-source.tar.gz
+# From the repository root — pretrained weights and template meshes
+for a in morphinet-pretrained.tar.gz morphinet-template.tar.gz; do
+    curl -L -o "$a" "https://github.com/MalikTeng/MorphiNetV2/releases/latest/download/$a"
+    tar -xzf "$a" && rm "$a"
+done
 ```
 
 The checkpoint archive should create `./pretrained/` with:
@@ -110,7 +104,7 @@ pretrained/
 └── best_subdivided_faces_l1.pth
 ```
 
-The template files are included in the v1 source archive and should be present under `./template/`:
+The template archive should create `./template/` with:
 
 ```
 template/
@@ -124,14 +118,14 @@ The default `config.env` points `MORPHINET_USE_CKPT` to `./pretrained`, and `mai
 
 ### Orientation anchor (for the alignment helper)
 
-The orientation alignment helper [`tools/align_orientation.ipynb`](tools/align_orientation.ipynb) needs an **anchor** image/label, published as a separate release ([**v1.01**](https://github.com/MalikTeng/MorphiNetV2/releases/tag/v1.01)). Download both files into `./template/`:
+The orientation alignment helper [`tools/align_orientation.ipynb`](tools/align_orientation.ipynb) needs an **anchor** image/label, also bundled in the latest release. Download both files into `./template/`:
 
 ```bash
 # From the repository root
 curl -L -o template/acdc_anchor_image.nii.gz \
-    https://github.com/MalikTeng/MorphiNetV2/releases/download/v1.01/acdc_anchor_image.nii.gz
+    https://github.com/MalikTeng/MorphiNetV2/releases/latest/download/acdc_anchor_image.nii.gz
 curl -L -o template/acdc_anchor_label.nii.gz \
-    https://github.com/MalikTeng/MorphiNetV2/releases/download/v1.01/acdc_anchor_label.nii.gz
+    https://github.com/MalikTeng/MorphiNetV2/releases/latest/download/acdc_anchor_label.nii.gz
 ```
 
 ## Dataset Preparation
