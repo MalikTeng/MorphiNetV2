@@ -11,6 +11,8 @@
 !/utils/path_config.py
 !/utils/process_nrrd_slices.py
 !/utils/update_dataset_json.py
+!/utils/mesh_metrics.py
+!/utils/xlsx_exporter.py
 !/utils/testing/
 !/utils/testing/*.py
 
